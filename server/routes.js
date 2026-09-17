@@ -5,6 +5,7 @@ import { ROOT, DATA_DIR } from './config.js';
 import store from './store-facade.js';
 import { sseHandler, broadcast } from './sse.js';
 import { executeTool, TOOL_CN } from './tools.js';
+import { FLOWS } from './prompts.js';
 
 const PUBLIC = path.join(ROOT, 'public');
 const MIME = {
@@ -115,7 +116,8 @@ async function api(req, res, url, body) {
       occasion: url.searchParams.get('occasion') || undefined,
       lifespan: url.searchParams.get('lifespan') || undefined,
     });
-    ok(res, { memories: list.map((x) => ({ ...x, contactName: store.getContact(x.contactId)?.name || '' })) });
+    const contactNames = new Map(store.listContacts({ includeArchived: true }).map((c) => [c.id, c.name]));
+    ok(res, { memories: list.map((x) => ({ ...x, contactName: contactNames.get(x.contactId) || '' })) });
     return true;
   }
   if (p === '/api/memories' && m('POST')) {
@@ -133,6 +135,16 @@ async function api(req, res, url, body) {
       for (const mem of confirmed) broadcast('memory.changed', { action: 'confirmed', memory: mem });
       emitStats();
       ok(res, { confirmed, failed });
+    } catch (e) { failFrom(res, e); }
+    return true;
+  }
+  // 取代：旧事实被新事实修正（旧条标 supersededBy，退出检索与时间线，保留溯源）
+  if (p === '/api/memories/supersede' && m('POST')) {
+    try {
+      const mem = store.supersedeMemory(String(body.id ?? ''), String(body.keepId ?? ''));
+      broadcast('memory.changed', { action: 'superseded', memory: mem });
+      emitStats();
+      ok(res, { memory: mem });
     } catch (e) { failFrom(res, e); }
     return true;
   }
@@ -242,18 +254,10 @@ async function api(req, res, url, body) {
       const budget = String(body.budget ?? '').trim();
       const occasion = String(body.occasion ?? '').trim();
       const plan = body.planId ? store.listPlans().find((p) => p.id === String(body.planId)) : null;
-      const prompt = [
-        `请为「${c.name}」准备礼物建议（relation: ${c.relation}${occasion ? `，场合：${occasion}` : ''}）。`,
-        budget ? `预算：${budget}。` : '预算：不限。',
-        plan ? `用户已有一个礼物计划：想法「${plan.idea}」${plan.budget ? `，预算 ${plan.budget}` : ''}${plan.productName ? `，已看中商品：${plan.productName}` : ''}。请在此基础上优化，或给出替代方案。` : '',
-        evidences.length ? '已确认的记忆依据（必须围绕这些，不得编造记忆里没有的偏好）：' : '该联系人还没有可用记忆依据，请明确说明这一点，只给通用保守建议：',
-        ...lines,
-        '要求：',
-        '1. 给出 2-3 个具体礼物方案，每个方案一句话理由，理由必须引用上面的记忆点；',
-        '2. 禁忌/不喜好类记忆涉及的品类必须明确排除并说明原因；',
-        '3. 曾送过的礼物不要重复建议；',
-        '4. 每个方案用 gift_plan_add 创建为计划卡（contactId=' + c.id + '，idea=方案名与理由，budget，status=idea），创建完列出你建了哪几个计划。',
-      ].filter(Boolean).join('\n');
+      // prompt 由提示词注册表组装（纪律唯一出处）
+      const prompt = FLOWS.giftSuggest.build({
+        contactName: c.name, relation: c.relation, occasion, budget, plan, lines,
+      });
       ok(res, { prompt, evidenceCount: evidences.length });
     } catch (e) { failFrom(res, e); }
     return true;
@@ -262,17 +266,36 @@ async function api(req, res, url, body) {
   // ---------- 素材 ----------
   if (p === '/api/materials' && m('GET')) {
     const status = url.searchParams.get('status') || undefined;
-    const materials = store.listMaterials({ status }).slice(0, 30).map((mt) => ({
+    const mts = store.listMaterials({ status }).slice(0, 30);
+    // 批量化：一次取全量记忆/联系人，按 sourceId/contactId 分组映射——
+    // 不再逐素材各调 materialMemories/getContact（原实现 30 素材 ≈ 60+ 次 spawn）
+    const allMemories = store.listMemories({});
+    const memBySource = new Map();
+    for (const mem of allMemories) {
+      if (!mem.sourceId) continue;
+      if (!memBySource.has(mem.sourceId)) memBySource.set(mem.sourceId, []);
+      memBySource.get(mem.sourceId).push(mem);
+    }
+    const contactName = new Map(store.listContacts({ includeArchived: true }).map((c) => [c.id, c.name]));
+    const materials = mts.map((mt) => ({
       id: mt.id,
       status: store.materialStatus(mt),
       contactId: mt.contactId,
-      contactName: mt.contactId ? store.getContact(mt.contactId)?.name || '' : '',
+      contactName: contactName.get(mt.contactId) || '',
       occasion: mt.occasion || '',
       excerpt: mt.excerpt,
       capturedAt: mt.capturedAt,
-      extracted: store.materialMemories(mt).map((mem) => ({ id: mem.id, type: mem.type, content: mem.content, status: mem.status, importance: mem.importance })),
+      extracted: (memBySource.get(mt.id) || []).map((mem) => ({ id: mem.id, type: mem.type, content: mem.content, status: mem.status, importance: mem.importance })),
     }));
     ok(res, { materials });
+    return true;
+  }
+  // 复制整理指令：后端从提示词注册表拼装（前端不再手写模板，防漂移）
+  if (parts[1] === 'materials' && parts[2] && parts[3] === 'organize-prompt' && m('GET')) {
+    const toolsUrl = url.pathname.includes('/api/dsh-relationship/workbench')
+      ? `${url.origin}/api/dsh-relationship/workbench/api/tools`
+      : `${url.origin}/api/tools`;
+    ok(res, { prompt: FLOWS.materialOrganize.build(parts[2], toolsUrl) });
     return true;
   }
   if (p === '/api/materials' && m('POST')) {

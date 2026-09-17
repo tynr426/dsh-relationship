@@ -252,7 +252,8 @@
                  <button class="ghost-btn" data-action="cancel-edit" data-id="${esc(m.id)}">取消</button>`
               : `<button class="primary-btn" data-action="confirm" data-id="${esc(m.id)}">确认</button>
                  <button class="ghost-btn" data-action="edit" data-id="${esc(m.id)}">编辑</button>
-                 <button class="ghost-btn" data-action="reject" data-id="${esc(m.id)}">驳回</button>`}
+                 <button class="ghost-btn" data-action="reject" data-id="${esc(m.id)}">驳回</button>
+                 <button class="ghost-btn" data-action="supersede-ask" data-id="${esc(m.id)}">被取代</button>`}
           </div>
         </article>`;
       }).join('');
@@ -510,24 +511,12 @@
         // 一键交给宿主 AI：嵌入模式直连 DSH 会话；独立模式提示走复制指令
         await organizeViaHost(id);
       } else if (action === 'copy-material') {
-        // 生成自足的整理提示词：不依赖 preset / 插件播报也能让任意 AI 会话完成整理
-        const toolsUrl = location.pathname.startsWith('/api/dsh-relationship/workbench')
-          ? `${location.origin}/api/dsh-relationship/workbench/api/tools`
-          : `${location.origin}/api/tools`;
-        const cmd = [
-          `请帮我整理关系记忆工作台的素材 ${id}。`,
-          `工具入口：POST ${toolsUrl}，body 为 {"name":"工具名","args":{...}}。`,
-          `步骤：`,
-          `1. 用 material_get 读素材全文（id=${id}）；`,
-          `2. 涉及的人先 contact_search 查重，查不到的先问我，确认后再 contact_add；`,
-          `3. 把每个独立事实拆成一条待确认记忆：类型从 preference/dislike/taboo/event/gift/promise/interaction/attribute 里选；过敏等健康信息记 taboo 且 importance=3；婚礼、住院等重大事件 importance=3；`,
-          `4. 时间分两个维度：date 记事实时间（事情何时发生/约定何时，如"明天生日"按聊天日期推算）；saidAt 记话语时间（这句话何时说的，聊天有时间戳就按戳规范化为 YYYY-MM-DD HH:mm）；往来类记忆 date 用对话发生日；都只保留原文精度，不要编造；`,
-          `5. 三层标注：interaction/gift/promise 类标 direction（user_to_contact=我对TA / contact_to_user=TA对我 / both）；临时事务（请假、约饭等近期一次性安排）lifespan=short，其余留 long；能判断场景时给 occasion（teacher_day/birthday/thank_you 等小写标签，可自由定义）；`,
-          `6. 每条用 memory_batch_add 登记并带 sourceId="${id}"；与已有记忆重复或冲突的先告诉我，不要直接重复登记；`,
-          `7. 登记完列出拆出的记忆清单，并提示我回工作台确认。`,
-        ].join('\n');
-        try { await navigator.clipboard.writeText(cmd); toast('整理提示词已复制，粘贴到 DSH 会话即可'); }
-        catch { toast('复制失败，请手动复制素材 ID：' + id, true); }
+        // 整理指令由后端从提示词注册表（server/prompts.js）拼装，前端不再手写模板
+        try {
+          const { prompt } = await api(`/api/materials/${id}/organize-prompt`);
+          await navigator.clipboard.writeText(prompt);
+          toast('整理提示词已复制，粘贴到 DSH 会话即可');
+        } catch (e) { toast(e.message || '复制失败，请手动复制素材 ID：' + id, true); }
       } else if (action === 'delete-material') {
         if (!window.confirm('删除这段素材？已拆出的记忆不受影响。')) return;
         await api(`/api/materials/${id}`, { method: 'DELETE' });
@@ -573,6 +562,14 @@
         await api(`/api/memories/${id}/reject`, { method: 'POST', body: {} });
         toast('已驳回（可在需要时恢复）');
         await refresh();
+      } else if (action === 'supersede-ask') {
+        const keepId = window.prompt('这条记忆被哪条已确认记忆取代了？粘贴那条记忆的 ID（m_ 开头，时间线里可查）：');
+        if (!keepId) return;
+        try {
+          await api('/api/memories/supersede', { method: 'POST', body: { id, keepId: keepId.trim() } });
+          toast('已标记被取代（不再出现在时间线与检索）');
+          await refresh();
+        } catch (e) { toast(e.message || '取代失败', true); }
       } else if (action === 'edit-memory') {
         state.editingMemoryId = id;
         render();

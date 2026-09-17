@@ -80,18 +80,21 @@ impl Plan {
         Ok(row.get_string("id"))
     }
 
-    /// 列出计划（contact/status 过滤），按更新时间倒序
+    /// 列出计划（contact/status 过滤），按更新时间倒序。
+    /// 同 memory.list：r#where 整体替换，多条件拼同一个 Vec 一次传入。
     pub fn list(&self) -> tube::Result<Vec<Json>> {
         let val = self.value();
-        let mut q = self.select();
+        let mut conds: Vec<deck::Condition> = Vec::new();
         let contact = val.get_string("contactId");
         if !contact.is_empty() {
-            q = q.r#where(conds![{ "contact_id" = contact.as_str() }]);
+            conds.extend(conds![{ "contact_id" = contact.as_str() }]);
         }
         let status = val.get_string("status");
         if !status.is_empty() {
-            q = q.r#where(conds![{ "status" = status.as_str() }]);
+            conds.extend(conds![{ "status" = status.as_str() }]);
         }
+        let q = self.select();
+        let q = if conds.is_empty() { q } else { q.r#where(conds) };
         Ok(q.order_str("updated_at DESC").query_values()?.iter().map(plan_json).collect())
     }
 

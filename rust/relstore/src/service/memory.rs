@@ -79,38 +79,42 @@ impl Memory {
         Ok(row.get_string("id"))
     }
 
-    /// 列表 + 过滤（contact/status/type/direction/occasion/lifespan/q 关键字）
+    /// 列表 + 过滤（contact/status/type/direction/occasion/lifespan/q 关键字）。
+    /// 注意：deck 的 r#where 是「整体替换」条件集，多条件必须拼进同一个 Vec 一次性传入，
+    /// 链式多次调用只会保留最后一个条件（切换联系人时间线串台的根因）。
     pub fn list(&self) -> tube::Result<Vec<Json>> {
         let val = self.value();
-        let mut q = self.select();
+        let mut conds: Vec<deck::Condition> = Vec::new();
         let contact = val.get_string("contactId");
         if !contact.is_empty() {
-            q = q.r#where(conds![{ "contact_id" = contact.as_str() }]);
+            conds.extend(conds![{ "contact_id" = contact.as_str() }]);
         }
         let status = val.get_string("status");
         if !status.is_empty() {
-            q = q.r#where(conds![{ "status" = status.as_str() }]);
+            conds.extend(conds![{ "status" = status.as_str() }]);
         }
         let r#type = val.get_string("type");
         if !r#type.is_empty() {
-            q = q.r#where(conds![{ "type" = r#type.as_str() }]);
+            conds.extend(conds![{ "mem_type" = r#type.as_str() }]);
         }
         let direction = val.get_string("direction");
         if !direction.is_empty() {
-            q = q.r#where(conds![{ "direction" = direction.as_str() }]);
+            conds.extend(conds![{ "direction" = direction.as_str() }]);
         }
         let occasion = val.get_string("occasion");
         if !occasion.is_empty() {
-            q = q.r#where(conds![{ "occasion" = occasion.as_str() }]);
+            conds.extend(conds![{ "occasion" = occasion.as_str() }]);
         }
         let lifespan = val.get_string("lifespan");
         if !lifespan.is_empty() {
-            q = q.r#where(conds![{ "lifespan" = lifespan.as_str() }]);
+            conds.extend(conds![{ "lifespan" = lifespan.as_str() }]);
         }
         let q_kw = val.get_string("q");
         if !q_kw.is_empty() {
-            q = q.r#where(conds![{ "content" % format!("%{q_kw}%") }]);
+            conds.extend(conds![{ "content", like, format!("%{q_kw}%") }]);
         }
+        let q = self.select();
+        let q = if conds.is_empty() { q } else { q.r#where(conds) };
         Ok(q.order_str("created_at DESC").query_values()?.iter().map(memory_json).collect())
     }
 

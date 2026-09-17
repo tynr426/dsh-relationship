@@ -11,7 +11,6 @@ export const TOOL_CN = {
   contact_update: '更新联系人',
   memory_add: '登记待确认记忆',
   memory_batch_add: '批量登记待确认记忆',
-  memory_confirm: '确认记忆入库',
   memory_reject: '驳回记忆',
   memory_update: '编辑已确认记忆',
   memory_search: '检索长期记忆',
@@ -53,11 +52,6 @@ export const TOOL_DEFS = [
         occasion: { type: 'string', description: '场景标签，如 teacher_day' },
         importance: { type: 'integer' }, sourceId: { type: 'string', description: '来源素材 ID' } },
         required: ['contactId', 'type', 'content'] } } }, additionalProperties: false } } },
-  { type: 'function', function: { name: 'memory_confirm', description: '用户明确确认后调用：把待确认记忆转为长期记忆，可同时按用户口述修正内容', parameters: { type: 'object', required: ['ids'], properties: {
-      ids: { type: 'array', items: { type: 'string' } },
-      edits: { type: 'object', additionalProperties: { type: 'object', properties: {
-        type: { type: 'string', enum: MEMORY_TYPES }, content: { type: 'string' }, date: { type: 'string' }, importance: { type: 'integer' }, saidAt: { type: 'string' }, direction: { type: 'string' }, lifespan: { type: 'string' }, occasion: { type: 'string' } } },
-        description: '按记忆 ID 给出修正内容' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'memory_reject', description: '用户驳回候选记忆时调用', parameters: { type: 'object', required: ['id'], properties: {
       id: { type: 'string' }, reason: { type: 'string' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'memory_update', description: '编辑已确认的长期记忆（内容/类型/日期/重要度/话语时间/方向/寿命/场景）', parameters: { type: 'object', required: ['id'], properties: {
@@ -155,10 +149,9 @@ async function run(name, args) {
     }
 
     case 'memory_confirm': {
-      const { confirmed, failed } = store.confirmMemories(args.ids, args.edits);
-      for (const m of confirmed) changedMemory(m, 'confirmed');
-      changedStats();
-      return { ok: confirmed.length > 0, confirmed: confirmed.map(memoryOut), failed };
+      // P0 安全闭环：确认是人拍板动作，只允许工作台界面（/api/memories/confirm）执行。
+      // AI 通道一律拒绝，防止「AI 写入后自我确认」绕过待确认队列。
+      return { ok: false, status: 403, error: '确认属于用户的拍板动作，AI 不能代办。请引导用户回工作台待确认队列点击确认；如需修正内容请用 memory_update（仅限已确认记忆）' };
     }
 
     case 'memory_reject': {
@@ -219,15 +212,25 @@ async function run(name, args) {
     }
 
     case 'material_list': {
+      // 批量化：一次取全量记忆做 sourceId 计数，避免逐素材 materialMemories 放大
+      const sourceCount = new Map();
+      for (const mem of store.listMemories({})) {
+        if (mem.sourceId) sourceCount.set(mem.sourceId, (sourceCount.get(mem.sourceId) || 0) + 1);
+      }
+      const names = new Map(store.listContacts({ includeArchived: true }).map((c) => [c.id, c.name]));
       const list = store.listMaterials({ status: args.status || undefined }).slice(0, 30)
-        .map((mt) => ({ id: mt.id, status: store.materialStatus(mt), contactId: mt.contactId, contactName: mt.contactId ? store.getContact(mt.contactId)?.name || '' : '', occasion: mt.occasion || '', excerpt: mt.excerpt, capturedAt: mt.capturedAt, extractedCount: mt.extractedMemoryIds.length }));
+        .map((mt) => ({ id: mt.id, status: store.materialStatus(mt), contactId: mt.contactId, contactName: names.get(mt.contactId) || '', occasion: mt.occasion || '', excerpt: mt.excerpt, capturedAt: mt.capturedAt, extractedCount: mt.extractedMemoryIds?.length ?? sourceCount.get(mt.id) ?? 0 }));
       return { ok: true, materials: list };
     }
 
     case 'material_get': {
       const mt = store.getMaterial(String(args.id ?? ''));
       if (!mt) return { ok: false, error: '素材不存在', status: 404 };
-      return { ok: true, material: { ...mt, status: store.materialStatus(mt), contactName: mt.contactId ? store.getContact(mt.contactId)?.name || '' : '', extracted: store.materialMemories(mt).map(memoryOut) } };
+      // today = 相对时间锚点：「明天/下周三」等一律以它推算（每次调用新鲜计算，不落盘）
+      const now = new Date();
+      const week = ['日', '一', '二', '三', '四', '五', '六'][now.getDay()];
+      const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}（星期${week}）`;
+      return { ok: true, today, material: { ...mt, status: store.materialStatus(mt), contactName: mt.contactId ? store.getContact(mt.contactId)?.name || '' : '', extracted: store.materialMemories(mt).map(memoryOut) } };
     }
 
     default:

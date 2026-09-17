@@ -108,8 +108,8 @@ SELECT c."id" AS "contact_id", c."name",
        (SELECT MAX(COALESCE(NULLIF(REPLACE("date",'每年-','0000-'),''), substr("created_at",1,10)))
           FROM "memories" WHERE "contact_id" = c."id" AND "mem_type" = 'gift' AND "status" = 'confirmed'
             AND "direction" IN ('user_to_contact','both'))          AS "last_given"
-FROM "contacts" c
-WHERE (SELECT MAX(COALESCE(NULLIF(REPLACE("date",'每年-','0000-'),''), substr("created_at",1,10)))
+FROM "contacts" c WHERE c."archived" = 0
+  AND (SELECT MAX(COALESCE(NULLIF(REPLACE("date",'每年-','0000-'),''), substr("created_at",1,10)))
           FROM "memories" WHERE "contact_id" = c."id" AND "mem_type" = 'gift' AND "status" = 'confirmed'
             AND "direction" IN ('contact_to_user','both')) IS NOT NULL
   AND ((SELECT MAX(COALESCE(NULLIF(REPLACE("date",'每年-','0000-'),''), substr("created_at",1,10)))

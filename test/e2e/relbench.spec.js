@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import fs from 'node:fs';
 
 test.describe('关系记忆工作台', () => {
   test('首页可访问并显示核心区块', async ({ page }) => {
@@ -203,5 +204,38 @@ test.describe('关系记忆工作台', () => {
     await expect(page.locator('#toast')).toContainText('已入台账');
     await expect(page.locator('#ledger-given')).toContainText('送出礼物：英雄钢笔经典款');
     await expect(page.locator('#ledger-given')).toContainText('¥168');
+  });
+
+  test('嵌入 DSH（sandbox iframe 同 lib/client.js）删除联系人可用', async ({ page, request, baseURL }) => {
+    // 回归：lib/client.js 的 iframe sandbox 若缺 allow-modals，浏览器会吞掉
+    // window.confirm()（返回 false 且无弹窗），删除联系人等操作静默失效。
+    // sandbox 属性实时提取自 lib/client.js，改回去这里就会红。
+    const clientSrc = fs.readFileSync('lib/client.js', 'utf8');
+    const sandboxAttr = /setAttribute\('sandbox',\s*'([^']+)'\)/.exec(clientSrc)?.[1];
+    expect(sandboxAttr, 'lib/client.js 中应能提取到 iframe sandbox 属性').toBeTruthy();
+
+    const created = await request.post('/api/contacts', { data: { name: 'E2E 嵌入删除' } });
+    const contactId = (await created.json()).contact.id;
+
+    await page.route(`${baseURL}/__embedded-host.html`, (route) => route.fulfill({
+      contentType: 'text/html',
+      body: `<!doctype html><html><body style="margin:0">
+        <iframe src="/" sandbox="${sandboxAttr}" style="width:100vw;height:100vh;border:0"></iframe>
+      </body></html>`,
+    }));
+    let dialogSeen = false;
+    page.on('dialog', (dialog) => { dialogSeen = true; dialog.accept().catch(() => {}); });
+
+    await page.goto(`${baseURL}/__embedded-host.html`);
+    const frame = page.frames().find((f) => f.url() === `${baseURL}/`);
+    expect(frame).toBeTruthy();
+    await frame.locator('.nav-item[data-view="contacts"]').click();
+    await frame.locator('.contact-row', { hasText: 'E2E 嵌入删除' }).click();
+    await frame.locator('.detail-actions').getByRole('button', { name: '删除' }).click();
+    await expect(frame.locator('#toast')).toContainText('已删除联系人');
+
+    expect(dialogSeen, '确认弹窗应真实出现（sandbox 缺 allow-modals 时会被静默吞掉）').toBe(true);
+    const contacts = await (await request.get('/api/contacts')).json();
+    expect(contacts.contacts.some((c) => c.id === contactId)).toBe(false);
   });
 });

@@ -118,6 +118,27 @@ test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
   assert.equal(store.listMemories({ contactId: c.id }).length, 0);
 });
 
+(hasBinary ? test : test.skip)('多条件过滤不串台（联系人+状态/关键字，回归 r#where 覆盖问题）', () => {
+  const [c1, c2] = store.listContacts().slice(0, 2);
+  const m1 = store.createMemory({ contactId: c1.id, type: 'event', content: '过滤回归-甲专属事件', author: 'user' });
+  const m2 = store.createMemory({ contactId: c2.id, type: 'event', content: '过滤回归-乙专属事件', author: 'user' });
+  try {
+    // 联系人+状态+关键字三条件：各人只命中自己那条
+    // （旧版 deck r#where 链式调用是「整体替换」，多条件只剩最后一个 → 切联系人时间线串台）
+    const l1 = store.listMemories({ contactId: c1.id, status: 'confirmed', q: '过滤回归' });
+    const l2 = store.listMemories({ contactId: c2.id, status: 'confirmed', q: '过滤回归' });
+    assert.equal(l1.length, 1, `c1 应恰好命中 1 条，实际 ${l1.length}`);
+    assert.equal(l1[0].contactId, c1.id);
+    assert.equal(l2.length, 1, `c2 应恰好命中 1 条，实际 ${l2.length}`);
+    assert.equal(l2[0].contactId, c2.id);
+    // 类型过滤走 mem_type 物理列
+    assert.ok(store.listMemories({ type: 'event', q: '过滤回归' }).length >= 2);
+  } finally {
+    store.deleteMemory(m1.id);
+    store.deleteMemory(m2.id);
+  }
+});
+
 (hasBinary ? test : test.skip)('overview/counts/timeline 形状', () => {
   const o = store.overview();
   assert.ok(['contacts', 'memories', 'confirmed', 'pending', 'rejected'].every((k) => k in o.counts));

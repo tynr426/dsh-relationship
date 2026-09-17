@@ -35,21 +35,26 @@ test('contact_add rejects duplicates until confirmed via contact_search', async 
   assert.equal(none.matches.length, 0);
 });
 
-test('memory_add always creates pending and memory_confirm transitions', async () => {
+test('memory_add always creates pending; confirm is UI-only (AI channel refuses)', async () => {
   const c = store.createContact({ name: '工具小李' });
   const added = await tools.executeTool('memory_add', { contactId: c.id, type: 'event', content: '十月办婚礼', date: '2026-10-__' });
   assert.equal(added.ok, true);
   assert.equal(added.memory.status, 'pending');
   assert.ok(added.提示.includes('待确认'));
 
-  const early = await tools.executeTool('memory_confirm', { ids: [added.memory.id] });
-  assert.equal(early.ok, true);
-  assert.equal(early.confirmed[0].status, 'confirmed');
+  // P0 安全闭环：AI 通道的 memory_confirm 一律拒绝（确认只能走工作台 /api/memories/confirm）
+  const refused = await tools.executeTool('memory_confirm', { ids: [added.memory.id] });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.status, 403);
+  assert.match(refused.error, /拍板/);
 
+  // 确认经由界面路径（store 层，等价 /api/memories/confirm）正常生效
+  const [confirmed] = store.confirmMemories([added.memory.id]).confirmed;
+  assert.equal(confirmed.status, 'confirmed');
+
+  // UI 确认后 AI 通道重复确认仍被拒绝
   const again = await tools.executeTool('memory_confirm', { ids: [added.memory.id] });
   assert.equal(again.ok, false);
-  assert.equal(again.confirmed.length, 0);
-  assert.match(again.failed[0].error, /只有待确认记忆/);
 });
 
 test('memory_batch_add validates per entry and reports failures', async () => {
@@ -118,6 +123,8 @@ test('material tools: save → list raw → get → batch extract with sourceId 
   assert.equal(full.ok, true);
   assert.match(full.material.text, /女儿十月办婚礼/);
   assert.equal(full.material.status, 'raw');
+  // P0 相对时间锚点：material_get 响应必须带当天日期
+  assert.match(full.today, /^\d{4}-\d{2}-\d{2}（星期.）$/);
 
   const missing = await tools.executeTool('material_get', { id: 'mt_none' });
   assert.equal(missing.ok, false);
@@ -138,8 +145,8 @@ test('material tools: save → list raw → get → batch extract with sourceId 
   assert.equal(batch.created[2].saidAt, '');
   assert.ok(batch.提示.includes('待确认'));
 
-  // V4：direction/occasion 标注 + memory_search 过滤
-  await tools.executeTool('memory_confirm', { ids: [batch.created[0].id] });
+  // V4：direction/occasion 标注 + memory_search 过滤（确认走 store 层 = UI 路径）
+  store.confirmMemories([batch.created[0].id]);
   await tools.executeTool('memory_update', { id: batch.created[0].id, direction: 'user_to_contact', occasion: 'Wedding' });
   assert.equal((await tools.executeTool('memory_search', { contactId: c.id, direction: 'user_to_contact' })).memories.length, 1);
   assert.equal((await tools.executeTool('memory_search', { contactId: c.id, occasion: 'wedding' })).memories.length, 1);
