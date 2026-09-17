@@ -1,0 +1,548 @@
+// 存储实现（Rust/SQLite）：与 store.js 完全同构的 API 面，业务校验在 Node 侧
+// （与 JSON 版同一套文案），数据读写经 relstore-bridge 落到 SQLite（0600）。
+// 启用方式：REL_STORE=rust（经 store-facade.js 选择本文件）。
+// 说明：素材状态与回礼视图由 CLI 派生（v_material_status / v_gift_reciprocity），
+// extractedMemoryIds 不再物理存储，按记忆 sourceId 反查。
+import {
+  relstoreAvailable,
+  run as cli,
+} from './relstore-bridge.js';
+import { httpError, now } from './store-shared.js';
+
+export const RELATIONS = ['family', 'friend', 'colleague', 'client', 'partner', 'other'];
+export const MEMORY_TYPES = ['preference', 'dislike', 'taboo', 'event', 'gift', 'promise', 'interaction', 'attribute'];
+export const MEMORY_STATUSES = ['pending', 'confirmed', 'rejected'];
+export const DIRECTIONS = ['', 'user_to_contact', 'contact_to_user', 'both'];
+export const LIFESPANS = ['long', 'short'];
+export const PLAN_STATUSES = ['idea', 'decided', 'sent'];
+export const FUZZY_DATE_RE = /^(?:\d{4}-\d{2}(?:-\d{2})?|\d{4}-\d{2}-__|每年-\d{2}-\d{2}|\d{2}-\d{2})$/;
+
+const FIXED_HOLIDAYS = [
+  { occasion: 'teacher_day', label: '教师节', md: '09-10', match: (c) => c.tags.includes('老师') || c.tags.includes('教师') || c.name.includes('老师') || c.name.includes('教师') },
+  { occasion: 'women_day', label: '妇女节', md: '03-08', match: () => false },
+  { occasion: 'new_year', label: '元旦', md: '01-01', match: () => false },
+  { occasion: 'christmas', label: '圣诞节', md: '12-25', match: () => false },
+];
+
+export function uid(prefix = '') {
+  return (prefix ? `${prefix}_` : '') + Math.random().toString(16).slice(2, 10);
+}
+
+export { httpError, now };
+
+// ---------- 校验与归一化（与 JSON 版逐字对齐） ----------
+export function normalizeOccasion(v) {
+  const s = String(v ?? '').trim().toLowerCase().replace(/\s+/g, '_');
+  if (!s) return '';
+  if (s.length > 40) throw httpError(400, 'occasion 不能超过 40 字');
+  return s;
+}
+
+export function normalizeDirection(v) {
+  const s = String(v ?? '');
+  if (!DIRECTIONS.includes(s)) throw httpError(400, `direction 必须是：${DIRECTIONS.filter(Boolean).join(' / ')} 或留空`);
+  return s;
+}
+
+export function normalizeLifespan(v) {
+  const s = String(v ?? 'long');
+  if (!LIFESPANS.includes(s)) throw httpError(400, `lifespan 必须是：${LIFESPANS.join(' / ')}`);
+  return s;
+}
+
+export function normalizeSaidAt(v) {
+  const s = String(v ?? '').trim();
+  if (!s) return '';
+  const m = /^(\S+) (\d{2}):(\d{2})$/.exec(s);
+  const datePart = m ? m[1] : s;
+  const d = normalizeFuzzyDate(datePart, '话语时间');
+  if (!m) return d;
+  const hh = Number(m[2]);
+  const mm = Number(m[3]);
+  if (hh > 23 || mm > 59) throw httpError(400, '话语时间范围无效：小时 00-23、分钟 00-59');
+  return `${d} ${m[2]}:${m[3]}`;
+}
+
+function normalizeFuzzyDate(v, label) {
+  const s = String(v ?? '').trim();
+  if (!s) return '';
+  if (!FUZZY_DATE_RE.test(s)) throw httpError(400, `${label}格式无效：支持 YYYY-MM-DD / YYYY-MM / 2026-10-__ / 每年-MM-DD / MM-DD`);
+  const nums = s.split('-').filter((x) => /^\d{2,4}$/.test(x));
+  if (nums.length === 2 && /^\d{4}$/.test(nums[0])) {
+    const month = Number(nums[1]);
+    if (!(month >= 1 && month <= 12)) throw httpError(400, `${label}范围无效：月份 01-12`);
+    return s;
+  }
+  const month = Number(nums[nums.length - 2]);
+  const day = Number(nums[nums.length - 1]);
+  if (!(month >= 1 && month <= 12) || !(day >= 1 && day <= 31)) {
+    throw httpError(400, `${label}范围无效：月份 01-12、日期 01-31`);
+  }
+  return s;
+}
+
+function cleanTags(tags) {
+  if (tags == null) return [];
+  if (!Array.isArray(tags)) throw httpError(400, 'tags 必须是字符串数组');
+  const cleaned = tags.map((t) => String(t).trim()).filter(Boolean);
+  if (cleaned.length > 20) throw httpError(400, '标签最多 20 个');
+  for (const t of cleaned) if (t.length > 20) throw httpError(400, '单个标签不能超过 20 字');
+  return [...new Set(cleaned)];
+}
+
+// ---------- 联系人 ----------
+export function listContacts({ includeArchived = true } = {}) {
+  const { contacts } = cli(['contact', 'list', ...(includeArchived ? ['--archived'] : [])]);
+  return contacts;
+}
+
+export function getContact(id) {
+  return listContacts({ includeArchived: true }).find((c) => c.id === id) || null;
+}
+
+export function createContact(fields = {}) {
+  const name = String(fields.name ?? '').trim();
+  if (!name) throw httpError(400, '联系人姓名不能为空');
+  if (name.length > 40) throw httpError(400, '姓名不能超过 40 字');
+  const relation = fields.relation == null || fields.relation === '' ? 'other' : String(fields.relation);
+  if (!RELATIONS.includes(relation)) throw httpError(400, `relation 必须是：${RELATIONS.join(' / ')}`);
+  const { contact } = cli(['contact', 'add',
+    '--name', name,
+    '--relation', relation,
+    '--tags', cleanTags(fields.tags).join(','),
+    '--birthday', normalizeFuzzyDate(fields.birthday ?? '', '生日'),
+    '--notes', String(fields.notes ?? '').slice(0, 500),
+  ]);
+  return contact;
+}
+
+export function updateContact(id, patch = {}) {
+  const args = ['contact', 'set', String(id)];
+  if ('name' in patch) {
+    const name = String(patch.name ?? '').trim();
+    if (!name) throw httpError(400, '联系人姓名不能为空');
+    if (name.length > 40) throw httpError(400, '姓名不能超过 40 字');
+    args.push('--name', name);
+  }
+  if ('relation' in patch) {
+    const relation = String(patch.relation ?? '');
+    if (!RELATIONS.includes(relation)) throw httpError(400, `relation 必须是：${RELATIONS.join(' / ')}`);
+    args.push('--relation', relation);
+  }
+  if ('tags' in patch) args.push('--tags', cleanTags(patch.tags).join(','));
+  if ('birthday' in patch) args.push('--birthday', normalizeFuzzyDate(patch.birthday, '生日'));
+  if ('notes' in patch) args.push('--notes', String(patch.notes ?? '').slice(0, 500));
+  if ('archived' in patch) args.push('--archived', patch.archived ? 'true' : 'false');
+  const { contact } = cli(args);
+  return contact;
+}
+
+export function deleteContact(id) {
+  const { removed } = cli(['contact', 'remove', String(id)]);
+  return { contact: removed, removedMemories: removed.removedMemories };
+}
+
+// ---------- 记忆 ----------
+export function listMemories({ contactId, status, type, q, direction, occasion, lifespan } = {}) {
+  const args = ['memory', 'list'];
+  if (contactId) args.push('--contact', String(contactId));
+  if (status) args.push('--status', String(status));
+  if (type) args.push('--type', String(type));
+  if (direction) args.push('--dir', String(direction));
+  if (occasion) args.push('--occasion', String(occasion));
+  if (lifespan) args.push('--lifespan', String(lifespan));
+  if (q) args.push('--q', String(q));
+  const { memories } = cli(args);
+  return memories;
+}
+
+export function getMemory(id) {
+  return listMemories().find((m) => m.id === id) || null;
+}
+
+function validateMemoryFields({ type, content, date, importance, saidAt, direction, lifespan, occasion }) {
+  if (!MEMORY_TYPES.includes(type)) throw httpError(400, `type 必须是：${MEMORY_TYPES.join(' / ')}`);
+  const text = String(content ?? '').trim();
+  if (!text) throw httpError(400, '记忆内容不能为空');
+  if (text.length > 500) throw httpError(400, '记忆内容不能超过 500 字');
+  const d = normalizeFuzzyDate(date, '日期');
+  let imp = importance == null || importance === '' ? 2 : Number(importance);
+  if (!Number.isInteger(imp) || imp < 1 || imp > 3) throw httpError(400, 'importance 必须是 1–3 的整数');
+  const said = normalizeSaidAt(saidAt);
+  return {
+    type, content: text, date: d, importance: imp, saidAt: said,
+    direction: normalizeDirection(direction),
+    lifespan: normalizeLifespan(lifespan),
+    occasion: normalizeOccasion(occasion),
+  };
+}
+
+function memoryAddArgs(v, author, extra = {}) {
+  const args = ['memory', 'add',
+    '--contact', String(extra.contactId),
+    '--type', v.type,
+    '--content', v.content,
+    '--date', v.date,
+    '--saidAt', v.saidAt,
+    '--dir', v.direction,
+    '--lifespan', v.lifespan,
+    '--occasion', v.occasion,
+    '--importance', String(v.importance),
+    '--author', author,
+  ];
+  if (extra.sourceId) args.push('--sourceId', String(extra.sourceId));
+  return args;
+}
+
+export function createMemory(fields = {}) {
+  const contactId = String(fields.contactId ?? '');
+  if (!getContact(contactId)) throw httpError(404, '联系人不存在：请先 contact_search 定位或先建联系人');
+  const v = validateMemoryFields(fields);
+  const author = fields.author === 'user' ? 'user' : 'ai';
+  // 场景继承：从素材提取且未显式给 occasion 时，继承素材的场合标签
+  const sourceId = typeof fields.sourceId === 'string' ? fields.sourceId : '';
+  if (!v.occasion && sourceId) {
+    const mt = getMaterial(sourceId);
+    if (mt?.occasion) v.occasion = normalizeOccasion(mt.occasion);
+  }
+  const { memory } = cli(memoryAddArgs(v, author, { contactId, sourceId }));
+  return memory;
+}
+
+export function createMemories(entries = [], author = 'ai') {
+  if (!Array.isArray(entries)) throw httpError(400, 'entries 必须是数组');
+  if (!entries.length) throw httpError(400, 'entries 不能为空');
+  if (entries.length > 50) throw httpError(400, '单批最多 50 条');
+  const created = [];
+  const failed = [];
+  for (const [index, entry] of entries.entries()) {
+    try {
+      created.push(createMemory({ ...entry, author }));
+    } catch (e) {
+      failed.push({ index, error: e?.message || String(e) });
+    }
+  }
+  return { created, failed };
+}
+
+function applyMemoryEditArgs(id, edits = {}) {
+  const m = getMemory(id);
+  if (!m) throw httpError(404, '记忆不存在');
+  const v = validateMemoryFields({
+    type: edits.type ?? m.type,
+    content: edits.content ?? m.content,
+    date: edits.date ?? m.date,
+    importance: edits.importance ?? m.importance,
+    saidAt: edits.saidAt ?? m.saidAt,
+    direction: edits.direction ?? m.direction,
+    lifespan: edits.lifespan ?? m.lifespan,
+    occasion: edits.occasion ?? m.occasion,
+  });
+  return ['memory', 'set', String(id),
+    '--type', v.type,
+    '--content', v.content,
+    '--date', v.date,
+    '--saidAt', v.saidAt,
+    '--dir', v.direction,
+    '--lifespan', v.lifespan,
+    '--occasion', v.occasion,
+    '--importance', String(v.importance),
+  ];
+}
+
+export function confirmMemories(ids = [], edits = {}) {
+  if (!Array.isArray(ids) || !ids.length) throw httpError(400, 'ids 不能为空');
+  const confirmed = [];
+  const failed = [];
+  for (const id of ids) {
+    const m = getMemory(String(id));
+    if (!m) { failed.push({ id, error: '记忆不存在' }); continue; }
+    if (m.status !== 'pending') { failed.push({ id, error: `状态为 ${m.status}，只有待确认记忆可以确认` }); continue; }
+    try {
+      const args = applyMemoryEditArgs(String(id), edits && typeof edits === 'object' ? edits[m.id] : undefined);
+      args.push('--status', 'confirmed');
+      const { memory } = cli(args);
+      confirmed.push(memory);
+    } catch (e) {
+      failed.push({ id, error: e?.message || String(e) });
+    }
+  }
+  return { confirmed, failed };
+}
+
+export function rejectMemory(id, reason = '') {
+  const m = getMemory(String(id));
+  if (!m) throw httpError(404, '记忆不存在');
+  if (m.status !== 'pending') throw httpError(400, `状态为 ${m.status}，只有待确认记忆可以驳回`);
+  const { memory } = cli(['memory', 'reject', String(id), '--reason', String(reason ?? '').slice(0, 200)]);
+  return memory;
+}
+
+export function restoreMemory(id) {
+  const m = getMemory(String(id));
+  if (!m) throw httpError(404, '记忆不存在');
+  if (m.status !== 'rejected') throw httpError(400, '只有已驳回记忆可以恢复');
+  const { memory } = cli(['memory', 'restore', String(id)]);
+  return memory;
+}
+
+export function updateMemory(id, patch = {}) {
+  const m = getMemory(String(id));
+  if (!m) throw httpError(404, '记忆不存在');
+  if (m.status !== 'confirmed') throw httpError(400, `状态为 ${m.status}，只有已确认记忆可以直接编辑`);
+  const { memory } = cli(applyMemoryEditArgs(String(id), patch));
+  return memory;
+}
+
+export function deleteMemory(id) {
+  const removed = getMemory(String(id));
+  if (!removed) throw httpError(404, '记忆不存在');
+  cli(['memory', 'remove', String(id)]);
+  return removed;
+}
+
+export function supersedeMemory(id, keepId) {
+  const m = getMemory(String(id));
+  const keep = getMemory(String(keepId));
+  if (!m || !keep) throw httpError(404, '记忆不存在');
+  if (m.id === keep.id) throw httpError(400, '不能指向自身');
+  const { memory } = cli(['memory', 'supersede', String(id), '--by', String(keep.id)]);
+  return memory;
+}
+
+// ---------- 时间线 ----------
+export function timeline(contactId) {
+  const c = getContact(contactId);
+  if (!c) throw httpError(404, '联系人不存在');
+  const all = listMemories({ contactId, status: 'confirmed' });
+  const memories = all.filter((m) => (m.lifespan || 'long') !== 'short');
+  const shortItems = all.filter((m) => m.lifespan === 'short');
+  memories.sort((a, b) => timelineKey(b).localeCompare(timelineKey(a)));
+  shortItems.sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''));
+  return { contact: c, memories, shortItems };
+}
+
+function timelineKey(m) {
+  const d = (m.date || '').replace('每年-', '0000-');
+  return d.replace('-__', '-01').padEnd(10, '0') + 'T' + (m.createdAt || '');
+}
+
+// ---------- 礼物计划 ----------
+function validatePlanFields({ occasion, occasionDate, idea, budget, productName, productPrice, productUrl }) {
+  const text = String(idea ?? '').trim();
+  if (!text) throw httpError(400, '礼物想法不能为空');
+  if (text.length > 200) throw httpError(400, '礼物想法不能超过 200 字');
+  const od = String(occasionDate ?? '').trim();
+  if (od && !/^\d{4}-\d{2}-\d{2}$/.test(od)) throw httpError(400, 'occasionDate 必须是 YYYY-MM-DD（这一次的具体日期）');
+  const pn = String(productName ?? '').trim().slice(0, 100);
+  const pp = String(productPrice ?? '').trim().slice(0, 40);
+  const pu = String(productUrl ?? '').trim().slice(0, 500);
+  if (pu && !/^(https?:\/\/|\/\/)/i.test(pu)) throw httpError(400, '商品链接要以 http(s):// 开头');
+  return { occasion: normalizeOccasion(occasion), occasionDate: od, idea: text, budget: String(budget ?? '').trim().slice(0, 40), productName: pn, productPrice: pp, productUrl: pu };
+}
+
+export function createPlan(fields = {}) {
+  const contactId = String(fields.contactId ?? '');
+  if (!getContact(contactId)) throw httpError(404, '联系人不存在');
+  const v = validatePlanFields(fields);
+  const status = PLAN_STATUSES.includes(fields.status) ? fields.status : 'idea';
+  const { plan } = cli(['plan', 'add',
+    '--contact', contactId,
+    '--idea', v.idea,
+    '--occasion', v.occasion,
+    '--date', v.occasionDate,
+    '--budget', v.budget,
+    '--product-name', v.productName,
+    '--product-price', v.productPrice,
+    '--product-url', v.productUrl,
+    '--source', fields.source === 'ai' ? 'ai' : 'user',
+    ...(status !== 'idea' ? ['--status', status] : []),
+  ]);
+  return plan;
+}
+
+export function listPlans({ contactId, status } = {}) {
+  const args = ['plan', 'list'];
+  if (contactId) args.push('--contact', String(contactId));
+  if (status) args.push('--status', String(status));
+  const { plans } = cli(args);
+  return plans;
+}
+
+export function getPlan(id) {
+  return listPlans().find((p) => p.id === id) || null;
+}
+
+export function updatePlan(id, patch = {}) {
+  const p = getPlan(id);
+  if (!p) throw httpError(404, '计划不存在');
+  const args = ['plan', 'set', String(id)];
+  if ('idea' in patch || 'occasion' in patch || 'occasionDate' in patch || 'budget' in patch
+    || 'productName' in patch || 'productPrice' in patch || 'productUrl' in patch) {
+    const v = validatePlanFields({
+      idea: patch.idea ?? p.idea,
+      occasion: patch.occasion ?? p.occasion,
+      occasionDate: patch.occasionDate ?? p.occasionDate,
+      budget: patch.budget ?? p.budget,
+      productName: patch.productName ?? p.productName,
+      productPrice: patch.productPrice ?? p.productPrice,
+      productUrl: patch.productUrl ?? p.productUrl,
+    });
+    args.push('--idea', v.idea, '--occasion', v.occasion, '--date', v.occasionDate, '--budget', v.budget,
+      '--product-name', v.productName, '--product-price', v.productPrice, '--product-url', v.productUrl);
+  }
+  if ('status' in patch) {
+    if (!PLAN_STATUSES.includes(patch.status)) throw httpError(400, 'status 必须是：idea / decided / sent');
+    args.push('--status', patch.status);
+  }
+  const { plan } = cli(args);
+  return plan;
+}
+
+export function deletePlan(id) {
+  const removed = getPlan(id);
+  if (!removed) throw httpError(404, '计划不存在');
+  cli(['plan', 'remove', String(id)]);
+  return removed;
+}
+
+export function markPlanSent(id) {
+  const p = getPlan(id);
+  if (!p) throw httpError(404, '计划不存在');
+  const { plan, memory } = cli(['plan', 'sent', String(id)]);
+  return { plan: plan || p, memory };
+}
+
+// ---------- 礼赠视图 ----------
+export function giftReciprocity() {
+  const { items } = cli(['reciprocity']);
+  return items;
+}
+
+export function giftLedger() {
+  const { given, received } = cli(['ledger']);
+  return { given, received };
+}
+
+export function giftOccasions(days = 30) {
+  const { occasions } = cli(['occasion', '--days', String(days)]);
+  return occasions;
+}
+
+// ---------- 素材 ----------
+export function saveMaterial({ kind = 'text', text = '', contactId = '', occasion = '' } = {}) {
+  const content = String(text ?? '');
+  if (!content.trim()) throw httpError(400, '素材内容不能为空');
+  if (content.length > 200_000) throw httpError(400, '素材过长（上限 20 万字符）');
+  const cid = String(contactId ?? '');
+  if (cid && !getContact(cid)) throw httpError(404, '关联的联系人不存在');
+  const { material } = cli(['material', 'add',
+    '--text', content,
+    '--contact', cid,
+    '--occasion', normalizeOccasion(occasion),
+    ...(kind === 'screenshot' || kind === 'file' ? ['--kind', kind] : []),
+  ]);
+  return material;
+}
+
+export function getMaterial(id) {
+  try {
+    const { material } = cli(['material', 'show', String(id)]);
+    return material || null;
+  } catch {
+    return null;
+  }
+}
+
+export function listMaterials({ status } = {}) {
+  const args = ['material', 'list'];
+  if (status) args.push('--status', String(status));
+  const { materials } = cli(args);
+  return materials;
+}
+
+/** 素材状态按派生计算：拆出过记忆 = processed，否则 raw（CLI 已派生，此处兜底反查）。 */
+export function materialStatus(mt) {
+  if (!mt) return 'raw';
+  if (mt.status) return mt.status;
+  return listMemories({}).some((m) => m.sourceId === mt.id) ? 'processed' : 'raw';
+}
+
+export function materialMemories(mt) {
+  if (!mt) return [];
+  return listMemories({}).filter((m) => m.sourceId === mt.id);
+}
+
+export function linkMaterial(id, memoryId) {
+  const mt = getMaterial(id);
+  if (!mt) throw httpError(404, '素材不存在');
+  if (!getMemory(memoryId)) throw httpError(404, '记忆不存在');
+  const { material } = cli(['material', 'link', String(id), '--memory', String(memoryId)]);
+  return material;
+}
+
+export function deleteMaterial(id) {
+  const removed = getMaterial(id);
+  if (!removed) throw httpError(404, '素材不存在');
+  cli(['material', 'remove', String(id)]);
+  return removed;
+}
+
+// ---------- 首页总览 ----------
+const TYPE_CN = { preference: '喜好', dislike: '不喜好', taboo: '禁忌', event: '事件', gift: '礼物', promise: '承诺', interaction: '往来', attribute: '基础' };
+export function typeCn(t) { return TYPE_CN[t] || t; }
+
+function nextBirthdayDays(birthday) {
+  const match = /^(\d{4})?-(\d{2})-(\d{2})$/.exec(birthday.replace('每年-', '')) || /^(\d{2})-(\d{2})$/.exec(birthday);
+  if (!match) return null;
+  const month = Number(match[match.length - 2]);
+  const day = Number(match[match.length - 1]);
+  if (!(month >= 1 && month <= 12 && day >= 1 && day <= 31)) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  for (const year of [today.getFullYear(), today.getFullYear() + 1]) {
+    const next = new Date(year, month - 1, day);
+    const diff = Math.round((next - today) / 86_400_000);
+    if (diff >= 0 && diff <= 30) return diff;
+  }
+  return null;
+}
+
+export function overview() {
+  const pending = listMemories({ status: 'pending' });
+  const memories = listMemories();
+  const upcoming = listContacts({ includeArchived: false })
+    .map((c) => ({ contactId: c.id, name: c.name, birthday: c.birthday, inDays: nextBirthdayDays(c.birthday) }))
+    .filter((x) => x.inDays !== null)
+    .sort((a, b) => a.inDays - b.inDays)
+    .slice(0, 8);
+  return {
+    counts: {
+      contacts: listContacts({ includeArchived: false }).length,
+      memories: memories.length,
+      confirmed: memories.filter((m) => m.status === 'confirmed').length,
+      pending: pending.length,
+      rejected: memories.filter((m) => m.status === 'rejected').length,
+    },
+    pending,
+    upcoming,
+  };
+}
+
+export function counts() { return overview().counts; }
+
+// ---------- 迁移 / 加载 ----------
+/** JSON → SQLite 一次性迁移（把 data 目录的四个 JSON 导入 rel.db，源文件改名备份）。 */
+export function migrateFromJson(dir) {
+  return cli(['migrate', '--dir', dir, '--force']);
+}
+
+/** facades 兼容：JSON 版用 loadStore 预热内存库；Rust 版初始化建库（幂等）。 */
+export function loadStore() {
+  if (!relstoreAvailable()) return null;
+  cli(['contact', 'list', '--archived']);
+  return true;
+}
+
+/** 兼容：JSON 版 flush 强制落盘；SQLite 每写即落，无需处理。 */
+export function flush() {}

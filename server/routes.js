@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT, DATA_DIR } from './config.js';
-import * as store from './store.js';
+import store from './store-facade.js';
 import { sseHandler, broadcast } from './sse.js';
 import { executeTool, TOOL_CN } from './tools.js';
 

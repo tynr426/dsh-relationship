@@ -1,7 +1,7 @@
 // AI 工具定义与执行器：DSH 原生会话（relationship preset）经 POST /api/tools
 // 调用，或经 REST 端点复用同一校验路径。纪律：AI 写入一律 pending；
 // contact_add 前必须 contact_search（同名即拒绝）；memory_search 只返回已确认记忆。
-import * as store from './store.js';
+import store from './store-facade.js';
 import { RELATIONS, MEMORY_TYPES } from './store.js';
 import { broadcast } from './sse.js';
 

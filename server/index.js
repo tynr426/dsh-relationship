@@ -1,7 +1,7 @@
 // 关系记忆工作台服务端：可嵌入（dsh-relationship 插件）或独立运行（server/cli.js）
 import http from 'node:http';
 import { DATA_DIR } from './config.js';
-import * as store from './store.js';
+import store from './store-facade.js';
 import { handleRequest } from './routes.js';
 
 /**

@@ -25,7 +25,8 @@
     "dev": "node --watch server/cli.js",
     "test:unit": "node scripts/run-unit-tests.js",
     "test:e2e": "playwright test",
-    "test": "npm run test:unit && npm run test:e2e"
+    "test": "npm run test:unit && npm run test:e2e",
+    "build:relstore": "cargo build --release --manifest-path rust/relstore/Cargo.toml && cp rust/relstore/target/release/relstore ~/.openclaw-shared/bin/"
   },
   "engines": {
     "node": ">=18"

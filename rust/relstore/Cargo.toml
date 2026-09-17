@@ -1,0 +1,19 @@
+[package]
+edition = "2024"
+name = "relstore"
+version = "0.1.0"
+publish = false
+description = "关系记忆工作台存储层（SQLite 单文件，0600）——联系人/记忆/素材/礼物计划 CLI，dsh-relationship 生态的唯一写入方"
+
+[dependencies]
+clap = {version = "4", features = ["derive"]}
+chrono = "0.4"
+serde_json = "1.0"
+
+# 统一走 deck kit：sqlite 后端（家法对齐 dsh-qa/rust/dbvault）
+deck = {path = "../../../../rust/kit/deck", default-features = false, features = ["derive", "sqlite"]}
+tube = {path = "../../../../rust/kit/tube"}
+
+[[bin]]
+name = "relstore"
+path = "src/main.rs"
