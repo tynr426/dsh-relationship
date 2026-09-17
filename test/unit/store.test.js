@@ -87,11 +87,32 @@ test('confirm applies edits, reject/restore roundtrip, only pending can transiti
 
 test('supersede and physical delete', () => {
   const c = store.createContact({ name: '小孙' });
+  const c2 = store.createContact({ name: '小孙同学' });
   const keep = store.createMemory({ contactId: c.id, type: 'attribute', content: '在杭州工作', author: 'user' });
   const dup = store.createMemory({ contactId: c.id, type: 'attribute', content: '在杭州上班', author: 'user' });
+  const pendingDup = store.createMemory({ contactId: c.id, type: 'attribute', content: '好像在杭州上班' });
   assert.throws(() => store.supersedeMemory(keep.id, keep.id), /不能指向自身/);
+
+  // 校验：不能用 pending 作依据、不能跨联系人、被驳回的记忆无需取代
+  assert.throws(() => store.supersedeMemory(dup.id, pendingDup.id), /必须是已确认记忆/);
+  const foreign = store.createMemory({ contactId: c2.id, type: 'attribute', content: '在苏州工作', author: 'user' });
+  assert.throws(() => store.supersedeMemory(dup.id, foreign.id), /同一联系人/);
+  const rejected = store.createMemory({ contactId: c.id, type: 'attribute', content: '已驳回的记忆' });
+  store.rejectMemory(rejected.id, '测试驳回');
+  assert.throws(() => store.supersedeMemory(rejected.id, keep.id), /无需取代/);
+
   const superseded = store.supersedeMemory(dup.id, keep.id);
   assert.equal(superseded.supersededBy, keep.id);
+  // 依据本身已被取代后不能再用
+  assert.throws(() => store.supersedeMemory(pendingDup.id, dup.id), /已被取代/);
+
+  // 被取代的确认记忆退出时间线；被取代的 pending 退出待确认队列
+  const tl = store.timeline(c.id);
+  assert.equal(tl.memories.some((m) => m.id === dup.id), false);
+  assert.equal(tl.memories.some((m) => m.id === keep.id), true);
+  store.supersedeMemory(pendingDup.id, keep.id);
+  assert.equal(store.overview().pending.some((m) => m.id === pendingDup.id), false);
+
   const removed = store.deleteMemory(dup.id);
   assert.equal(removed.id, dup.id);
   assert.throws(() => store.deleteMemory(dup.id), /记忆不存在/);
@@ -140,7 +161,8 @@ test('overview counts, pending queue and upcoming birthdays', () => {
   assert.equal(typeof ov.counts.contacts, 'number');
   assert.ok(Array.isArray(ov.pending));
   assert.ok(Array.isArray(ov.upcoming));
-  assert.equal(store.overview().pending.length, store.listMemories({ status: 'pending' }).length);
+  // 队列只收未被取代的 pending（被取代的退出队列，见 supersede 用例）
+  assert.equal(store.overview().pending.length, store.listMemories({ status: 'pending' }).filter((m) => !m.supersededBy).length);
 });
 
 test('materials save/link and persistence across reload', async () => {

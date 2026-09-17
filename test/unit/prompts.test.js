@@ -11,7 +11,7 @@ import { DISCIPLINE, FLOWS, announcementBody, presetBody, toolCatalog } from '..
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 test('纪律片段注册表：关键主题一条不缺', () => {
-  const mustHave = ['onePerFact', 'pendingOnly', 'confirmHumanOnly', 'searchFirst', 'sceneFirst', 'dedupe', 'behaviorOnly', 'verbatim', 'dualTime', 'dateAnchor', 'direction', 'lifespan', 'occasion', 'conflict', 'recallFirst', 'recallAvoidRepeat', 'giftRules', 'privacy'];
+  const mustHave = ['onePerFact', 'pendingOnly', 'confirmHumanOnly', 'searchFirst', 'sceneFirst', 'dedupe', 'behaviorOnly', 'verbatim', 'quote', 'dualTime', 'dateAnchor', 'direction', 'lifespan', 'occasion', 'conflict', 'recallFirst', 'recallAvoidRepeat', 'giftRules', 'privacy'];
   for (const key of mustHave) {
     assert.ok(DISCIPLINE[key], `DISCIPLINE.${key} 缺失`);
     assert.ok(DISCIPLINE[key].length >= 20, `DISCIPLINE.${key} 内容过短`);
@@ -48,6 +48,7 @@ test('出口③整理指令（FLOWS.materialOrganize）：8 步流程 + 工具�
   assert.ok(cmd.includes('today'), '含相对时间锚点说明');
   assert.ok(cmd.includes('memory_search'), '含查重步骤');
   assert.ok(cmd.includes('sourceId="mt_demo"'), '含溯源要求');
+  assert.ok(cmd.includes('sourceQuote'), '含原话摘录要求（提取闸门）');
   assert.ok(cmd.includes('回工作台确认'), '含人工确认引导');
   // 流程步骤声明与片段一致
   assert.deepEqual(FLOWS.materialOrganize.steps, ['loadMaterial', 'multiPerson', 'sceneFirst', 'dedupe', 'extract', 'report']);

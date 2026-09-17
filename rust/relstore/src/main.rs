@@ -125,11 +125,12 @@ fn run_memory(cmd: MemoryCmd) -> tube::Result<()> {
             emit_or_print(json, &format!("共 {} 条记忆", data.len()), json!({ "ok": true, "memories": data }));
             Ok(())
         }
-        MemoryCmd::Add { contact, type_, content, date, said_at, direction, lifespan, occasion, importance, source_id, author, json } => {
+        MemoryCmd::Add { contact, type_, content, date, said_at, direction, lifespan, occasion, importance, source_id, source_quote, author, json } => {
             let payload = json!({
                 "contactId": contact, "type": type_, "content": content, "date": date,
                 "saidAt": said_at, "direction": direction, "lifespan": lifespan,
-                "occasion": occasion, "importance": importance, "sourceId": source_id, "author": author,
+                "occasion": occasion, "importance": importance, "sourceId": source_id,
+                "sourceQuote": source_quote, "author": author,
             });
             let m = Memory::new(Value::from(payload)).add()?;
             emit_or_print(json, "✅ 记忆已登记", json!({ "ok": true, "memory": m }));
@@ -430,6 +431,8 @@ enum MemoryCmd {
         importance: i64,
         #[arg(long, alias = "sourceId", default_value = "")]
         source_id: String,
+        #[arg(long, alias = "sourceQuote", default_value = "")]
+        source_quote: String,
         #[arg(long, default_value = "ai")]
         author: String,
         #[arg(long, default_value_t = false)]

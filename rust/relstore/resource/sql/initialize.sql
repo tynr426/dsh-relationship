@@ -49,6 +49,7 @@ CREATE TABLE "memories" (
   "lifespan" TEXT(8) NOT NULL DEFAULT 'long',
   "occasion" TEXT(48) DEFAULT '',
   "source_id" TEXT(40) DEFAULT '',
+  "source_quote" TEXT(200) DEFAULT '',
   "author" TEXT(8) NOT NULL DEFAULT 'ai',
   "status" TEXT(12) NOT NULL DEFAULT 'pending',
   "reason" TEXT(512) DEFAULT '',

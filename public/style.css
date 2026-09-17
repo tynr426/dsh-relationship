@@ -112,6 +112,10 @@ input, select { font: inherit; color: inherit; }
 .badge.date { background: var(--warn-weak); color: var(--warn); }
 .empty { padding: 24px; border-radius: var(--radius); border: 1px dashed var(--border); color: var(--label-2); text-align: center; }
 .edit-area { width: 100%; margin-top: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; resize: vertical; min-height: 56px; }
+.source-quote { margin: 2px 0 6px; padding: 5px 10px; border-left: 3px solid var(--accent-weak); border-radius: 4px; background: var(--bg-base); color: var(--label-2); font-size: 12px; overflow-wrap: anywhere; }
+.edit-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; margin-top: 8px; }
+.edit-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--label-2); }
+.edit-grid select, .edit-grid input { padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-panel); color: var(--label); font-size: 13px; }
 
 /* ---------- 首页两栏 ---------- */
 .home-two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }

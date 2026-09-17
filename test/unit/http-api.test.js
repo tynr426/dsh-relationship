@@ -82,7 +82,7 @@ test('manual memory POST is confirmed, tool memory_add is pending, confirm via R
 test('reject and restore roundtrip via REST', async () => {
   const contacts = (await (await fetch(`${base}/api/contacts`)).json()).contacts;
   const contactId = contacts.find((c) => c.name === 'API 小李').id;
-  const toolRes = await fetch(`${base}/api/tools`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'memory_add', args: { contactId, type: 'gift', content: '想收周边' } }) });
+  const toolRes = await fetch(`${base}/api/tools`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'memory_add', args: { contactId, type: 'gift', content: '想收周边', direction: 'contact_to_user' } }) });
   const { memory } = await toolRes.json();
 
   const rejected = await (await fetch(`${base}/api/memories/${memory.id}/reject`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reason: '暂不记' }) })).json();
@@ -100,7 +100,7 @@ test('materials API: paste → list → extract via tool → batch confirm', asy
   const invalid = await fetch(`${base}/api/materials`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: ' ' }) });
   assert.equal(invalid.status, 400);
 
-  const saved = await (await fetch(`${base}/api/materials`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: '小李提到十月婚礼和学潜水的事', contactId }) })).json();
+  const saved = await (await fetch(`${base}/api/materials`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: '2026-09-11 20:03 小李提到十月婚礼，说自己在学潜水', contactId }) })).json();
   assert.ok(saved.material.id);
   const materialId = saved.material.id;
   assert.equal(saved.material.contactId, contactId);
@@ -110,8 +110,8 @@ test('materials API: paste → list → extract via tool → batch confirm', asy
   assert.equal(rawList.find((mt) => mt.id === materialId).contactName, 'API 小李');
 
   const extract = await fetch(`${base}/api/tools`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'memory_batch_add', args: { entries: [
-    { contactId, type: 'event', content: '十月婚礼', sourceId: materialId, saidAt: '2026-09-11 20:03', direction: 'user_to_contact', occasion: 'Wedding' },
-    { contactId, type: 'preference', content: '在学潜水', sourceId: materialId },
+    { contactId, type: 'event', content: '十月办婚礼', sourceId: materialId, sourceQuote: '十月婚礼', saidAt: '2026-09-11 20:03', direction: 'user_to_contact', occasion: 'Wedding' },
+    { contactId, type: 'preference', content: '在学潜水', sourceId: materialId, sourceQuote: '在学潜水', saidAt: '2026-09-11 20:03' },
   ] } }) });
   assert.equal(extract.status, 200);
   const created = (await extract.json()).created;
@@ -119,7 +119,8 @@ test('materials API: paste → list → extract via tool → batch confirm', asy
   assert.equal(created[0].saidAt, '2026-09-11 20:03');
   assert.equal(created[0].direction, 'user_to_contact');
   assert.equal(created[0].occasion, 'wedding');
-  assert.equal(created[1].saidAt, '');
+  assert.equal(created[0].sourceQuote, '十月婚礼');
+  assert.equal(created[1].saidAt, '2026-09-11 20:03');
 
   // V4：memories 列表支持 direction/occasion/lifespan 过滤
   const filtered = await (await fetch(`${base}/api/memories?direction=user_to_contact&occasion=wedding`)).json();

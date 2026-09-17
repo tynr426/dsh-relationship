@@ -228,12 +228,28 @@
       queueEl.innerHTML = toolbar + queue.map((m) => {
         const contact = state.contacts.find((x) => x.id === m.contactId);
         const editing = state.editingPendingId === m.id;
+        const typeOptions = TYPE_ORDER.map((t) => `<option value="${t}"${m.type === t ? ' selected' : ''}>${TYPE_CN[t]}</option>`).join('');
+        const dirOptions = [['', '无（自身属性）'], ['user_to_contact', '我对TA'], ['contact_to_user', 'TA对我'], ['both', '双向']]
+          .map(([v, label]) => `<option value="${v}"${(m.direction || '') === v ? ' selected' : ''}>${label}</option>`).join('');
         return `
         <article class="pending-card" data-id="${esc(m.id)}">
           <div class="pending-main">
-            <p class="pending-content">${editing
-              ? `<textarea class="edit-area" data-role="pending-edit">${esc(m.content)}</textarea>`
-              : esc(m.content)}</p>
+            ${editing
+              ? `<textarea class="edit-area" data-role="pending-edit">${esc(m.content)}</textarea>
+                 <div class="edit-grid">
+                   <label>类型<select data-role="edit-type">${typeOptions}</select></label>
+                   <label>方向<select data-role="edit-direction">${dirOptions}</select></label>
+                   <label>寿命<select data-role="edit-lifespan">
+                     <option value="long"${m.lifespan !== 'short' ? ' selected' : ''}>长期</option>
+                     <option value="short"${m.lifespan === 'short' ? ' selected' : ''}>临时</option>
+                   </select></label>
+                   <label>重要度<select data-role="edit-importance">${[1, 2, 3].map((n) => `<option value="${n}"${(m.importance || 2) === n ? ' selected' : ''}>${n}${n === 3 ? '（关键）' : ''}</option>`).join('')}</select></label>
+                   <label>事实时间<input data-role="edit-date" value="${esc(m.date || '')}" placeholder="YYYY-MM-DD / 每年-MM-DD"></label>
+                   <label>话语时间<input data-role="edit-saidAt" value="${esc(m.saidAt || '')}" placeholder="YYYY-MM-DD HH:mm"></label>
+                   <label>场景<input data-role="edit-occasion" value="${esc(m.occasion || '')}" placeholder="teacher_day / birthday …"></label>
+                 </div>`
+              : `<p class="pending-content">${esc(m.content)}</p>
+                 ${m.sourceQuote ? `<blockquote class="source-quote">原话：${esc(m.sourceQuote)}</blockquote>` : ''}`}
             <div class="pending-meta">
               <span class="badge type">${TYPE_CN[m.type] || esc(m.type)}</span>
               <span class="badge">${esc(contact?.name || '未知联系人')}</span>
@@ -554,7 +570,19 @@
         const card = actionBtn.closest('.pending-card');
         const content = $('[data-role="pending-edit"]', card).value.trim();
         if (!content) return toast('内容不能为空', true);
-        await api('/api/memories/confirm', { method: 'POST', body: { ids: [id], edits: { [id]: { content } } } });
+        // 全字段编辑：确认时一并修正类型/方向/寿命/重要度/两个时间/场景
+        const edits = {
+          content,
+          type: $('[data-role="edit-type"]', card).value,
+          direction: $('[data-role="edit-direction"]', card).value,
+          lifespan: $('[data-role="edit-lifespan"]', card).value,
+          importance: Number($('[data-role="edit-importance"]', card).value),
+          date: $('[data-role="edit-date"]', card).value.trim(),
+          saidAt: $('[data-role="edit-saidAt"]', card).value.trim(),
+          occasion: $('[data-role="edit-occasion"]', card).value.trim(),
+        };
+        const r = await api('/api/memories/confirm', { method: 'POST', body: { ids: [id], edits: { [id]: edits } } });
+        if (r.failed?.length) { toast(`保存失败：${r.failed[0].error}`, true); return; }
         state.editingPendingId = null;
         toast('已保存并确认');
         await refresh();

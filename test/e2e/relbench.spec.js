@@ -62,7 +62,7 @@ test.describe('关系记忆工作台', () => {
     await card.getByRole('button', { name: '保存并确认' }).click();
     await expect(page.locator('#toast')).toContainText('已保存并确认');
 
-    const tool2 = await request.post('/api/tools', { data: { name: 'memory_add', args: { contactId, type: 'gift', content: '想要游戏机' } } });
+    const tool2 = await request.post('/api/tools', { data: { name: 'memory_add', args: { contactId, type: 'gift', content: '想要游戏机', direction: 'contact_to_user' } } });
     const memoryId2 = (await tool2.json()).memory.id;
     await page.locator(`.pending-card[data-id="${memoryId2}"]`).getByRole('button', { name: '驳回' }).click();
     await expect(page.locator('#toast')).toContainText('已驳回');
@@ -116,7 +116,7 @@ test.describe('关系记忆工作台', () => {
     await page.locator('.mtab[data-mtab="smart"]').click();
     await expect(page.locator('#form-smart')).toBeVisible();
     await page.locator('#qmt-contact').selectOption({ label: 'E2E 素材小李' });
-    await page.locator('#qmt-text').fill('今天和小李吃饭，他说女儿十月办婚礼，还在学潜水，对花生过敏。上次的茶叶他很喜欢。');
+    await page.locator('#qmt-text').fill('2026-09-11 20:30 今天和小李吃饭，他说女儿十月办婚礼，还在学潜水，对花生过敏。上次的茶叶他很喜欢。');
     await page.locator('#qmt-ok').click();
     await expect(page.locator('#toast')).toContainText('素材已保存');
 
@@ -126,19 +126,21 @@ test.describe('关系记忆工作台', () => {
     await expect(card).toContainText('待 AI 整理');
     await expect(card).toContainText('E2E 素材小李');
 
-    // 模拟 AI 整理：从素材卡拿 ID，经工具批量拆条（sourceId 溯源）
+    // 模拟 AI 整理：从素材卡拿 ID，经工具批量拆条（sourceId 溯源 + sourceQuote 原话摘录过闸门）
     const materials = await (await request.get('/api/materials?status=raw')).json();
     const material = materials.materials.find((mt) => mt.contactName === 'E2E 素材小李');
     expect(material).toBeTruthy();
     const extract = await request.post('/api/tools', { data: { name: 'memory_batch_add', args: { entries: [
-      { contactId: material.contactId, type: 'event', content: '女儿十月办婚礼', sourceId: material.id },
-      { contactId: material.contactId, type: 'taboo', content: '对花生过敏', importance: 3, sourceId: material.id },
+      { contactId: material.contactId, type: 'event', content: '女儿十月办婚礼', sourceId: material.id, sourceQuote: '他说女儿十月办婚礼', saidAt: '2026-09-11 20:30' },
+      { contactId: material.contactId, type: 'taboo', content: '对花生过敏', importance: 3, sourceId: material.id, sourceQuote: '对花生过敏', saidAt: '2026-09-11 20:30' },
     ] } } });
     expect(extract.ok()).toBeTruthy();
     const createdIds = (await extract.json()).created.map((m) => m.id);
 
     // SSE 刷新后素材卡显示已拆出，一键确认这两条
     await expect(card).toContainText('已拆出 2 条');
+    // 待确认卡展示原话摘录（提取闸门溯源）
+    await expect(page.locator(`.pending-card[data-id="${createdIds[0]}"]`)).toContainText('原话：他说女儿十月办婚礼');
     await card.getByRole('button', { name: '确认这 2 条' }).click();
     await expect(page.locator('#toast')).toContainText('已确认 2 条素材记忆');
 
@@ -237,5 +239,50 @@ test.describe('关系记忆工作台', () => {
     expect(dialogSeen, '确认弹窗应真实出现（sandbox 缺 allow-modals 时会被静默吞掉）').toBe(true);
     const contacts = await (await request.get('/api/contacts')).json();
     expect(contacts.contacts.some((c) => c.id === contactId)).toBe(false);
+  });
+
+  test('取代：pending 卡「被取代」后退出队列，confirmed 记忆被取代后退出时间线', async ({ page, request }) => {
+    const created = await request.post('/api/contacts', { data: { name: 'E2E 取代' } });
+    expect(created.ok()).toBeTruthy();
+    const contactId = (await created.json()).contact.id;
+
+    // keep：REST 手动录入即 confirmed（旧事实）
+    const keepRes = await request.post('/api/memories', { data: { contactId, type: 'attribute', content: '在杭州工作' } });
+    expect(keepRes.ok()).toBeTruthy();
+    const keepId = (await keepRes.json()).memory.id;
+
+    // pending 卡：AI 重复登记的近似事实，走界面上的「被取代」
+    const tool = await request.post('/api/tools', { data: { name: 'memory_add', args: { contactId, type: 'attribute', content: '好像在杭州上班' } } });
+    expect(tool.ok()).toBeTruthy();
+    const pendingId = (await tool.json()).memory.id;
+
+    await page.goto('/');
+    const card = page.locator(`.pending-card[data-id="${pendingId}"]`);
+    await expect(card).toContainText('好像在杭州上班');
+    page.once('dialog', (dialog) => dialog.accept(keepId));
+    await card.getByRole('button', { name: '被取代' }).click();
+    await expect(page.locator('#toast')).toContainText('已标记被取代');
+    // 点完即从待确认队列消失（toast 与队列行为一致）
+    await expect(page.locator(`.pending-card[data-id="${pendingId}"]`)).toHaveCount(0);
+
+    // 主方向：旧确认记忆被新事实修正（API 取代）→ 退出时间线，新事实可见
+    const newer = await request.post('/api/memories', { data: { contactId, type: 'attribute', content: '已搬到上海工作' } });
+    const newerId = (await newer.json()).memory.id;
+    const sup = await request.post('/api/memories/supersede', { data: { id: keepId, keepId: newerId } });
+    expect(sup.ok()).toBeTruthy();
+
+    await page.goto('/');
+    await page.locator('.nav-item[data-view="contacts"]').click();
+    await page.locator('.contact-row', { hasText: 'E2E 取代' }).click();
+    await expect(page.locator('#contact-detail')).toContainText('已搬到上海工作');
+    await expect(page.locator('.memory-row', { hasText: '在杭州工作' })).toHaveCount(0);
+
+    // 服务端校验：跨联系人取代一律 400
+    const other = await request.post('/api/contacts', { data: { name: 'E2E 取代别家' } });
+    const otherId = (await other.json()).contact.id;
+    const foreign = await request.post('/api/memories', { data: { contactId: otherId, type: 'attribute', content: '别家的事实' } });
+    const foreignId = (await foreign.json()).memory.id;
+    const bad = await request.post('/api/memories/supersede', { data: { id: foreignId, keepId: newerId } });
+    expect(bad.status()).toBe(400);
   });
 });

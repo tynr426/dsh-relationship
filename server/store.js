@@ -267,6 +267,7 @@ export function createMemory(fields = {}) {
   // 场景继承：从素材提取且未显式给 occasion 时，继承素材的场合标签
   let occasion = v.occasion;
   const sourceId = typeof fields.sourceId === 'string' ? fields.sourceId : '';
+  const sourceQuote = typeof fields.sourceQuote === 'string' ? fields.sourceQuote.trim().slice(0, 200) : '';
   if (!occasion && sourceId) {
     const mt = getMaterial(sourceId);
     if (mt?.occasion) occasion = mt.occasion;
@@ -283,6 +284,7 @@ export function createMemory(fields = {}) {
     lifespan: v.lifespan,
     occasion,
     sourceId,
+    sourceQuote,
     author,
     status: author === 'user' ? 'confirmed' : 'pending',
     reason: '',
@@ -409,6 +411,12 @@ export function supersedeMemory(id, keepId) {
   const keep = getMemory(String(keepId));
   if (!m || !keep) throw httpError(404, '记忆不存在');
   if (m.id === keep.id) throw httpError(400, '不能指向自身');
+  // 校验：同联系人；依据必须是未被取代的已确认记忆；被取代方只能是待确认/已确认
+  // （UI 文案承诺「已确认记忆取代」，服务端必须同样强制——否则 toast 与时间线行为互相矛盾）
+  if (m.contactId !== keep.contactId) throw httpError(400, '只能在同一联系人的记忆之间取代');
+  if (keep.status !== 'confirmed') throw httpError(400, `取代依据（keepId）必须是已确认记忆，当前为 ${keep.status}`);
+  if (keep.supersededBy) throw httpError(400, '取代依据本身已被取代，不能再作为依据');
+  if (m.status !== 'pending' && m.status !== 'confirmed') throw httpError(400, `状态为 ${m.status} 的记忆无需取代`);
   m.supersededBy = keep.id;
   m.updatedAt = now();
   persist();
@@ -417,10 +425,11 @@ export function supersedeMemory(id, keepId) {
 
 // ---------- 时间线 ----------
 // lifespan=short 的临时事项不进时间线主视图，单独挂在 shortItems（最近互动）。
+// 被取代（supersededBy）的记忆退出时间线——与取代 toast 的承诺一致。
 export function timeline(contactId) {
   const c = getContact(contactId);
   if (!c) throw httpError(404, '联系人不存在');
-  const all = listMemories({ contactId, status: 'confirmed' });
+  const all = listMemories({ contactId, status: 'confirmed' }).filter((m) => !m.supersededBy);
   const memories = all.filter((m) => (m.lifespan || 'long') !== 'short');
   const shortItems = all.filter((m) => m.lifespan === 'short');
   memories.sort((a, b) => timelineKey(b).localeCompare(timelineKey(a)));
@@ -697,7 +706,8 @@ function nextBirthdayDays(birthday) {
 }
 
 export function overview() {
-  const pending = listMemories({ status: 'pending' });
+  // 被取代的 pending 不再进待确认队列（卡片上的「被取代」按钮点完即消失）
+  const pending = listMemories({ status: 'pending' }).filter((m) => !m.supersededBy);
   const upcoming = listContacts({ includeArchived: false })
     .map((c) => ({ contactId: c.id, name: c.name, birthday: c.birthday, inDays: nextBirthdayDays(c.birthday) }))
     .filter((x) => x.inDays !== null)

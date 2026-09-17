@@ -35,6 +35,9 @@ pub struct Memory {
     /// 溯源素材编号（mt_xxxx）
     #[field(rename = "sourceId")]
     pub source_id: String,
+    /// 素材原话摘录（提取闸门溯源，逐字出自素材原文）
+    #[field(rename = "sourceQuote")]
+    pub source_quote: String,
     /// 作者（user/ai）
     pub author: String,
     /// 状态（pending/confirmed/rejected）

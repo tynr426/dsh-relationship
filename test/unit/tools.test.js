@@ -109,9 +109,9 @@ test('contact_update via tool validates and broadcasts harmlessly', async () => 
   assert.equal(good.contact.birthday, '02-14');
 });
 
-test('material tools: save → list raw → get → batch extract with sourceId → processed', async () => {
+test('material tools: save → list raw → get → batch extract with sourceId/Quote → processed', async () => {
   const c = store.createContact({ name: '素材工具' });
-  const saved = await tools.executeTool('material_save', { text: '和小李吃饭。他说女儿十月办婚礼，自己在学潜水，还抱怨最近腰疼。', contactId: c.id });
+  const saved = await tools.executeTool('material_save', { text: '2026-09-11 20:03 和小李吃饭。\n2026-09-11 20:15 他说女儿十月办婚礼，自己在学潜水。\n2026-09-11 20:40 还抱怨最近腰疼。', contactId: c.id });
   assert.equal(saved.ok, true);
   const materialId = saved.material.id;
 
@@ -134,15 +134,16 @@ test('material tools: save → list raw → get → batch extract with sourceId 
   assert.equal(empty.ok, false);
 
   const batch = await tools.executeTool('memory_batch_add', { entries: [
-    { contactId: c.id, type: 'event', content: '女儿十月办婚礼', date: '2026-10-__', saidAt: '2026-09-11 20:03', sourceId: materialId },
-    { contactId: c.id, type: 'preference', content: '在学潜水', saidAt: '2026-09-11 20:15', sourceId: materialId },
-    { contactId: c.id, type: 'attribute', content: '最近腰疼', sourceId: materialId },
+    { contactId: c.id, type: 'event', content: '女儿十月办婚礼', date: '2026-10-__', saidAt: '2026-09-11 20:15', sourceId: materialId, sourceQuote: '他说女儿十月办婚礼' },
+    { contactId: c.id, type: 'preference', content: '在学潜水', saidAt: '2026-09-11 20:15', sourceId: materialId, sourceQuote: '自己在学潜水' },
+    { contactId: c.id, type: 'attribute', content: '最近腰疼', saidAt: '2026-09-11 20:40', sourceId: materialId, sourceQuote: '还抱怨最近腰疼' },
   ] });
   assert.equal(batch.ok, true);
   assert.equal(batch.created.length, 3);
-  assert.equal(batch.created[0].saidAt, '2026-09-11 20:03');
+  assert.equal(batch.created[0].saidAt, '2026-09-11 20:15');
+  assert.equal(batch.created[0].sourceQuote, '他说女儿十月办婚礼');
   assert.equal(batch.created[1].saidAt, '2026-09-11 20:15');
-  assert.equal(batch.created[2].saidAt, '');
+  assert.equal(batch.created[2].saidAt, '2026-09-11 20:40');
   assert.ok(batch.提示.includes('待确认'));
 
   // V4：direction/occasion 标注 + memory_search 过滤（确认走 store 层 = UI 路径）

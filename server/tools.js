@@ -1,6 +1,8 @@
 // AI 工具定义与执行器：DSH 原生会话（relationship preset）经 POST /api/tools
 // 调用，或经 REST 端点复用同一校验路径。纪律：AI 写入一律 pending；
 // contact_add 前必须 contact_search（同名即拒绝）；memory_search 只返回已确认记忆。
+// 素材提取另有「提取质量闸门」（gateError）：sourceQuote 原话摘录 + saidAt 时间戳
+// 命中 + direction 必填 + 查重，坏条目拒绝落库——纪律从提示词约定升级为工具层硬校验。
 import store from './store-facade.js';
 import { RELATIONS, MEMORY_TYPES } from './store.js';
 import { broadcast } from './sse.js';
@@ -27,14 +29,14 @@ export const TOOL_CN = {
 export const TOOL_DEFS = [
   { type: 'function', function: { name: 'contact_search', description: '按姓名或标签查找联系人。任何录入前必须先调用，避免建重', parameters: { type: 'object', required: ['query'], properties: {
       query: { type: 'string', description: '姓名关键词或标签' } }, additionalProperties: false } } },
-  { type: 'function', function: { name: 'contact_add', description: '新建联系人。若同名联系人已存在会拒绝，需先 contact_search 并与用户确认', parameters: { type: 'object', required: ['name', 'relation'], properties: {
+  { type: 'function', function: { name: 'contact_add', description: '新建联系人。若同名联系人已存在会拒绝，需先 contact_search 并与用户确认；tags 建议填身份标签（如 老师/同学/前同事/客户），教师节等节日与场合匹配依赖这些标签', parameters: { type: 'object', required: ['name', 'relation'], properties: {
       name: { type: 'string' }, relation: { type: 'string', enum: RELATIONS, description: '家人/朋友/同事/客户/伙伴/其他' },
       tags: { type: 'array', items: { type: 'string' } }, birthday: { type: 'string', description: 'MM-DD、YYYY-MM-DD 或 每年-MM-DD，未知则留空' },
       notes: { type: 'string' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'contact_update', description: '更新联系人基础信息', parameters: { type: 'object', required: ['id'], properties: {
       id: { type: 'string' }, name: { type: 'string' }, relation: { type: 'string', enum: RELATIONS },
       tags: { type: 'array', items: { type: 'string' } }, birthday: { type: 'string' }, notes: { type: 'string' }, archived: { type: 'boolean' } }, additionalProperties: false } } },
-  { type: 'function', function: { name: 'memory_add', description: '把对话中出现的一条关系事实登记为待确认记忆。一条记忆只含一个事实；用户确认后才进入长期记忆', parameters: { type: 'object', required: ['contactId', 'type', 'content'], properties: {
+  { type: 'function', function: { name: 'memory_add', description: '把对话中出现的一条关系事实登记为待确认记忆。一条记忆只含一个事实；用户确认后才进入长期记忆。从素材提取（带 sourceId）时必须附 sourceQuote 原话摘录，工具会校验摘录与时间戳', parameters: { type: 'object', required: ['contactId', 'type', 'content'], properties: {
       contactId: { type: 'string' }, type: { type: 'string', enum: MEMORY_TYPES, description: '喜好/不喜好/禁忌(如过敏)/事件/礼物/承诺/往来/基础事实' },
       content: { type: 'string', description: '保留原话语义，不演绎' }, date: { type: 'string', description: '事实时间：事情何时发生/发生。YYYY-MM-DD / YYYY-MM / 2026-10-__ / 每年-MM-DD / MM-DD，只保留已知精度' },
       importance: { type: 'integer', description: '1-3；3=关键事实（禁忌、重大事件）' },
@@ -42,15 +44,17 @@ export const TOOL_DEFS = [
       direction: { type: 'string', enum: ['', 'user_to_contact', 'contact_to_user', 'both'], description: '表达方向：交互/礼物/承诺类必填（user_to_contact=用户对联系人）；偏好等联系人自身属性留空' },
       lifespan: { type: 'string', enum: ['long', 'short'], description: '记忆寿命：long=长期（默认）；short=当前场景有效的临时事项（请假、约饭等），不进长期画像' },
       occasion: { type: 'string', description: '场景标签：teacher_day/birthday/thank_you/visit 等小写标签，可自由定义；能判断场景时填' },
-      sourceId: { type: 'string', description: '来源素材 ID（从素材提取时必填，用于溯源）' } }, additionalProperties: false } } },
-  { type: 'function', function: { name: 'memory_batch_add', description: '一段素材拆出多条事实时批量登记，每条独立校验', parameters: { type: 'object', required: ['entries'], properties: {
+      sourceId: { type: 'string', description: '来源素材 ID（从素材提取时必填，用于溯源）' },
+      sourceQuote: { type: 'string', description: '原话摘录：逐字摘自素材原文、只覆盖该条事实（≤200 字）；带 sourceId 时必填，闸门校验是否真在素材里' } }, additionalProperties: false } } },
+  { type: 'function', function: { name: 'memory_batch_add', description: '一段素材拆出多条事实时批量登记，每条独立校验（含提取闸门：sourceQuote 原话摘录、saidAt 时间戳命中、direction 必填、查重）', parameters: { type: 'object', required: ['entries'], properties: {
       entries: { type: 'array', items: { type: 'object', properties: {
         contactId: { type: 'string' }, type: { type: 'string', enum: MEMORY_TYPES }, content: { type: 'string' },
         date: { type: 'string', description: '事实时间' }, saidAt: { type: 'string', description: '话语时间，如 2026-09-11 20:03' },
         direction: { type: 'string', enum: ['', 'user_to_contact', 'contact_to_user', 'both'], description: '表达方向，交互/礼物/承诺类必填' },
         lifespan: { type: 'string', enum: ['long', 'short'], description: '记忆寿命，默认 long；临时事项用 short' },
         occasion: { type: 'string', description: '场景标签，如 teacher_day' },
-        importance: { type: 'integer' }, sourceId: { type: 'string', description: '来源素材 ID' } },
+        importance: { type: 'integer' }, sourceId: { type: 'string', description: '来源素材 ID' },
+        sourceQuote: { type: 'string', description: '该条事实的素材原话摘录，逐字出自原文（带 sourceId 时必填）' } },
         required: ['contactId', 'type', 'content'] } } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'memory_reject', description: '用户驳回候选记忆时调用', parameters: { type: 'object', required: ['id'], properties: {
       id: { type: 'string' }, reason: { type: 'string' } }, additionalProperties: false } } },
@@ -98,6 +102,120 @@ function changedStats() {
   broadcast('overview', { counts: store.counts() });
 }
 
+// ---------- 提取质量闸门（AI 通道） ----------
+// 素材提取（带 sourceId）逐条硬校验，坏条目拒绝落库并给出可修正的错误：
+// ① interaction/gift/promise 必带 direction；② sourceQuote 原话摘录必填且
+// 逐字出自素材原文；③ saidAt 必须命中素材时间戳（摘录所在消息的时间就是话语
+// 时间，错位/编造一律拒）；④ 内容与既有已确认/待确认记忆或同批条目重复即拒。
+const DIRECTION_REQUIRED_TYPES = ['interaction', 'gift', 'promise'];
+const STAMP_RE = /(\d{4})[年\-/.](\d{1,2})[月\-/.](\d{1,2})日?\s*(\d{1,2})[：:](\d{2})/g;
+const STAMP_ONLY_RE = /^(\d{4})[年\-/.](\d{1,2})[月\-/.](\d{1,2})日?\s*(\d{1,2})[：:](\d{2})$/;
+const BARE_TIME_RE = /(?<![\d:])(\d{1,2})[：:](\d{2})(?![\d:])/g;
+
+const pad2 = (s) => String(s).padStart(2, '0');
+const stampOf = (y, mo, d, h, mi) => `${y}-${pad2(mo)}-${pad2(d)} ${pad2(h)}:${mi}`;
+
+function extractStamps(text) {
+  const full = [];
+  for (const m of text.matchAll(STAMP_RE)) {
+    full.push({ stamp: stampOf(m[1], m[2], m[3], m[4], m[5]), index: m.index, end: m.index + m[0].length });
+  }
+  // 掩掉完整时间戳后再找裸时分，避免把时间戳里的时分误当独立时间
+  let masked = text;
+  for (let i = full.length - 1; i >= 0; i--) {
+    masked = masked.slice(0, full[i].index) + ' '.repeat(full[i].end - full[i].index) + masked.slice(full[i].end);
+  }
+  const bareTimes = [...masked.matchAll(BARE_TIME_RE)].map((m) => `${pad2(m[1])}:${m[2]}`);
+  return { full, bareTimes };
+}
+
+function normalizeSaidAtStamp(v) {
+  const m = STAMP_ONLY_RE.exec(String(v ?? '').trim());
+  return m ? stampOf(m[1], m[2], m[3], m[4], m[5]) : '';
+}
+
+/** 逐条校验；返回 { code, error } 或 null（通过）。ctx 见 gateContext。 */
+function gateError(entry, ctx) {
+  const type = String(entry.type ?? '');
+  if (DIRECTION_REQUIRED_TYPES.includes(type) && !String(entry.direction ?? '').trim()) {
+    return { code: 'MISSING_DIRECTION', error: `${type} 类记忆必须标注 direction（user_to_contact=我对TA / contact_to_user=TA对我 / both）` };
+  }
+  const sourceId = typeof entry.sourceId === 'string' ? entry.sourceId.trim() : '';
+  if (!sourceId) return null; // 会话直录（无素材）只查方向，不做素材闸门
+
+  const mt = ctx.material(sourceId);
+  if (!mt) return { code: 'MATERIAL_NOT_FOUND', error: `素材 ${sourceId} 不存在：先 material_save 存档，再用返回的素材 ID 提取` };
+
+  const quote = String(entry.sourceQuote ?? '').trim();
+  if (!quote) return { code: 'MISSING_QUOTE', error: '素材提取必须带 sourceQuote：该条事实对应的素材原话摘录（逐字，≤200 字）' };
+  if (quote.length > 200) return { code: 'QUOTE_TOO_LONG', error: 'sourceQuote 超过 200 字——一条记忆只含一个事实，摘录应只覆盖该事实的原话，疑似多条打包' };
+  const text = String(mt.text ?? '');
+  const exactAt = text.indexOf(quote);
+  const looseOk = exactAt < 0 && quote.replace(/\s+/g, '') && text.replace(/\s+/g, '').includes(quote.replace(/\s+/g, ''));
+  if (exactAt < 0 && !looseOk) {
+    return { code: 'QUOTE_MISMATCH', error: 'sourceQuote 必须逐字摘自素材原文（不得改写、拼接或凭印象复述）' };
+  }
+
+  const { full, bareTimes } = ctx.stamps(sourceId, text);
+  const saidAt = String(entry.saidAt ?? '').trim();
+  const saidNorm = normalizeSaidAtStamp(saidAt);
+  if (full.length) {
+    if (!saidNorm) return { code: 'SAIDAT_REQUIRED', error: '素材含时间戳：saidAt 必须取素材中的时间戳（YYYY-MM-DD HH:mm）' };
+    // 位置就近：摘录（含自身）之前最近的时间戳即该话语的时间
+    const anchor = [...full].reverse().find((s) => exactAt >= 0 && s.end <= exactAt + quote.length);
+    if (anchor && saidNorm !== anchor.stamp) {
+      return { code: 'SAIDAT_MISPLACED', error: `saidAt=${saidAt} 与原话位置不符：这段原话对应素材时间戳 ${anchor.stamp}（saidAt 应取原话所在消息的时间）` };
+    }
+    if (!full.some((s) => s.stamp === saidNorm)) {
+      return { code: 'SAIDAT_NOT_IN_MATERIAL', error: `saidAt=${saidAt} 不在素材时间戳里，不得编造话语时间` };
+    }
+  } else if (bareTimes.length) {
+    const tm = /(\d{1,2})[：:](\d{2})\s*$/.exec(saidAt);
+    if (!tm || !bareTimes.includes(`${pad2(tm[1])}:${tm[2]}`)) {
+      return { code: 'SAIDAT_NOT_IN_MATERIAL', error: `素材只有时分时间（${bareTimes.join('、')}）：saidAt 的时间部分须取其中之一` };
+    }
+  } else if (saidAt) {
+    return { code: 'SAIDAT_NOT_IN_MATERIAL', error: '素材没有时间戳：saidAt 留空即可，不得编造话语时间' };
+  }
+
+  const dup = ctx.dup(String(entry.contactId ?? ''), String(entry.content ?? '').trim());
+  if (dup) {
+    return { code: 'DUPLICATE_CONTENT', error: `与${dup.status === 'confirmed' ? '已确认' : '待确认'}记忆 ${dup.id}「${String(dup.content).slice(0, 40)}」重复：已被覆盖的事实不重复登记` };
+  }
+  return null;
+}
+
+/** 批量/单条共用的懒加载上下文：素材、时间戳集合、按联系人的既有记忆。 */
+function gateContext() {
+  const materials = new Map();
+  const stamps = new Map();
+  const existing = new Map();
+  const seen = new Map();
+  return {
+    material(id) {
+      if (!materials.has(id)) materials.set(id, store.getMaterial(id) || null);
+      return materials.get(id);
+    },
+    stamps(id, text) {
+      if (!stamps.has(id)) stamps.set(id, extractStamps(text));
+      return stamps.get(id);
+    },
+    dup(contactId, content) {
+      if (!contactId || !content) return null;
+      if (!existing.has(contactId)) existing.set(contactId, store.listMemories({ contactId }));
+      const hit = existing.get(contactId).find((m) => !m.supersededBy && (m.status === 'confirmed' || m.status === 'pending') && String(m.content).trim() === content);
+      if (hit) return hit;
+      if ((seen.get(contactId) || new Set()).has(content)) return { id: '（本批前一条）', status: 'pending', content };
+      return null;
+    },
+    mark(contactId, content) {
+      if (!contactId || !content) return;
+      if (!seen.has(contactId)) seen.set(contactId, new Set());
+      seen.get(contactId).add(content);
+    },
+  };
+}
+
 export async function executeTool(name, args = {}) {
   try {
     return await run(name, args);
@@ -135,6 +253,8 @@ async function run(name, args) {
     }
 
     case 'memory_add': {
+      const gateErr = gateError(args, gateContext());
+      if (gateErr) return { ok: false, status: 422, ...gateErr };
       const m = store.createMemory({ ...args, author: 'ai' });
       changedMemory(m, 'created');
       changedStats();
@@ -142,10 +262,33 @@ async function run(name, args) {
     }
 
     case 'memory_batch_add': {
-      const { created, failed } = store.createMemories(args.entries, 'ai');
+      const entries = Array.isArray(args.entries) ? args.entries : [];
+      if (!entries.length) throw Object.assign(new Error('entries 必须是非空数组'), { status: 400 });
+      // 提取闸门先行：坏条目直接进 failed（带 index/code/error），好条目再走 store 校验
+      const ctx = gateContext();
+      const gateFailed = [];
+      const valid = [];
+      for (const [index, entry] of entries.entries()) {
+        const err = entry && typeof entry === 'object' ? gateError(entry, ctx) : { code: 'BAD_ENTRY', error: '条目必须是对象' };
+        if (err) gateFailed.push({ index, ...err });
+        else {
+          valid.push({ index, entry });
+          ctx.mark(String(entry.contactId ?? ''), String(entry.content ?? '').trim());
+        }
+      }
+      let created = [];
+      let storeFailed = [];
+      if (valid.length) {
+        const r = store.createMemories(valid.map((v) => v.entry), 'ai');
+        created = r.created;
+        storeFailed = r.failed.map((f) => ({ index: valid[f.index].index, ...f }));
+      }
       for (const m of created) changedMemory(m, 'created');
       changedStats();
-      return { ok: true, created: created.map(memoryOut), failed, 提示: '已批量登记为待确认记忆，等待用户确认' };
+      const failed = [...gateFailed, ...storeFailed].sort((a, b) => a.index - b.index);
+      return { ok: true, created: created.map(memoryOut), failed, 提示: failed.length
+        ? `本批 ${entries.length} 条中 ${failed.length} 条被闸门或校验拒绝（见 failed 的 code/error）；请修正后只重报被拒条目，勿整批重发`
+        : '已批量登记为待确认记忆，等待用户确认' };
     }
 
     case 'memory_confirm': {
@@ -208,7 +351,7 @@ async function run(name, args) {
     case 'material_save': {
       const mt = store.saveMaterial({ text: args.text, contactId: args.contactId ? String(args.contactId) : '', occasion: args.occasion });
       broadcast('material.changed', { action: 'created', materialId: mt.id });
-      return { ok: true, material: { id: mt.id, excerpt: mt.excerpt, contactId: mt.contactId, occasion: mt.occasion }, 提示: '素材已存档。请用 memory_batch_add 把其中每个事实拆成一条待确认记忆（sourceId 填本素材 ID，交互/礼物类标注 direction，临时事务 lifespan=short，能判断场景时填 occasion）；涉及的人先 contact_search 确认' };
+      return { ok: true, material: { id: mt.id, excerpt: mt.excerpt, contactId: mt.contactId, occasion: mt.occasion }, 提示: '素材已存档。请用 memory_batch_add 把其中每个事实拆成一条待确认记忆（sourceId 填本素材 ID；每条附 sourceQuote 原话摘录，逐字出自素材原文；saidAt 取素材时间戳；交互/礼物类标注 direction；临时事务 lifespan=short；能判断场景时填 occasion）；涉及的人先 contact_search 确认' };
     }
 
     case 'material_list': {

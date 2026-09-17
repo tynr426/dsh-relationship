@@ -48,12 +48,13 @@ test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
   assert.ok(list.some((x) => x.id === c.id));
 });
 
-(hasBinary ? test : test.skip)('记忆全生命周期（含场景继承/确认/驳回/恢复/取代）', () => {
+(hasBinary ? test : test.skip)('记忆全生命周期（含场景继承/确认/驳回/恢复/取代/sourceQuote 溯源）', () => {
   const c = store.createContact({ name: '曦曦' });
   const mt = store.saveMaterial({ text: '聊天：曦曦想要一套绘本', contactId: c.id, occasion: 'birthday' });
-  const m = store.createMemory({ contactId: c.id, type: 'gift', content: '想要绘本', author: 'ai', sourceId: mt.id });
+  const m = store.createMemory({ contactId: c.id, type: 'gift', content: '想要绘本', author: 'ai', sourceId: mt.id, sourceQuote: '曦曦想要一套绘本' });
   assert.equal(m.status, 'pending');
   assert.equal(m.occasion, 'birthday', '未显式给 occasion 时继承素材场景');
+  assert.equal(m.sourceQuote, '曦曦想要一套绘本', 'source_quote 列经 CLI 落库并回读');
   assert.equal(store.materialStatus(store.getMaterial(mt.id)), 'processed');
 
   const r = store.rejectMemory(m.id, '提取质量差');
@@ -71,6 +72,22 @@ test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
   const keep = store.createMemory({ contactId: c.id, type: 'event', content: '期末考试', author: 'user' });
   const sup = store.supersedeMemory(u.id, keep.id);
   assert.equal(sup.supersededBy, keep.id);
+
+  // 取代校验与 JSON 版一致（契约锁定）：不能用 pending 作依据、不能跨联系人、依据已被取代不能再用
+  const c2 = store.createContact({ name: '曦曦同学' });
+  const foreign = store.createMemory({ contactId: c2.id, type: 'event', content: '别家的事实', author: 'user' });
+  assert.throws(() => store.supersedeMemory(u.id, foreign.id), /同一联系人/);
+  const pend = store.createMemory({ contactId: c.id, type: 'event', content: '另一条待确认' });
+  assert.throws(() => store.supersedeMemory(u.id, pend.id), /必须是已确认记忆/);
+  assert.throws(() => store.supersedeMemory(pend.id, u.id), /已被取代/);
+
+  // 被取代的确认记忆退出时间线；被取代的 pending 退出待确认队列
+  const tl = store.timeline(c.id);
+  assert.equal(tl.memories.some((x) => x.id === u.id), false, '被取代的确认记忆应退出时间线');
+  assert.ok(tl.memories.some((x) => x.id === keep.id));
+  const dupPending = store.createMemory({ contactId: c.id, type: 'event', content: '重复的期末考试' });
+  store.supersedeMemory(dupPending.id, keep.id);
+  assert.equal(store.overview().pending.some((x) => x.id === dupPending.id), false, '被取代的 pending 应退出待确认队列');
 
   const { confirmed, failed } = store.confirmMemories([m.id, 'm_missing']);
   assert.equal(confirmed.length, 1);
@@ -145,4 +162,20 @@ test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
   assert.ok(Array.isArray(o.upcoming));
   const t = store.timeline(store.listContacts()[0].id);
   assert.ok(Array.isArray(t.memories) && Array.isArray(t.shortItems));
+});
+
+// tools 层提取闸门 × rust 后端端到端：闸门（server/tools.js）在后端无关的
+// facade 之上，这里验证 rust 路径同样拒绝坏条目、放行合格条目并持久化 sourceQuote。
+(hasBinary ? test : test.skip)('提取闸门对 rust 后端同样生效（tools 层端到端）', async () => {
+  const tools = await import('../../server/tools.js');
+  const c = store.createContact({ name: '闸门老师' });
+  const mt = store.saveMaterial({ text: '2026-09-10 20:03 方老师说周五办庆祝', contactId: c.id, occasion: 'teacher_day' });
+  const bad = await tools.executeTool('memory_add', { contactId: c.id, type: 'event', content: '周五办庆祝', sourceId: mt.id, sourceQuote: '方老师说周五办庆祝', saidAt: '2026-09-10 21:00' });
+  assert.equal(bad.ok, false);
+  assert.equal(bad.code, 'SAIDAT_MISPLACED');
+  const good = await tools.executeTool('memory_add', { contactId: c.id, type: 'event', content: '方老师说周五办庆祝', sourceId: mt.id, sourceQuote: '方老师说周五办庆祝', saidAt: '2026-09-10 20:03' });
+  assert.equal(good.ok, true, JSON.stringify(good));
+  assert.equal(good.memory.status, 'pending');
+  assert.equal(good.memory.sourceQuote, '方老师说周五办庆祝');
+  assert.equal(good.memory.occasion, 'teacher_day', '场景继承在 rust 路径同样生效');
 });

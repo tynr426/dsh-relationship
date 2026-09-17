@@ -46,7 +46,8 @@ impl Initialize {
             }
         };
         if exists {
-            // WAL 持久生效，重复执行无害
+            // 老库增量迁移（补列，幂等），再确保 WAL
+            Self::migrate_columns(conn)?;
             return Self::ensure_wal(conn);
         }
 
@@ -82,6 +83,27 @@ impl Initialize {
         Self::ensure_wal(conn)?;
         if fresh {
             let _ = std::fs::set_permissions(db_path, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+
+    /// 老库增量迁移：缺列即 ALTER TABLE 补上（幂等，可安全重跑）。
+    /// 新增列必须 NOT NULL DEFAULT，与 initialize.sql 里的建表定义保持一致。
+    fn migrate_columns(conn: &Connector) -> Result<()> {
+        let columns: Vec<String> = Helper::query(
+            "PRAGMA table_info('memories')",
+            vec![],
+            |r, _: &Option<Vec<deck::Attribute>>| r.get_string(1), // 1 = name
+            conn,
+            &None,
+        )?;
+        if !columns.iter().any(|c| c == "source_quote") {
+            Helper::execute(
+                "ALTER TABLE memories ADD COLUMN \"source_quote\" TEXT(200) NOT NULL DEFAULT ''",
+                vec![],
+                conn,
+            )?;
+            err_log!("relstore 增量迁移：memories 补列 source_quote");
         }
         Ok(())
     }
