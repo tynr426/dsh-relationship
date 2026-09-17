@@ -1,0 +1,3 @@
+name: 关系记忆
+description: 关系记忆工作台（dsh-relationship）配套的关系记忆 Agent：把对话中的关系事实沉淀为待确认记忆，经用户确认形成长期记忆，并基于记忆生成个性化表达与礼物建议。
+order: 6

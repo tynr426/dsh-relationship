@@ -1,0 +1,8 @@
+# dsh-relationship bundle patch：向 web profile 清单插入本插件行。
+# 宿主半（exports "."）在 dsh 进程内运行（工作台服务 + /api/dsh-relationship 路由），
+# 浏览器半（exports "./client"，由宿主 /plugins/dsh-relationship/client.js 提供）
+# 注入侧边栏「关系记忆」入口。独立工作台页面经同源镜像
+# /api/dsh-relationship/workbench/ 提供。
+- insert:
+    - id: dsh-relationship
+      name: 'dsh-relationship'

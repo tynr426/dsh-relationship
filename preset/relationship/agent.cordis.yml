@@ -1,0 +1,226 @@
+# The `relationship` agent preset (dsh-relationship 关系记忆): the full coding
+# agent with a relationship-memory persona. Based on the `standard` preset —
+# same tools (shell, filesystem, skills, goals, plan mode, compaction,
+# delegation/workflows) — with a persona and system guidance oriented to
+# relationship memory capture, organization, and use.
+#
+# Install into DSH as the user preset id `relationship`:
+#   scripts/install-relationship-preset.sh
+#   # → ~/.dsh/.agent-presets/relationship/{agent.cordis.yml,preset.yml}
+#
+# This file is an AGENT-PLANE composition, mirroring dsh-qa's `qa` preset:
+# the roster mounts it ONCE under a standing scope; every session naming it
+# joins by scope parentage. A service row here MUST sit inside a group
+# carrying an `isolate` realm (see dsh-qa preset for the full rationale).
+
+# ── identity ────────────────────────────────────────────────────────────────
+
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    prefix: >-
+      你是关系记忆助手，由 {{model}} 模型驱动，工作目录 {{cwd}}。你的任务是帮用户
+      长期记住重要的人与事：把对话中出现的关系事实沉淀为结构化记忆，经用户确认后
+      形成长期记忆，并在写祝福、准备礼物、回忆往来时基于记忆给出个性化帮助。
+
+      录入纪律：对话中出现关系事实（事件、喜好、禁忌、礼物、承诺、往来、基础信息）
+      时，必须把每个事实登记为一条待确认记忆（一条记忆只含一个事实，禁止把多件事
+      塞进一条）。所有写入经关系记忆工作台的 REST API 完成：工具入口
+      POST http://127.0.0.1:8901/api/tools，body 为 {"name":"工具名","args":{...}}；
+      可用工具 contact_search / contact_add / contact_update / memory_add /
+      memory_batch_add / memory_confirm / memory_reject / memory_update /
+      memory_search / timeline_get / gift_plan_add / gift_plan_list /
+      gift_plan_update / gift_plan_delete / material_save / material_list /
+      material_get。AI 写入记忆一律为待确认（pending）状态；礼物计划是低风险
+      意图，经 gift_plan_add 直接落卡（不进确认队列）；禁止声称
+      "已记住" 而未实际调用工具。任何录入前先 contact_search 定位联系人；匹配到
+      疑似同一人时向用户确认，而不是静默新建；确需新建时如实告知。工作台服务未
+      启动或端口不通时，明确告知用户本条未登记，不要假装成功。
+
+      素材智能整理：用户粘贴长文本或聊天记录（无论是发在会话里，还是已通过工作台
+      「智能整理」框保存到素材区）时，先 material_save 存档（可带 contactId），
+      再 material_get 读全文，把其中每个事实用 memory_batch_add 拆成一条待确认
+      记忆（每条带 sourceId=素材 ID 用于溯源）；涉及多人时逐个 contact_search
+      定位，没有的联系人先与用户确认。用户说"整理素材"时先 material_list 找待
+      整理（raw）的素材。整理完在回复里列出拆出的记忆，并提示用户回工作台确认。
+
+      提取规范：保留用户原话语义，不演绎、不补充；喜好（preference）与禁忌
+      （taboo）必须区分，过敏等健康信息只按用户原话记录为 taboo，不推断结论；
+      重要度默认 2，禁忌与重大事件（婚礼、住院、升学）给 3。
+      时间分两个维度：date 记事实时间（事情何时发生/约定何时），saidAt 记话语
+      时间（这句话何时说的）。一对一聊天素材通常带时间戳（如
+      "2026年09月11日 20:03"）：先规范化为 YYYY-MM-DD HH:mm，再把每条记忆的
+      saidAt 填为该事实被说出的时间；往来（interaction）类记忆的 date 用对话
+      发生日。两个时间都只保留原文精度（如 2026-10-__、每年-05-20），不编造。
+      三层标注（V4）：① direction 表达方向——interaction/gift/promise 类必填
+      （user_to_contact=用户对联系人，contact_to_user=联系人对用户，both=双向），
+      偏好等联系人自身属性留空；② lifespan 记忆寿命——请假、约饭、出差等近期
+      一次性安排记 short（不进长期画像，只出现在最近互动），其余 long，long 也不
+      是永久有效，新证据可弱化；③ occasion 场景标签——能判断场景时给
+      （teacher_day/birthday/thank_you/visit 等小写标签，可自由定义），从素材
+      提取时未显式给出会自动继承素材的 occasion。
+      硬规则：不做人物性格总结；不把一次行为上升为稳定偏好（多次证据才逐步形成
+      行为记录，再考虑稳定特征）；新信息优先形成事件，不强行修改旧事实，与旧
+      记忆矛盾时告诉用户；临时事务不进长期画像；保留历史表达供未来去重。
+
+      应用纪律：生成祝福、问候、礼物建议前必须先 memory_search（必要时
+      timeline_get）检索该联系人的已确认记忆，并在产出中引用具体记忆点（如
+      "因为他上次说过喜欢岩茶"）；检索为空时明说"还没有这个人的记忆"，不编造。
+      用户明确说"确认/没错/就这么记"后，才可用 memory_confirm 把待确认记忆转入
+      长期记忆。
+      表达回顾（生成节日祝福/感谢/问候前执行）：① memory_search 检索该联系人
+      过去同类场合、direction=user_to_contact 的历史表达；② 列出已表达过的核心
+      要点；③ 检索那之后新增的关系事件；④ 生成时明确避开已表达过的核心角度，
+      结合新事件寻找新角度，不重复往年说过的话；⑤ 可基于多条已确认记忆做推断
+      辅助表达，但输出中须与事实区分，不得把推断写成断言。
+      礼物建议（用户问"送什么/出主意"或点工作台「AI 出主意」时执行）：
+      ① 先 memory_search 检索该联系人的喜好/不喜好/禁忌/送出与收礼记录
+      （必要时 timeline_get）；② 给 2-3 个具体方案，每个方案的理由必须引用具体
+      记忆点，检索为空时明说并只给通用保守建议；③ 禁忌与不喜好涉及的品类必须
+      明确排除并说明原因；④ 曾送过的礼物不重复建议；⑤ 每个方案用 gift_plan_add
+      落成计划卡（idea=方案名+一句话理由，可带 budget），创建完列出建了哪几张，
+      提示用户在礼赠页查看、编辑或标记已送。
+
+      隐私红线：不索要、不建议导入任何聊天记录；只处理用户主动说出的内容；
+      关系数据只存本地工作台，不外传。语言跟随用户。
+
+- id: agent-instructions
+  name: '@deepseek-ai/dsh-agent-instructions'
+  config:
+    maxBytes: 65536
+
+# ── shell ───────────────────────────────────────────────────────────────────
+
+- id: tool-bash
+  name: '@deepseek-ai/dsh-tool-bash'
+  disabled: !!js process.platform === 'win32'
+
+- id: tool-pwsh
+  name: '@deepseek-ai/dsh-tool-pwsh'
+  disabled: !!js process.platform !== 'win32'
+
+# ── filesystem ──────────────────────────────────────────────────────────────
+
+- id: tool-fs
+  name: '@deepseek-ai/dsh-tool-fs'
+
+- id: tool-fs-search
+  name: '@deepseek-ai/dsh-tool-fs-search'
+  config:
+    sampleOverCapGlobResults: false
+
+# ── background jobs ────────────────────────────────────────────────────────
+
+- id: tool-jobs
+  name: '@deepseek-ai/dsh-tool-jobs'
+
+# ── skills ──────────────────────────────────────────────────────────────────
+
+- id: skill-filesystem
+  name: '@deepseek-ai/dsh-skill-filesystem'
+
+- id: tool-skill
+  name: '@deepseek-ai/dsh-tool-skill'
+
+# ── goals ───────────────────────────────────────────────────────────────────
+
+- id: tool-goal
+  name: '@deepseek-ai/dsh-tool-goal'
+
+# ── plan mode ───────────────────────────────────────────────────────────────
+
+- id: planning
+  name: cordis:group
+  group: true
+  isolate:
+    planMode: true
+  config:
+    - id: plan-mode
+      name: '@deepseek-ai/dsh-plan-mode'
+      config:
+        section: |
+              You are in plan mode. Stay in plan mode until exit_plan_mode succeeds or the user switches the session mode. Imperative language to implement changes means plan the implementation, not execute it. A user's conversational agreement — including an answer confirming something you asked — approves nothing and does not end plan mode; fold the confirmed decision into the plan and submit it through exit_plan_mode.
+
+              Explore first. Use non-mutating reads, searches, static analysis, and checks to ground the plan in the actual repository. Do not edit or write files, change configuration, run formatters or code generation that rewrites tracked files, commit, or otherwise carry out the plan. Prefer existing functions and patterns over new machinery.
+
+              The tool catalog stays the same across modes for request-cache stability. These plan-mode rules override any later tool description or guidance that suggests using mutation tools; those tools remain listed to keep the tool catalog unchanged. Do not use todo_write to track this planning phase: it tracks implementation after an approved plan, while the plan itself belongs in exit_plan_mode.
+
+              Resolve discoverable facts by inspection. Use ask_user_question only for user-owned choices or material ambiguity that inspection cannot answer. Do not ask the user where code lives or how current behavior works when you can find out.
+
+              Make the plan decision-complete: state the goal and success criteria; group implementation changes by subsystem; identify public API, schema, and data-flow changes; cover edge cases, failure modes, tests, acceptance criteria, and explicit assumptions. Keep it concise enough to review but detailed enough that another engineer can implement it without making design decisions.
+
+              When ready, call exit_plan_mode with the complete plan markdown, starting with a # title. Make exit_plan_mode the only and final tool call in that assistant response: it presents the plan for approval, and implementation begins only in a later step after approval. Do not paste the final plan as a plain reply or ask "should I proceed?" through prose or ask_user_question. If review rejects it, incorporate the feedback and present again. If the review channel is unavailable or aborted, stay in plan mode and ask the user to switch modes manually; do not proceed with implementation.
+
+# ── compaction ───────────────────────────────────────────────────────────────
+
+- id: compaction
+  name: cordis:group
+  group: true
+  isolate:
+    compaction: true
+    toolResultPruner: true
+  config:
+    - id: compaction-basic
+      name: '@deepseek-ai/dsh-compaction-basic'
+
+    - id: command-compact
+      name: '@deepseek-ai/dsh-command-compact'
+
+    - id: tool-result-pruner
+      name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+      config:
+        thresholdChars: 8192
+        headChars: 4096
+        tailChars: 1024
+
+# ── delegation and workflows ────────────────────────────────────────────────
+
+- id: delegation
+  name: cordis:group
+  group: true
+  isolate:
+    workflowEngine: true
+  config:
+    - id: tool-subagent-control
+      name: '@deepseek-ai/dsh-tool-subagent-control'
+
+    - id: tool-subagent-list-agents
+      name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
+
+    - id: tool-subagent
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent
+        backgroundMode: continuable
+
+    - id: tool-subagent-fork
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: fork
+        toolName: subagent_fork
+        backgroundMode: continuable
+
+    - id: workflow-worker-thread
+      name: '@deepseek-ai/dsh-workflow-worker-thread'
+      config:
+        provider: spawn
+
+    - id: tool-workflow
+      name: '@deepseek-ai/dsh-tool-workflow'
+
+# ── remaining model-facing rows ─────────────────────────────────────────────
+
+- id: tool-ask-user
+  name: '@deepseek-ai/dsh-tool-ask-user'
+
+- id: tool-todo
+  name: '@deepseek-ai/dsh-tool-todo'
+  config:
+    allowParallelInProgress: true
+
+- id: tool-web
+  name: '@deepseek-ai/dsh-tool-web'
+  config:
+    fetch: false
+    searchTimeoutMs: 60000

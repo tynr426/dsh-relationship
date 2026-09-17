@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="color-scheme" content="light"/>
+  <title>关系记忆 · dsh-relationship</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%237c3aed'/><path d='M32 46c-1 0-12-7.2-12-16a7 7 0 0 1 12-4.9A7 7 0 0 1 44 30c0 8.8-11 16-12 16Z' stroke='white' stroke-width='4' fill='none' stroke-linejoin='round'/></svg>"/>
+  <link rel="stylesheet" href="style.css"/>
+</head>
+<body>
+  <header id="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20c-.8 0-9.5-5.6-9.5-12A5.5 5.5 0 0 1 12 4.6 5.5 5.5 0 0 1 21.5 8c0 6.4-8.7 12-9.5 12Z"/></svg>
+      </span>
+      <span class="brand-copy"><b>关系记忆</b><small>记住重要的人</small></span>
+    </div>
+    <div class="top-actions">
+      <span id="service-status" class="service-status" role="status" aria-live="polite"><i></i><span>本地 · 关系记忆</span></span>
+      <button id="btn-quick-memory" class="primary-btn" type="button">＋ 记一笔</button>
+    </div>
+  </header>
+
+  <div id="app-shell">
+    <aside id="rail">
+      <nav class="main-nav" aria-label="主导航">
+        <button class="nav-item active" data-view="home" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 11.5 12 4l8 7.5"/><path d="M6 10v9h12v-9"/></svg>
+          <span>首页</span><b id="nav-pending-count" class="nav-count hidden" aria-live="polite">0</b>
+        </button>
+        <button class="nav-item" data-view="contacts" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="9" cy="9" r="3.2"/><path d="M3.5 19c.8-3 3-4.5 5.5-4.5S13.7 16 14.5 19"/><circle cx="16.5" cy="10" r="2.4"/><path d="M16 14.6c2.2.2 3.8 1.6 4.5 4.4"/></svg>
+          <span>联系人</span><b id="nav-contact-count" class="nav-count hidden">0</b>
+        </button>
+        <button class="nav-item" data-view="gifts" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="4" y="10" width="16" height="10" rx="1.5"/><path d="M4 13h16M12 10v10"/><path d="M12 10c-1.5-4-7-4-6.5-1.2.3 1.6 3.5 1.2 6.5 1.2Zm0 0c1.5-4 7-4 6.5-1.2-.3 1.6-3.5 1.2-6.5 1.2Z"/></svg>
+          <span>礼赠</span>
+        </button>
+      </nav>
+      <div class="rail-footer">
+        <div class="privacy-note">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+          <span><b>本地存储</b><small>关系数据只保存在本机</small></span>
+        </div>
+      </div>
+    </aside>
+
+    <main id="main-content">
+      <!-- 首页 -->
+      <section id="view-home" class="view active" aria-label="首页">
+        <div class="view-head">
+          <h1>待确认队列</h1>
+          <p class="view-sub">AI 提取的关系事实先到这里，你确认后才成为长期记忆</p>
+        </div>
+        <div id="metric-cards" class="metric-cards" aria-label="统计"></div>
+        <div id="onboarding" class="onboarding hidden">
+          <b>在 DSH 会话里直接说话即可录入</b>
+          <p>选择「关系记忆」preset 后，对助手说：「记一下，小李女儿十月办婚礼，他对花生过敏」。AI 会拆成待确认记忆上板，回到这里逐条确认。</p>
+        </div>
+        <div id="pending-queue" class="pending-queue" aria-label="待确认记忆"></div>
+        <section id="material-box" class="panel material-box hidden" aria-label="待整理素材">
+          <h2>待整理素材 <small id="material-count" class="material-count"></small></h2>
+          <p class="material-hint">在 DSH 会话里说「整理素材」，AI 会把下面每段内容拆成待确认记忆。</p>
+          <div id="material-list" class="material-list"></div>
+        </section>
+        <div class="home-two-col">
+          <section class="panel" aria-label="近期生日与纪念日">
+            <h2>近期时间点</h2>
+            <div id="upcoming-list" class="upcoming-list"></div>
+          </section>
+          <section class="panel" aria-label="使用说明">
+            <h2>三条录入通道</h2>
+            <ol class="howto">
+              <li><b>对话即录入</b>：在 DSH 会话里随口说，AI 拆分并上板待确认。</li>
+              <li><b>手动记一笔</b>：右上角「＋ 记一笔」，即录即确认。</li>
+              <li><b>整理</b>：AI 归类去重，你只做确认和删改。</li>
+            </ol>
+          </section>
+        </div>
+      </section>
+
+      <!-- 联系人 -->
+      <section id="view-contacts" class="view" aria-label="联系人">
+        <div class="view-head row">
+          <div>
+            <h1>联系人</h1>
+            <p class="view-sub">关系记忆按人聚合</p>
+          </div>
+          <button id="btn-new-contact" class="primary-btn" type="button">＋ 新建联系人</button>
+        </div>
+        <div class="contacts-layout">
+          <div id="contact-list" class="contact-list" aria-label="联系人列表"></div>
+          <div id="contact-detail" class="contact-detail hidden" aria-label="联系人详情"></div>
+        </div>
+      </section>
+
+      <!-- 礼赠 -->
+      <section id="view-gifts" class="view" aria-label="礼赠">
+        <div class="view-head">
+          <h1>礼赠</h1>
+          <p class="view-sub">别错过时机 · 出主意有依据 · 送完留痕收了记情</p>
+        </div>
+        <div class="gifts-toolbar">
+          <button class="primary-btn" id="btn-new-plan" type="button">＋ 礼物计划</button>
+          <span class="toolbar-hint">时机 = 生日（30 天内）+ 相关节日 + 计划日期</span>
+        </div>
+        <section class="panel" aria-label="最近要送">
+          <h2>最近要送 <small id="occasions-count" class="muted"></small></h2>
+          <div id="occasions-list" class="occasions-list"></div>
+          <div id="plans-section" class="hidden">
+            <h3 class="plans-sub">进行中的计划</h3>
+            <div id="plans-list" class="occasions-list"></div>
+          </div>
+        </section>
+        <section class="panel" aria-label="收礼待回应">
+          <h2>收礼待回应 <small id="reciprocity-count" class="muted"></small></h2>
+          <div id="reciprocity-list" class="reciprocity-list"></div>
+        </section>
+        <section class="panel" aria-label="送礼台账">
+          <h2>送礼台账</h2>
+          <div class="ledger-cols">
+            <div><h3>送出</h3><div id="ledger-given" class="ledger-list"></div></div>
+            <div><h3>收到</h3><div id="ledger-received" class="ledger-list"></div></div>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+
+  <!-- 通用弹窗 -->
+  <div id="modal-backdrop" class="modal-backdrop hidden">
+    <div class="modal" role="dialog" aria-modal="true">
+      <!-- 新建联系人 -->
+      <form id="form-contact" class="modal-body hidden">
+        <h3 id="nc-title-text">新建联系人</h3>
+        <label>姓名<input id="nc-name" name="name" required maxlength="40" placeholder="怎么称呼这个人"/></label>
+        <label>关系
+          <select id="nc-relation" name="relation">
+            <option value="family">家人</option>
+            <option value="friend" selected>朋友</option>
+            <option value="colleague">同事</option>
+            <option value="client">客户</option>
+            <option value="partner">伙伴</option>
+            <option value="other">其他</option>
+          </select>
+        </label>
+        <label>生日<input id="nc-birthday" name="birthday" placeholder="MM-DD 或 YYYY-MM-DD，可留空"/></label>
+        <label>标签<input id="nc-tags" name="tags" placeholder="用空格分隔，如：大学同学 羽毛球"/></label>
+        <div class="modal-actions">
+          <button type="button" class="ghost-btn" id="nc-cancel">取消</button>
+          <button type="submit" class="primary-btn" id="nc-ok">保存</button>
+        </div>
+      </form>
+      <!-- 手动记一笔 / 智能整理 -->
+      <div class="modal-tabs" role="tablist">
+        <button type="button" class="mtab active" data-mtab="single" role="tab">单条</button>
+        <button type="button" class="mtab" data-mtab="smart" role="tab">智能整理</button>
+      </div>
+      <form id="form-quick-memory" class="modal-body hidden">
+        <h3>记一笔</h3>
+        <label>谁<select id="qm-contact" required></select></label>
+        <label>类型
+          <select id="qm-type">
+            <option value="event">事件</option>
+            <option value="preference">喜好</option>
+            <option value="dislike">不喜好</option>
+            <option value="taboo">禁忌</option>
+            <option value="gift">礼物</option>
+            <option value="promise">承诺</option>
+            <option value="interaction">往来</option>
+            <option value="attribute">基础事实</option>
+          </select>
+        </label>
+        <label>内容<input id="qm-content" required maxlength="500" placeholder="一条记忆只写一个事实"/></label>
+        <label>日期<input id="qm-date" placeholder="YYYY-MM-DD / MM-DD / 每年-MM-DD，可留空"/></label>
+        <label>重要度
+          <select id="qm-importance">
+            <option value="1">1 · 一般</option>
+            <option value="2" selected>2 · 重要</option>
+            <option value="3">3 · 关键</option>
+          </select>
+        </label>
+        <label>方向（往来/礼物/承诺类适用）
+          <select id="qm-direction">
+            <option value="">不指定</option>
+            <option value="user_to_contact">我 → 对方</option>
+            <option value="contact_to_user">对方 → 我</option>
+            <option value="both">双向</option>
+          </select>
+        </label>
+        <label>场景（可留空）<input id="qm-occasion" maxlength="40" placeholder="teacher_day / birthday / thank_you …"/></label>
+        <div class="modal-actions">
+          <button type="button" class="ghost-btn" id="qm-cancel">取消</button>
+          <button type="submit" class="primary-btn" id="qm-ok">保存（即确认）</button>
+        </div>
+      </form>
+      <form id="form-smart" class="modal-body hidden">
+        <h3>智能整理</h3>
+        <p class="smart-hint">粘贴聊天记录或任意长段描述，保存后到 DSH 会话说「整理素材」，AI 会拆成多条待确认记忆回来等你确认。</p>
+        <label>主要涉及谁
+          <select id="qmt-contact">
+            <option value="">自动识别（可能涉及多人）</option>
+          </select>
+        </label>
+        <label>素材内容
+          <textarea id="qmt-text" required rows="8" maxlength="200000" placeholder="一对一聊天记录连同时间戳（如 2026年09月11日 20:03）直接整段粘贴，AI 会保留「什么时候讲了什么」；也可以只写零散描述。"></textarea>
+        </label>
+        <label>场合（可留空，AI 提取时会继承到每条记忆）<input id="qmt-occasion" maxlength="40" placeholder="teacher_day / birthday / daily …"/></label>
+        <div class="modal-actions">
+          <button type="button" class="ghost-btn" id="qmt-cancel">取消</button>
+          <button type="submit" class="primary-btn" id="qmt-ok">保存素材</button>
+        </div>
+      </form>
+      <!-- 礼物计划 -->
+      <form id="form-plan" class="modal-body hidden">
+        <h3>礼物计划</h3>
+        <label>送给谁
+          <select id="plan-contact" required></select>
+        </label>
+        <label>场合<input id="plan-occasion" maxlength="40" placeholder="teacher_day / birthday / 探病 / 乔迁 …"/></label>
+        <label>日期<input id="plan-date" placeholder="YYYY-MM-DD（这一次的具体日期，可留空）"/></label>
+        <label>想法<textarea id="plan-idea" required rows="3" maxlength="200" placeholder="送什么 + 一句话理由"></textarea></label>
+        <label>预算<input id="plan-budget" maxlength="40" placeholder="如 ¥100-300，可留空"/></label>
+        <label>商品名称<input id="plan-product-name" maxlength="100" placeholder="看中的具体商品，可留空（配合下面的链接）"/></label>
+        <label>价格<input id="plan-product-price" maxlength="40" placeholder="如 ¥89，可留空"/></label>
+        <label>商品链接<input id="plan-product-url" maxlength="500" placeholder="https://…（淘宝/京东商品页链接）"/></label>
+        <label>状态
+          <select id="plan-status">
+            <option value="idea" selected>想法</option>
+            <option value="decided">已定</option>
+          </select>
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="ghost-btn" data-role="plan-cancel">取消</button>
+          <button type="submit" class="primary-btn">保存计划</button>
+        </div>
+      </form>
+
+      <!-- AI 出主意 -->
+      <form id="form-suggest" class="modal-body hidden">
+        <h3>AI 出主意</h3>
+        <p class="smart-hint">勾选 AI 可以依据的记忆。AI 的方案理由必须引用它们；禁忌品类会被明确排除。</p>
+        <p id="suggest-target" class="suggest-target"></p>
+        <div id="suggest-list" class="suggest-list"></div>
+        <label>预算<input id="suggest-budget" maxlength="40" placeholder="如 ¥100-300，可留空"/></label>
+        <div class="modal-actions">
+          <button type="button" class="ghost-btn" data-role="plan-cancel">取消</button>
+          <button type="submit" class="primary-btn" id="suggest-ok">交给 AI →</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>

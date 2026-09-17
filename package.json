@@ -1,0 +1,56 @@
+{
+  "name": "dsh-relationship",
+  "version": "0.1.0",
+  "description": "dsh-relationship 关系记忆工作台: a local relationship-memory workbench plugin for DeepSeek Harness. Contacts, confirmable AI memory extraction, pending queue, contact timelines, native relationship preset.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "relbench": "server/cli.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "start": "node server/cli.js",
+    "dev": "node --watch server/cli.js",
+    "test:unit": "node scripts/run-unit-tests.js",
+    "test:e2e": "playwright test",
+    "test": "npm run test:unit && npm run test:e2e"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek",
+    "relationship",
+    "memory",
+    "contacts",
+    "workbench",
+    "关系记忆",
+    "联系人",
+    "工作台"
+  ],
+  "files": [
+    "lib",
+    "server",
+    "public",
+    "scripts",
+    "preset",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "devDependencies": {
+    "@playwright/test": "^1.62.1"
+  }
+}
