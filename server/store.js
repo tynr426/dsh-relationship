@@ -3,12 +3,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { DATA_DIR, MATERIALS_DIR, CONTACTS_PATH, MEMORIES_PATH, MATERIALS_PATH, PLANS_PATH, META_PATH, ensureDirs } from './config.js';
+import { DATA_DIR, MATERIALS_DIR, CONTACTS_PATH, MEMORIES_PATH, MATERIALS_PATH, PLANS_PATH, RELATION_TYPES_PATH, META_PATH, ensureDirs } from './config.js';
 import { migrateDb, CURRENT_SCHEMA_VERSION } from './migrations.js';
 
 export const RELATIONS = ['family', 'friend', 'colleague', 'client', 'partner', 'other'];
 export const MEMORY_TYPES = ['preference', 'dislike', 'taboo', 'event', 'gift', 'promise', 'interaction', 'attribute'];
 export const MEMORY_STATUSES = ['pending', 'confirmed', 'rejected'];
+
+/** 内置关系类型的出厂播种（与 Rust/SQLite 版 initialize.sql 逐字对齐） */
+const BUILTIN_RELATION_TYPES = [
+  { key: 'family', label: '家人', sort: 1 },
+  { key: 'friend', label: '朋友', sort: 2 },
+  { key: 'colleague', label: '同事', sort: 3 },
+  { key: 'client', label: '客户', sort: 4 },
+  { key: 'partner', label: '伙伴', sort: 5 },
+  { key: 'other', label: '其他', sort: 6 },
+];
 
 // 允许的模糊日期：2026-10-17 / 2026-10 / 2026-10-__ / 每年-05-20 / 10-02
 export const FUZZY_DATE_RE = /^(?:\d{4}-\d{2}(?:-\d{2})?|\d{4}-\d{2}-__|每年-\d{2}-\d{2}|\d{2}-\d{2})$/;
@@ -25,6 +35,7 @@ export function httpError(status, message) {
 }
 
 let db = migrateDb({ schemaVersion: 0, contacts: [], memories: [], materials: [], plans: [] });
+db.relationTypes = seedRelationTypes([]);
 let saveTimer = null;
 
 function readJsonArray(file) {
@@ -32,6 +43,16 @@ function readJsonArray(file) {
     const v = JSON.parse(fs.readFileSync(file, 'utf8'));
     return Array.isArray(v) ? v : [];
   } catch { return []; }
+}
+
+/** 关系类型装载：文件缺失/为空时播种内置 6 类（幂等；已注册的自定义类型原样保留） */
+function seedRelationTypes(stored) {
+  const list = Array.isArray(stored) ? stored.filter((t) => t && typeof t.key === 'string') : [];
+  const byKey = new Map(list.map((t) => [t.key, t]));
+  for (const b of BUILTIN_RELATION_TYPES) {
+    if (!byKey.has(b.key)) byKey.set(b.key, { ...b, builtin: true, createdAt: '', updatedAt: '' });
+  }
+  return [...byKey.values()].map((t) => ({ builtin: false, sort: 100, createdAt: '', updatedAt: '', ...t }));
 }
 
 export function loadStore() {
@@ -45,6 +66,7 @@ export function loadStore() {
     materials: readJsonArray(MATERIALS_PATH),
     plans: readJsonArray(PLANS_PATH),
   });
+  db.relationTypes = seedRelationTypes(readJsonArray(RELATION_TYPES_PATH));
   writeAll();
   return db;
 }
@@ -60,6 +82,7 @@ function writeAll() {
   write(MEMORIES_PATH, db.memories);
   write(MATERIALS_PATH, db.materials);
   write(PLANS_PATH, db.plans);
+  write(RELATION_TYPES_PATH, db.relationTypes);
   write(META_PATH, { schemaVersion: CURRENT_SCHEMA_VERSION });
 }
 
@@ -76,9 +99,84 @@ function writeNow() {
   writeAll();
 }
 
+// ---------- 关系类型（注册表：内置 6 类 + 工作台自定义，联系人 relation 的合法值来源） ----------
+const RELATION_KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
+
+export function listRelationTypes() {
+  return db.relationTypes.map((t) => ({ ...t }));
+}
+
+/** 当前注册的全部 relation key（联系人校验用，动态） */
+export function relationKeys() {
+  return db.relationTypes.map((t) => t.key);
+}
+
+function assertRelation(relation) {
+  const keys = relationKeys();
+  if (!keys.includes(relation)) throw httpError(400, `relation 必须是：${keys.join(' / ')}`);
+  return relation;
+}
+
+export function createRelationType({ key, label, sort } = {}) {
+  const k = String(key ?? '').trim();
+  if (!RELATION_KEY_RE.test(k)) throw httpError(400, 'key 非法：小写字母开头，仅含小写字母/数字/下划线，不超过 32 字');
+  const name = String(label ?? '').trim();
+  if (!name) throw httpError(400, '显示名不能为空');
+  if (name.length > 40) throw httpError(400, '显示名不能超过 40 字');
+  const s = sort == null || sort === '' ? 100 : Number(sort);
+  if (!Number.isInteger(s)) throw httpError(400, 'sort 必须是整数');
+  if (relationKeys().includes(k)) throw httpError(409, `关系类型已存在: ${k}`);
+  const t = now();
+  const type = { key: k, label: name, sort: s, builtin: false, createdAt: t, updatedAt: t };
+  db.relationTypes.push(type);
+  db.relationTypes.sort((a, b) => (a.sort - b.sort) || a.key.localeCompare(b.key));
+  persist();
+  return { ...type };
+}
+
+export function updateRelationType(key, patch = {}) {
+  const t = db.relationTypes.find((x) => x.key === String(key ?? '').trim());
+  if (!t) throw httpError(404, '关系类型不存在');
+  if ('label' in patch) {
+    const name = String(patch.label ?? '').trim();
+    if (!name) throw httpError(400, '显示名不能为空');
+    if (name.length > 40) throw httpError(400, '显示名不能超过 40 字');
+    t.label = name;
+  }
+  if ('sort' in patch) {
+    const s = Number(patch.sort);
+    if (!Number.isInteger(s)) throw httpError(400, 'sort 必须是整数');
+    t.sort = s;
+  }
+  t.updatedAt = now();
+  db.relationTypes.sort((a, b) => (a.sort - b.sort) || a.key.localeCompare(b.key));
+  persist();
+  return { ...t };
+}
+
+export function deleteRelationType(key) {
+  const k = String(key ?? '').trim();
+  const i = db.relationTypes.findIndex((x) => x.key === k);
+  if (i < 0) throw httpError(404, '关系类型不存在');
+  if (db.relationTypes[i].builtin) throw httpError(403, `内置类型不可删除: ${k}`);
+  const using = db.contacts.filter((c) => c.relation === k);
+  if (using.length) {
+    const names = using.slice(0, 5).map((c) => c.name).join('、');
+    throw httpError(409, `该类型正被 ${using.length} 个联系人使用（${names}${using.length > 5 ? ' 等' : ''}），请先调整这些联系人的关系再删除`);
+  }
+  const [removed] = db.relationTypes.splice(i, 1);
+  persist();
+  return { key: removed.key };
+}
+
 // ---------- 联系人 ----------
-export function listContacts({ includeArchived = true } = {}) {
-  return includeArchived ? db.contacts : db.contacts.filter((c) => !c.archived);
+// includePending=false（默认）：待确认联系人不算正式联系人，不进任何用户可见列表/派生；
+// AI 防重复建人（contact_search / contact_add 查重 / 人名映射）需显式传 true。
+export function listContacts({ includeArchived = true, includePending = false } = {}) {
+  let list = db.contacts;
+  if (!includeArchived) list = list.filter((c) => !c.archived);
+  if (!includePending) list = list.filter((c) => (c.status || 'confirmed') !== 'pending');
+  return list;
 }
 export function getContact(id) { return db.contacts.find((c) => c.id === id) || null; }
 
@@ -165,7 +263,10 @@ export function createContact(fields = {}) {
   if (!name) throw httpError(400, '联系人姓名不能为空');
   if (name.length > 40) throw httpError(400, '姓名不能超过 40 字');
   const relation = fields.relation == null || fields.relation === '' ? 'other' : String(fields.relation);
-  if (!RELATIONS.includes(relation)) throw httpError(400, `relation 必须是：${RELATIONS.join(' / ')}`);
+  assertRelation(relation);
+  // 收录状态：AI 通道显式传 'pending' 进待确认队列；其余（手动创建/缺省）一律 confirmed
+  const status = fields.status == null || fields.status === '' ? 'confirmed' : String(fields.status);
+  if (!['pending', 'confirmed'].includes(status)) throw httpError(400, 'status 必须是：pending / confirmed');
   const t = now();
   const c = {
     id: uid('c'),
@@ -175,10 +276,22 @@ export function createContact(fields = {}) {
     birthday: normalizeBirthday(fields.birthday),
     notes: String(fields.notes ?? '').slice(0, 500),
     archived: false,
+    status,
     createdAt: t,
     updatedAt: t,
   };
   db.contacts.push(c);
+  persist();
+  return c;
+}
+
+/** 拍板收录待确认联系人（只有 pending 可转正，AI 够不到这一步） */
+export function confirmContact(id) {
+  const c = getContact(id);
+  if (!c) throw httpError(404, '联系人不存在');
+  if ((c.status || 'confirmed') !== 'pending') throw httpError(400, '只有待确认联系人可以确认收录');
+  c.status = 'confirmed';
+  c.updatedAt = now();
   persist();
   return c;
 }
@@ -195,7 +308,7 @@ export function updateContact(id, patch = {}) {
   }
   if ('relation' in patch) {
     const relation = String(patch.relation ?? '');
-    if (!RELATIONS.includes(relation)) throw httpError(400, `relation 必须是：${RELATIONS.join(' / ')}`);
+    assertRelation(relation);
     c.relation = relation;
   }
   if ('tags' in patch) c.tags = cleanTags(patch.tags);
@@ -708,6 +821,7 @@ function nextBirthdayDays(birthday) {
 export function overview() {
   // 被取代的 pending 不再进待确认队列（卡片上的「被取代」按钮点完即消失）
   const pending = listMemories({ status: 'pending' }).filter((m) => !m.supersededBy);
+  const pendingContacts = listContacts({ includeArchived: false, includePending: true }).filter((c) => c.status === 'pending');
   const upcoming = listContacts({ includeArchived: false })
     .map((c) => ({ contactId: c.id, name: c.name, birthday: c.birthday, inDays: nextBirthdayDays(c.birthday) }))
     .filter((x) => x.inDays !== null)
@@ -720,8 +834,10 @@ export function overview() {
       confirmed: db.memories.filter((m) => m.status === 'confirmed').length,
       pending: pending.length,
       rejected: db.memories.filter((m) => m.status === 'rejected').length,
+      pendingContacts: pendingContacts.length,
     },
     pending,
+    pendingContacts,
     upcoming,
   };
 }

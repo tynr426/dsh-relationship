@@ -101,6 +101,7 @@ input, select { font: inherit; color: inherit; }
 .onboarding p { margin: 4px 0 0; color: var(--label-2); }
 .pending-queue { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
 .pending-card { display: flex; gap: 12px; padding: 12px 14px; border-radius: var(--radius); background: var(--bg-panel); border: 1px solid var(--border); box-shadow: var(--shadow); }
+.pending-card.contact-pending { border-color: var(--accent); background: var(--accent-weak); }
 .pending-main { flex: 1; min-width: 0; }
 .pending-content { margin: 0 0 6px; font-size: 14px; overflow-wrap: anywhere; }
 .pending-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; color: var(--label-2); font-size: 12px; }
@@ -180,6 +181,10 @@ input, select { font: inherit; color: inherit; }
 .material-excerpt { margin: 0 0 6px; color: var(--label); font-size: 13px; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .material-meta { color: var(--label-2); font-size: 12px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .material-actions { display: flex; flex-direction: column; gap: 6px; }
+.material-report { margin-top: 8px; }
+.material-report summary { cursor: pointer; color: var(--label-2); font-size: 12px; user-select: none; }
+.material-report summary:hover { color: var(--accent); }
+.material-report pre { margin: 8px 0 0; padding: 10px 12px; background: var(--bg-panel); border: 1px solid var(--border); border-radius: var(--radius); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; line-height: 1.6; max-height: 280px; overflow-y: auto; }
 
 /* ---------- 提示 ---------- */
 .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); padding: 9px 16px; border-radius: 999px; background: var(--label); color: #fff; font-size: 13px; box-shadow: var(--shadow); z-index: 99; }
@@ -226,3 +231,14 @@ input, select { font: inherit; color: inherit; }
 .occ-plan.product a { color: var(--accent, #3b82f6); text-decoration: none; overflow-wrap: anywhere; }
 .occ-plan.product a:hover { text-decoration: underline; }
 .badge.price { background: rgba(34,197,94,.14); }
+
+/* ---------- 关系类型管理 ---------- */
+.view-head-actions { display: flex; gap: 8px; align-items: center; flex: none; }
+.relation-type-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+.rel-type-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--radius); }
+.rel-type-row .rel-type-label { flex: 1; min-width: 0; }
+.rel-type-row .rel-type-label small { color: var(--label-2); font-size: 11px; margin-left: 4px; }
+.rel-type-row .rel-type-actions { display: flex; gap: 4px; flex: none; }
+.rel-add-title { margin: 12px 0 6px; font-size: 13px; color: var(--label-2); font-weight: 500; }
+.rel-add-row { display: flex; gap: 8px; align-items: center; }
+.rel-add-row input { flex: 1; min-width: 0; }

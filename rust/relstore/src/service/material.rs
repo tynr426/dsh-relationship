@@ -164,8 +164,10 @@ impl Material {
         let conn = crate::config::relstore_connector();
         Helper::executes(
             vec![(
-                "DELETE FROM materials WHERE id=?1".to_owned(),
-                vec![("1".to_owned(), Value::from(id))],
+                // 命名参数绑定（同 memory/plan 的 remove）：?1 位置占位会被 rusqlite
+                // 拒绝绑定 :1（InvalidParameterName），此前无测试覆盖到这条路径
+                "DELETE FROM materials WHERE id=:p1".to_owned(),
+                vec![("p1".to_owned(), Value::from(id))],
             )],
             &conn,
         )?;

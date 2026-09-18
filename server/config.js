@@ -10,7 +10,9 @@ export const MATERIALS_DIR = path.join(DATA_DIR, 'materials');
 export const CONTACTS_PATH = path.join(DATA_DIR, 'contacts.json');
 export const MEMORIES_PATH = path.join(DATA_DIR, 'memories.json');
 export const MATERIALS_PATH = path.join(DATA_DIR, 'materials.json');
+export const MATERIAL_REPORTS_PATH = path.join(DATA_DIR, 'material-reports.json');
 export const PLANS_PATH = path.join(DATA_DIR, 'plans.json');
+export const RELATION_TYPES_PATH = path.join(DATA_DIR, 'relation_types.json');
 export const META_PATH = path.join(DATA_DIR, 'meta.json');
 
 export const DEFAULTS = {

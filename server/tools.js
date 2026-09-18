@@ -1,6 +1,7 @@
 // AI 工具定义与执行器：DSH 原生会话（relationship preset）经 POST /api/tools
-// 调用，或经 REST 端点复用同一校验路径。纪律：AI 写入一律 pending；
-// contact_add 前必须 contact_search（同名即拒绝）；memory_search 只返回已确认记忆。
+// 调用，或经 REST 端点复用同一校验路径。纪律：AI 写入一律 pending——记忆进
+// 待确认队列，新建联系人同样进待确认队列（工作台拍板收录）；contact_add 前
+// 必须 contact_search（同名即拒绝）；memory_search 只返回已确认记忆。
 // 素材提取另有「提取质量闸门」（gateError）：sourceQuote 原话摘录 + saidAt 时间戳
 // 命中 + direction 必填 + 查重，坏条目拒绝落库——纪律从提示词约定升级为工具层硬校验。
 import store from './store-facade.js';
@@ -24,17 +25,20 @@ export const TOOL_CN = {
   material_save: '存档原始素材',
   material_list: '列出待整理素材',
   material_get: '读取素材全文',
+  material_report: '提交素材整理报告',
+  relation_type_list: '列出关系类型',
+  pending_summary: '查看待确认队列',
 };
 
 export const TOOL_DEFS = [
-  { type: 'function', function: { name: 'contact_search', description: '按姓名或标签查找联系人。任何录入前必须先调用，避免建重', parameters: { type: 'object', required: ['query'], properties: {
+  { type: 'function', function: { name: 'contact_search', description: '按姓名或标签查找联系人（含待确认联系人，status=pending）。任何录入前必须先调用，避免建重', parameters: { type: 'object', required: ['query'], properties: {
       query: { type: 'string', description: '姓名关键词或标签' } }, additionalProperties: false } } },
-  { type: 'function', function: { name: 'contact_add', description: '新建联系人。若同名联系人已存在会拒绝，需先 contact_search 并与用户确认；tags 建议填身份标签（如 老师/同学/前同事/客户），教师节等节日与场合匹配依赖这些标签', parameters: { type: 'object', required: ['name', 'relation'], properties: {
-      name: { type: 'string' }, relation: { type: 'string', enum: RELATIONS, description: '家人/朋友/同事/客户/伙伴/其他' },
+  { type: 'function', function: { name: 'contact_add', description: '新建联系人。AI 新建一律进入工作台待确认队列，由用户确认收录；不必等待确认，直接用返回的编号继续登记记忆。若同名联系人已存在会拒绝，需先 contact_search；tags 建议填身份标签（如 老师/同学/前同事/客户），教师节等节日与场合匹配依赖这些标签', parameters: { type: 'object', required: ['name', 'relation'], properties: {
+      name: { type: 'string' }, relation: { type: 'string', description: '关系类型 key（小写英文标识）。先用 relation_type_list 查当前可用类型；默认内置：family/friend/colleague/client/partner/other' },
       tags: { type: 'array', items: { type: 'string' } }, birthday: { type: 'string', description: 'MM-DD、YYYY-MM-DD 或 每年-MM-DD，未知则留空' },
       notes: { type: 'string' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'contact_update', description: '更新联系人基础信息', parameters: { type: 'object', required: ['id'], properties: {
-      id: { type: 'string' }, name: { type: 'string' }, relation: { type: 'string', enum: RELATIONS },
+      id: { type: 'string' }, name: { type: 'string' }, relation: { type: 'string', description: '关系类型 key，先用 relation_type_list 查当前可用类型' },
       tags: { type: 'array', items: { type: 'string' } }, birthday: { type: 'string' }, notes: { type: 'string' }, archived: { type: 'boolean' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'memory_add', description: '把对话中出现的一条关系事实登记为待确认记忆。一条记忆只含一个事实；用户确认后才进入长期记忆。从素材提取（带 sourceId）时必须附 sourceQuote 原话摘录，工具会校验摘录与时间戳', parameters: { type: 'object', required: ['contactId', 'type', 'content'], properties: {
       contactId: { type: 'string' }, type: { type: 'string', enum: MEMORY_TYPES, description: '喜好/不喜好/禁忌(如过敏)/事件/礼物/承诺/往来/基础事实' },
@@ -84,9 +88,14 @@ export const TOOL_DEFS = [
       status: { type: 'string', enum: ['raw', 'processed'], description: 'raw=待整理，processed=已拆出记忆' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'material_get', description: '读取素材全文（提取前调用），返回 text 与已提取的记忆', parameters: { type: 'object', required: ['id'], properties: {
       id: { type: 'string' } }, additionalProperties: false } } },
+  { type: 'function', function: { name: 'material_report', description: '素材整理完提交整理报告：拆出的记忆清单、哪些已被既有记忆覆盖而未重复登记、发现的冲突。报告会显示在工作台素材卡上，供用户逐条确认时对照——对话里的汇报说完就没了，这是它落进工作台的唯一通道', parameters: { type: 'object', required: ['id', 'report'], properties: {
+      id: { type: 'string', description: '素材 ID' },
+      report: { type: 'string', description: '整理报告全文（拆出清单 / 已覆盖未重复登记项 / 冲突说明）' } }, additionalProperties: false } } },
+  { type: 'function', function: { name: 'relation_type_list', description: '列出当前可用的关系类型（内置 6 类 + 工作台自定义）。contact_add/contact_update 的 relation 字段必须取这里的 key；自定义类型由用户在工作台维护，AI 只读', parameters: { type: 'object', required: [], properties: {}, additionalProperties: false } } },
+  { type: 'function', function: { name: 'pending_summary', description: '查看待确认队列概览（会话开始时先调用）：有待确认记忆或待确认联系人就主动提醒用户回工作台确认。只读——确认/驳回/收录是用户的拍板动作，没有对应 AI 工具', parameters: { type: 'object', required: [], properties: {}, additionalProperties: false } } },
 ];
 
-function contactBrief(c) { return { id: c.id, name: c.name, relation: c.relation, tags: c.tags, birthday: c.birthday, archived: c.archived }; }
+function contactBrief(c) { return { id: c.id, name: c.name, relation: c.relation, tags: c.tags, birthday: c.birthday, archived: c.archived, status: c.status || 'confirmed' }; }
 function memoryOut(m) {
   const c = store.getContact(m.contactId);
   return { ...m, contactName: c?.name || '' };
@@ -229,20 +238,24 @@ async function run(name, args) {
     case 'contact_search': {
       const q = String(args.query ?? '').trim().toLowerCase();
       if (!q) return { ok: false, error: 'query 不能为空' };
-      const matches = store.listContacts()
+      // 含待确认联系人（status=pending）：AI 能看到以免建重，可直接复用其编号
+      const matches = store.listContacts({ includePending: true })
         .filter((c) => c.name.toLowerCase().includes(q) || c.tags.some((t) => t.toLowerCase().includes(q)))
         .map(contactBrief);
-      return { ok: true, matches, 提示: matches.length ? '同名/近似联系人存在时先与用户确认是否为同一人' : '未找到；新建前先与用户确认' };
+      return { ok: true, matches, 提示: matches.length
+        ? '命中即复用返回的联系人编号；status=pending 的是待用户确认收录的新联系人，同样可直接用；同名/近似称呼命中多人时先与用户确认是否同一人'
+        : '未找到；直接 contact_add 新建（会进入工作台待确认队列，用户确认后收录），拿到编号继续拆条登记' };
     }
 
     case 'contact_add': {
       const name = String(args.name ?? '').trim();
-      const dup = store.listContacts().find((c) => c.name === name);
+      // 查重含待确认联系人：pending 也占名字，防止同一人被重复建
+      const dup = store.listContacts({ includePending: true }).find((c) => c.name === name);
       if (dup) return { ok: false, code: 'DUPLICATE_NAME', status: 409, error: `已存在同名联系人「${dup.name}」（${dup.id}）。请先 contact_search 并与用户确认是否同一人；确为不同人可用 contact_update 区分标签后再建` };
-      const c = store.createContact(args);
+      const c = store.createContact({ ...args, status: 'pending' });
       changedContact(c, 'created');
       changedStats();
-      return { ok: true, contact: contactBrief(c) };
+      return { ok: true, contact: contactBrief(c), 提示: '已建为待确认联系人，用户会在工作台确认收录；不必等待确认，直接用返回的编号继续登记记忆' };
     }
 
     case 'contact_update': {
@@ -360,9 +373,10 @@ async function run(name, args) {
       for (const mem of store.listMemories({})) {
         if (mem.sourceId) sourceCount.set(mem.sourceId, (sourceCount.get(mem.sourceId) || 0) + 1);
       }
-      const names = new Map(store.listContacts({ includeArchived: true }).map((c) => [c.id, c.name]));
+      const names = new Map(store.listContacts({ includeArchived: true, includePending: true }).map((c) => [c.id, c.name]));
+      const reports = store.allMaterialReports();
       const list = store.listMaterials({ status: args.status || undefined }).slice(0, 30)
-        .map((mt) => ({ id: mt.id, status: store.materialStatus(mt), contactId: mt.contactId, contactName: names.get(mt.contactId) || '', occasion: mt.occasion || '', excerpt: mt.excerpt, capturedAt: mt.capturedAt, extractedCount: mt.extractedMemoryIds?.length ?? sourceCount.get(mt.id) ?? 0 }));
+        .map((mt) => ({ id: mt.id, status: store.materialStatus(mt), contactId: mt.contactId, contactName: names.get(mt.contactId) || '', occasion: mt.occasion || '', excerpt: mt.excerpt, capturedAt: mt.capturedAt, extractedCount: mt.extractedMemoryIds?.length ?? sourceCount.get(mt.id) ?? 0, hasReport: Boolean(reports[mt.id]) }));
       return { ok: true, materials: list };
     }
 
@@ -373,7 +387,44 @@ async function run(name, args) {
       const now = new Date();
       const week = ['日', '一', '二', '三', '四', '五', '六'][now.getDay()];
       const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}（星期${week}）`;
-      return { ok: true, today, material: { ...mt, status: store.materialStatus(mt), contactName: mt.contactId ? store.getContact(mt.contactId)?.name || '' : '', extracted: store.materialMemories(mt).map(memoryOut) } };
+      return { ok: true, today, material: { ...mt, status: store.materialStatus(mt), contactName: mt.contactId ? store.getContact(mt.contactId)?.name || '' : '', ...(store.materialReport(mt.id) || {}), extracted: store.materialMemories(mt).map(memoryOut) } };
+    }
+
+    case 'material_report': {
+      const id = String(args.id ?? '');
+      const mt = store.getMaterial(id);
+      if (!mt) return { ok: false, error: '素材不存在', status: 404 };
+      const report = String(args.report ?? '').trim();
+      if (!report) return { ok: false, error: 'report 不能为空：整理报告应写清拆出的记忆清单、哪些已被既有记忆覆盖而未重复登记、发现的冲突' };
+      if (report.length > 20_000) return { ok: false, error: '报告过长（上限 2 万字符）' };
+      const saved = store.saveMaterialReport(id, report);
+      broadcast('material.changed', { action: 'reported', materialId: id });
+      return { ok: true, report: saved, 提示: '整理报告已提交，将显示在工作台素材卡上；请提示用户回工作台逐条确认这批记忆' };
+    }
+
+    case 'relation_type_list': {
+      const relationTypes = store.listRelationTypes();
+      return { ok: true, relationTypes, 提示: `当前可用 ${relationTypes.length} 种关系类型；contact_add/contact_update 的 relation 取这里的 key` };
+    }
+
+    case 'pending_summary': {
+      // 会话开始提醒用：只读概览。被取代的 pending 不再 nag（与待确认队列口径一致）。
+      const pending = store.listMemories({ status: 'pending' }).filter((m) => !m.supersededBy);
+      const all = store.listContacts({ includeArchived: true, includePending: true });
+      const names = new Map(all.map((c) => [c.id, c.name]));
+      const pendingContacts = all.filter((c) => c.status === 'pending');
+      const items = pending.slice(0, 20).map((m) => ({ id: m.id, contactName: names.get(m.contactId) || '', type: m.type, content: m.content, sourceId: m.sourceId || '' }));
+      const nMem = pending.length;
+      const nContact = pendingContacts.length;
+      return {
+        ok: true,
+        pendingCount: nMem,
+        items,
+        pendingContacts: pendingContacts.map((c) => ({ id: c.id, name: c.name, relation: c.relation, tags: c.tags })),
+        提示: (nMem || nContact)
+          ? `有 ${nMem} 条待确认记忆${nContact ? `、${nContact} 位待确认联系人（${pendingContacts.map((c) => c.name).join('、')}）` : ''}。请主动提醒用户回工作台确认（确认是用户的拍板动作，没有 AI 工具），可简述最重要的几条`
+          : '没有待确认记忆或联系人',
+      };
     }
 
     default:

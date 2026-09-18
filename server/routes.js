@@ -61,6 +61,36 @@ async function api(req, res, url, body) {
     return true;
   }
 
+  // ---------- 关系类型 ----------
+  if (p === '/api/relations' && m('GET')) {
+    ok(res, { relationTypes: store.listRelationTypes() });
+    return true;
+  }
+  if (p === '/api/relations' && m('POST')) {
+    try {
+      const t = store.createRelationType(body);
+      broadcast('relation.changed', { action: 'created', key: t.key });
+      ok(res, { relationType: t });
+    } catch (e) { failFrom(res, e); }
+    return true;
+  }
+  if (parts[1] === 'relations' && parts[2] && !parts[3]) {
+    try {
+      if (m('PATCH')) {
+        const t = store.updateRelationType(parts[2], body);
+        broadcast('relation.changed', { action: 'updated', key: t.key });
+        ok(res, { relationType: t });
+        return true;
+      }
+      if (m('DELETE')) {
+        const { key } = store.deleteRelationType(parts[2]);
+        broadcast('relation.changed', { action: 'deleted', key });
+        ok(res, { key });
+        return true;
+      }
+    } catch (e) { failFrom(res, e); return true; }
+  }
+
   // ---------- 联系人 ----------
   if (p === '/api/contacts' && m('GET')) {
     const includeArchived = url.searchParams.get('includeArchived') !== 'false';
@@ -69,8 +99,19 @@ async function api(req, res, url, body) {
   }
   if (p === '/api/contacts' && m('POST')) {
     try {
-      const c = store.createContact(body);
+      // 手动建档即用户亲手操作，天然已拍板：status 一律强制 confirmed（pending 只来自 AI 通道）
+      const c = store.createContact({ ...body, status: undefined });
       broadcast('contact.changed', { action: 'created', contact: c });
+      emitStats();
+      ok(res, { contact: publicContact(c) });
+    } catch (e) { failFrom(res, e); }
+    return true;
+  }
+  // 拍板收录待确认联系人（GUI 专属动作，与确认记忆同层；AI 通道没有对应工具）
+  if (parts[1] === 'contacts' && parts[2] && parts[3] === 'confirm' && m('POST')) {
+    try {
+      const c = store.confirmContact(parts[2]);
+      broadcast('contact.changed', { action: 'confirmed', contact: c });
       emitStats();
       ok(res, { contact: publicContact(c) });
     } catch (e) { failFrom(res, e); }
@@ -116,7 +157,8 @@ async function api(req, res, url, body) {
       occasion: url.searchParams.get('occasion') || undefined,
       lifespan: url.searchParams.get('lifespan') || undefined,
     });
-    const contactNames = new Map(store.listContacts({ includeArchived: true }).map((c) => [c.id, c.name]));
+    // 名字映射含待确认联系人：pending 记忆卡片要能显示出「AI 新建的那个人」的名字
+    const contactNames = new Map(store.listContacts({ includeArchived: true, includePending: true }).map((c) => [c.id, c.name]));
     ok(res, { memories: list.map((x) => ({ ...x, contactName: contactNames.get(x.contactId) || '' })) });
     return true;
   }
@@ -133,8 +175,18 @@ async function api(req, res, url, body) {
     try {
       const { confirmed, failed } = store.confirmMemories(body.ids, body.edits);
       for (const mem of confirmed) broadcast('memory.changed', { action: 'confirmed', memory: mem });
+      // 确认记忆即承认了这个人：涉及的待确认联系人一并转正（同一拍板动作的连带结果）
+      const confirmedContacts = [];
+      for (const cid of [...new Set(confirmed.map((mem) => mem.contactId).filter(Boolean))]) {
+        const c = store.getContact(cid);
+        if (c && (c.status || 'confirmed') === 'pending') {
+          const cc = store.confirmContact(cid);
+          confirmedContacts.push(cc);
+          broadcast('contact.changed', { action: 'confirmed', contact: cc });
+        }
+      }
       emitStats();
-      ok(res, { confirmed, failed });
+      ok(res, { confirmed, failed, confirmedContacts });
     } catch (e) { failFrom(res, e); }
     return true;
   }
@@ -276,7 +328,8 @@ async function api(req, res, url, body) {
       if (!memBySource.has(mem.sourceId)) memBySource.set(mem.sourceId, []);
       memBySource.get(mem.sourceId).push(mem);
     }
-    const contactName = new Map(store.listContacts({ includeArchived: true }).map((c) => [c.id, c.name]));
+    const contactName = new Map(store.listContacts({ includeArchived: true, includePending: true }).map((c) => [c.id, c.name]));
+    const reports = store.allMaterialReports();
     const materials = mts.map((mt) => ({
       id: mt.id,
       status: store.materialStatus(mt),
@@ -285,6 +338,8 @@ async function api(req, res, url, body) {
       occasion: mt.occasion || '',
       excerpt: mt.excerpt,
       capturedAt: mt.capturedAt,
+      report: reports[mt.id]?.report || '',
+      reportedAt: reports[mt.id]?.reportedAt || '',
       extracted: (memBySource.get(mt.id) || []).map((mem) => ({ id: mem.id, type: mem.type, content: mem.content, status: mem.status, importance: mem.importance })),
     }));
     ok(res, { materials });
@@ -311,7 +366,7 @@ async function api(req, res, url, body) {
       if (m('GET')) {
         const mt = store.getMaterial(parts[2]);
         if (!mt) throw store.httpError(404, '素材不存在');
-        ok(res, { material: { ...mt, status: store.materialStatus(mt) } });
+        ok(res, { material: { ...mt, status: store.materialStatus(mt), ...(store.materialReport(parts[2]) || {}) } });
         return true;
       }
       if (m('DELETE')) {

@@ -42,10 +42,12 @@ pub fn ledger() -> tube::Result<Json> {
     Ok(json!({ "ok": true, "given": given, "received": received }))
 }
 
-/// 回礼待回应：v_gift_reciprocity 视图直读 + 计划状态标记
+/// 回礼待回应：v_gift_reciprocity 视图直读 + 计划状态标记（pending 联系人未收录，不参与）
 pub fn reciprocity() -> tube::Result<Json> {
     let conn = crate::config::relstore_connector();
-    let sql = "SELECT contact_id, name, last_received FROM v_gift_reciprocity ORDER BY last_received DESC";
+    let sql = "SELECT v.contact_id, v.name, v.last_received FROM v_gift_reciprocity v \
+               JOIN contacts c ON c.id = v.contact_id \
+               WHERE c.status = 'confirmed' ORDER BY v.last_received DESC";
     let rows = Helper::query(
         sql,
         vec![],
@@ -133,7 +135,11 @@ pub fn occasions(days: i64) -> tube::Result<Json> {
     let conn = crate::config::relstore_connector();
     let today = chrono::Utc::now().date_naive();
     let today_md = format!("{:02}-{:02}", today.month(), today.day());
-    let contacts = Contact::new(Value::Null).list(false)?;
+    let contacts = Contact::new(Value::Null)
+        .list(false)?
+        .into_iter()
+        .filter(|c| c["status"].as_str() != Some("pending")) // 待确认联系人未拍板收录，不参与时机
+        .collect::<Vec<Json>>();
     let plans = Plan::new(Value::Null).list()?;
     let mut items: Vec<Json> = Vec::new();
 

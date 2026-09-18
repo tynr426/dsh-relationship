@@ -1,6 +1,6 @@
 // 数据迁移：统一归一化三个集合（contacts / memories / materials）。
 // 三个 JSON 文件 + meta.json(schemaVersion)，迁移在内存中合并执行。
-export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_SCHEMA_VERSION = 6;
 
 function asArray(value, name) {
   if (value === undefined) return [];
@@ -116,6 +116,15 @@ export function migrateDb(rawDb) {
       p.updatedAt = p.updatedAt || '';
     }
     version = 5;
+    db.schemaVersion = version;
+  }
+  if (version < 6) {
+    // v6：联系人收录状态——AI 新建一律 pending，工作台拍板转正后才算正式联系人。
+    // 存量数据全部视为已收录（confirmed）。
+    for (const c of db.contacts) {
+      c.status = c.status === 'pending' ? 'pending' : 'confirmed';
+    }
+    version = 6;
     db.schemaVersion = version;
   }
   return db;

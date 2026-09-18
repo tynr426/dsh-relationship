@@ -33,6 +33,10 @@ impl TableService<ContactModel> for Contact {
 /// 行 → 契约 JSON（tags 还原为数组）
 pub fn contact_json(row: &Value) -> Json {
     let tags = serde_json::from_str::<Json>(&row.get_string("tags")).unwrap_or_else(|_| json!([]));
+    let status = {
+        let s = row.get_string("status");
+        if s.is_empty() { "confirmed".to_owned() } else { s }
+    };
     json!({
         "id": row.get_string("id"),
         "name": row.get_string("name"),
@@ -41,6 +45,7 @@ pub fn contact_json(row: &Value) -> Json {
         "birthday": row.get_string("birthday"),
         "notes": row.get_string("notes"),
         "archived": row.get_i64("archived", 0) != 0,
+        "status": status,
         "createdAt": row.get_string("createdAt"),
         "updatedAt": row.get_string("updatedAt"),
     })
@@ -101,8 +106,16 @@ impl Contact {
             let r = val.get_string("relation");
             if r.is_empty() { "other".to_owned() } else { r }
         };
-        if !["family", "friend", "colleague", "client", "partner", "other"].contains(&relation.as_str()) {
+        // relation 必须是 relation_types 注册表中的类型（内置 + 自定义），与 JSON 版动态校验对齐
+        if !super::relation_type::RelationType::exists(&relation)? {
             return Err(error!("relation 非法: {relation}"));
+        }
+        let status = {
+            let s = val.get_string("status");
+            if s.is_empty() { "confirmed".to_owned() } else { s }
+        };
+        if !["pending", "confirmed"].contains(&status.as_str()) {
+            return Err(error!("status 非法: {status}"));
         }
         let given_id = val.get_string("id");
         let id = if given_id.is_empty() { model::uid("c") } else { given_id };
@@ -116,6 +129,7 @@ impl Contact {
             "birthday": val.get_string("birthday"),
             "notes": val.get_string("notes"),
             "archived": 0i64,
+            "status": status,
             "created_at": { let c = val.get_string("createdAt"); if c.is_empty() { now.clone() } else { c } },
             "updated_at": { let u = val.get_string("updatedAt"); if u.is_empty() { now } else { u } },
         };
@@ -138,6 +152,9 @@ impl Contact {
             }
         }
         if let Some(v) = Self::provided(&val, "relation") {
+            if !super::relation_type::RelationType::exists(&v)? {
+                return Err(error!("relation 非法: {v}"));
+            }
             data.insert("relation", Value::from(v));
         }
         if let Some(v) = Self::provided(&val, "tags") {
@@ -145,6 +162,12 @@ impl Contact {
         }
         if let Some(v) = Self::provided(&val, "archived") {
             data.insert("archived", Value::from(if v == "true" { 1i64 } else { 0i64 }));
+        }
+        if let Some(v) = Self::provided(&val, "status") {
+            if !["pending", "confirmed"].contains(&v.as_str()) {
+                return Err(error!("status 非法: {v}"));
+            }
+            data.insert("status", Value::from(v));
         }
         if data.is_empty() {
             return Err(error!("未提供要更新的字段"));

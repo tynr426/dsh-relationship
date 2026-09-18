@@ -30,6 +30,28 @@ pub fn run(dir: &str, force: bool) -> tube::Result<()> {
     let memories = read("memories.json")?.as_array().cloned().unwrap_or_default();
     let materials = read("materials.json")?.as_array().cloned().unwrap_or_default();
     let plans = read("plans.json")?.as_array().cloned().unwrap_or_default();
+    // 关系类型注册表（可选文件：老版本 JSON 模式没有）
+    let relation_types = read("relation_types.json")?.as_array().cloned().unwrap_or_default();
+
+    // 联系人用的每个 relation 值都必须有注册类型（内置 + 自定义 + 数据兜底注册），
+    // 否则导入联系人时会被 relation 校验拒绝。
+    let ensure_type = |key: &str, label: &str| -> tube::Result<()> {
+        let k = key.trim();
+        if k.is_empty() || super::relation_type::RelationType::exists(k)? {
+            return Ok(());
+        }
+        super::relation_type::RelationType::add(k, if label.trim().is_empty() { k } else { label }, None)?;
+        Ok(())
+    };
+    for t in &relation_types {
+        let key = t.get("key").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+        let label = t.get("label").and_then(|v| v.as_str()).unwrap_or_default().to_owned();
+        ensure_type(&key, &label)?;
+    }
+    for c in &contacts {
+        let key = c.get("relation").and_then(|v| v.as_str()).unwrap_or("other").to_owned();
+        ensure_type(&key, &key)?;
+    }
 
     // 防误清：四个源文件一个都不存在（典型场景：已经迁移过、源文件已改名备份）时拒绝执行，
     // 避免 --force 把库清空后导入 0 条。

@@ -48,6 +48,42 @@ test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
   assert.ok(list.some((x) => x.id === c.id));
 });
 
+(hasBinary ? test : test.skip)('联系人待确认队列（status 列契约）：pending 默认不可见、拍板转正、级联拒绝', () => {
+  const p = store.createContact({ name: '待确认熊猫', relation: 'friend', status: 'pending', tags: ['朋友'] });
+  assert.equal(p.status, 'pending');
+  assert.ok(p.id.startsWith('c_'));
+
+  // 默认列表不含 pending（fail-safe：不漏进联系人页/概览/派生）；includePending 显式纳入
+  assert.equal(store.listContacts().some((c) => c.id === p.id), false);
+  assert.ok(store.listContacts({ includePending: true }).some((c) => c.id === p.id));
+
+  // getContact 可见 pending：整理流程不等收录继续拆条挂记忆
+  const m = store.createMemory({ contactId: p.id, type: 'attribute', content: '经营 GPT 中转站', author: 'ai' });
+  assert.equal(m.status, 'pending');
+
+  // overview：pendingContacts 列表与计数
+  const o = store.overview();
+  assert.ok(o.pendingContacts.some((c) => c.id === p.id));
+  assert.ok(o.counts.pendingContacts >= 1);
+
+  // 手动建档（无 status）恒 confirmed；非法 status 拒绝
+  const manual = store.createContact({ name: '手动老王' });
+  assert.equal(manual.status, 'confirmed');
+  assert.throws(() => store.createContact({ name: '坏状态', status: 'maybe' }), /status 必须是/);
+
+  // 拍板收录 → 转正进入默认列表；重复确认拒绝
+  const cc = store.confirmContact(p.id);
+  assert.equal(cc.status, 'confirmed');
+  assert.ok(store.listContacts().some((c) => c.id === p.id));
+  assert.throws(() => store.confirmContact(p.id), /只有待确认联系人/);
+
+  // 拒绝 = 删除：级联清掉挂在该 pending 联系人上的记忆
+  const p2 = store.createContact({ name: '被拒绝的熊猫', status: 'pending' });
+  store.createMemory({ contactId: p2.id, type: 'attribute', content: '将被级联删除', author: 'ai' });
+  const { removedMemories } = store.deleteContact(p2.id);
+  assert.equal(removedMemories, 1);
+});
+
 (hasBinary ? test : test.skip)('记忆全生命周期（含场景继承/确认/驳回/恢复/取代/sourceQuote 溯源）', () => {
   const c = store.createContact({ name: '曦曦' });
   const mt = store.saveMaterial({ text: '聊天：曦曦想要一套绘本', contactId: c.id, occasion: 'birthday' });
@@ -164,6 +200,23 @@ test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
   assert.ok(Array.isArray(t.memories) && Array.isArray(t.shortItems));
 });
 
+(hasBinary ? test : test.skip)('素材整理报告（facade 侧车）：rust 模式同样读写与随删清理', () => {
+  const c = store.createContact({ name: '报告老师' });
+  const mt = store.saveMaterial({ text: '报告素材正文', contactId: c.id });
+  const saved = store.saveMaterialReport(mt.id, '拆出 1 条；无冲突');
+  assert.ok(saved.reportedAt);
+  assert.equal(store.materialReport(mt.id).report, '拆出 1 条；无冲突');
+  assert.ok(store.allMaterialReports()[mt.id]);
+  // 素材删除 → 报告随之清理
+  store.deleteMaterial(mt.id);
+  assert.equal(store.materialReport(mt.id), null);
+  // 联系人级联删除素材（rust 模式素材随删）→ 报告随之清理
+  const mt2 = store.saveMaterial({ text: '报告素材正文 2', contactId: c.id });
+  store.saveMaterialReport(mt2.id, '第二条报告');
+  store.deleteContact(c.id);
+  assert.equal(store.materialReport(mt2.id), null);
+});
+
 // tools 层提取闸门 × rust 后端端到端：闸门（server/tools.js）在后端无关的
 // facade 之上，这里验证 rust 路径同样拒绝坏条目、放行合格条目并持久化 sourceQuote。
 (hasBinary ? test : test.skip)('提取闸门对 rust 后端同样生效（tools 层端到端）', async () => {
@@ -178,4 +231,36 @@ test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
   assert.equal(good.memory.status, 'pending');
   assert.equal(good.memory.sourceQuote, '方老师说周五办庆祝');
   assert.equal(good.memory.occasion, 'teacher_day', '场景继承在 rust 路径同样生效');
+});
+
+(hasBinary ? test : test.skip)('关系类型注册表 CRUD + 内置保护 + 占用检查（rust 契约）', () => {
+  // 内置 6 类
+  const initial = store.listRelationTypes();
+  assert.ok(initial.length >= 6);
+  const builtinKeys = initial.filter((t) => t.builtin).map((t) => t.key);
+  assert.deepEqual([...builtinKeys].sort(), ['client', 'colleague', 'family', 'friend', 'other', 'partner']);
+
+  // 新增自定义
+  const t = store.createRelationType({ key: 'classmate', label: '同学' });
+  assert.equal(t.key, 'classmate');
+  assert.equal(t.builtin, false);
+  assert.throws(() => store.createRelationType({ key: 'classmate', label: 'x' }), /关系类型已存在/);
+  assert.throws(() => store.createRelationType({ key: 'Bad', label: 'x' }), /key 非法/);
+
+  // 改名
+  assert.equal(store.updateRelationType('classmate', { label: '老同学' }).label, '老同学');
+  assert.throws(() => store.updateRelationType('nope', { label: 'x' }), /关系类型不存在/);
+
+  // 用自定义类型建联系人
+  const c = store.createContact({ name: '关系类型rust测试', relation: 'classmate' });
+  assert.equal(c.relation, 'classmate');
+  assert.throws(() => store.createContact({ name: '坏关系', relation: 'boss' }), /relation 必须是/);
+
+  // 占用检查
+  assert.throws(() => store.deleteRelationType('classmate'), /正被 1 个联系人使用/);
+  store.updateContact(c.id, { relation: 'friend' });
+  assert.equal(store.deleteRelationType('classmate').key, 'classmate');
+
+  // 内置不可删
+  assert.throws(() => store.deleteRelationType('family'), /内置类型不可删除/);
 });

@@ -49,6 +49,69 @@ test.describe('关系记忆工作台', () => {
     await expect(page.locator('#contact-detail')).toContainText('事件');
   });
 
+  test('AI 新建联系人进待确认队列：拍板收录 / 拒绝级联删除', async ({ page, request }) => {
+    // AI 通道（DSH 会话工具）新建联系人 → 待确认，不进用户可见列表
+    const tool = await request.post('/api/tools', { data: { name: 'contact_add', args: { name: 'E2E 熊猫', relation: 'friend' } } });
+    expect(tool.ok()).toBeTruthy();
+    const added = await tool.json();
+    const contactId = added.contact.id;
+    expect(added.contact.status).toBe('pending');
+    const contactsBefore = (await (await request.get('/api/contacts')).json()).contacts;
+    expect(contactsBefore.some((c) => c.id === contactId)).toBe(false);
+
+    // AI 不等收录，直接给待确认联系人挂待确认记忆
+    const mem = await request.post('/api/tools', { data: { name: 'memory_add', args: { contactId, type: 'attribute', content: '经营 GPT 中转站' } } });
+    expect(mem.ok()).toBeTruthy();
+    const memoryId = (await mem.json()).memory.id;
+
+    await page.goto('/');
+    // 侧栏徽标 = 待确认记忆 + 待确认联系人 合计
+    await expect(page.locator('#nav-pending-count')).toHaveText('2');
+    // 待确认联系人卡置顶队列，带 AI 新建标识
+    const contactCard = page.locator(`.pending-card.contact-pending[data-id="${contactId}"]`);
+    await expect(contactCard).toBeVisible();
+    await expect(contactCard).toContainText('E2E 熊猫');
+    await expect(contactCard).toContainText('朋友');
+    await expect(contactCard).toContainText('AI 新建联系人');
+    // 挂在待确认联系人名下的记忆卡也要显示人名，不能是「未知联系人」
+    const memCard = page.locator(`.pending-card[data-id="${memoryId}"]`);
+    await expect(memCard).toContainText('经营 GPT 中转站');
+    await expect(memCard).toContainText('E2E 熊猫');
+
+    // 收录前，联系人页看不到 TA
+    await page.locator('.nav-item[data-view="contacts"]').click();
+    await expect(page.locator('.contact-row', { hasText: 'E2E 熊猫' })).toHaveCount(0);
+
+    // 拍板收录 → 进列表；其待确认记忆仍在队列等单独拍板
+    await page.locator('.nav-item[data-view="home"]').click();
+    await contactCard.getByRole('button', { name: '确认收录' }).click();
+    await expect(page.locator('#toast')).toContainText('已收录该联系人');
+    await expect(page.locator(`.pending-card.contact-pending[data-id="${contactId}"]`)).toHaveCount(0);
+    await expect(memCard).toBeVisible();
+
+    // 确认记忆 → 时间线可见完整链路
+    await memCard.getByRole('button', { name: '确认' }).click();
+    await expect(page.locator('#toast')).toContainText('已确认进入长期记忆');
+    await page.locator('.nav-item[data-view="contacts"]').click();
+    await page.locator('.contact-row', { hasText: 'E2E 熊猫' }).click();
+    await expect(page.locator('#contact-detail')).toContainText('经营 GPT 中转站');
+
+    // 拒绝路径：AI 又建了一位 → 不要 → 页内危险确认 → 连带记忆级联删除
+    const tool2 = await request.post('/api/tools', { data: { name: 'contact_add', args: { name: 'E2E 熊猫朋友', relation: 'friend' } } });
+    const contactId2 = (await tool2.json()).contact.id;
+    await request.post('/api/tools', { data: { name: 'memory_add', args: { contactId: contactId2, type: 'attribute', content: '会被连带删除' } } });
+    await page.goto('/');
+    const rejectCard = page.locator(`.pending-card.contact-pending[data-id="${contactId2}"]`);
+    await rejectCard.getByRole('button', { name: '不要' }).click();
+    await expect(page.locator('#rel-dialog')).toBeVisible();
+    await page.locator('#rel-dialog-ok').click();
+    await expect(page.locator('#toast')).toContainText('已删除（连带 1 条记忆）');
+    await expect(page.locator(`.pending-card.contact-pending[data-id="${contactId2}"]`)).toHaveCount(0);
+    await expect(page.locator(`.pending-card[data-id]`, { hasText: '会被连带删除' })).toHaveCount(0);
+    const contactsAfter = (await (await request.get('/api/contacts')).json()).contacts;
+    expect(contactsAfter.some((c) => c.id === contactId2)).toBe(false);
+  });
+
   test('待确认记忆可以编辑后确认，也可以驳回', async ({ page, request }) => {
     const created = await request.post('/api/contacts', { data: { name: 'E2E 小陈' } });
     const contactId = (await created.json()).contact.id;
@@ -98,8 +161,8 @@ test.describe('关系记忆工作台', () => {
     await expect(page.locator('.memory-row', { hasText: '对虾蟹过敏' })).toBeVisible();
 
     const targetRow = page.locator('.memory-row', { hasText: '对虾蟹过敏' });
-    page.once('dialog', (dialog) => dialog.accept());
     await targetRow.getByRole('button', { name: '删除' }).click();
+    await page.locator('#rel-dialog-ok').click();
     await expect(page.locator('.memory-row', { hasText: '对虾蟹过敏' })).toHaveCount(0);
   });
 
@@ -137,8 +200,18 @@ test.describe('关系记忆工作台', () => {
     expect(extract.ok()).toBeTruthy();
     const createdIds = (await extract.json()).created.map((m) => m.id);
 
-    // SSE 刷新后素材卡显示已拆出，一键确认这两条
+    // AI 整理完提交整理报告：对话里的汇报经 material_report 落进工作台素材卡
+    const reported = await request.post('/api/tools', { data: { name: 'material_report', args: { id: material.id, report: '拆出 2 条：女儿十月办婚礼、对花生过敏；已被既有记忆覆盖 0 条；无冲突。' } } });
+    expect(reported.ok()).toBeTruthy();
+
+    // 会话开始提醒工具（pending_summary）能看到这两条待确认
+    const summary = await (await request.post('/api/tools', { data: { name: 'pending_summary', args: {} } })).json();
+    expect(summary.ok).toBe(true);
+    expect(summary.items.some((m) => m.id === createdIds[0])).toBe(true);
+
+    // SSE 刷新后素材卡显示已拆出 + AI 整理报告
     await expect(card).toContainText('已拆出 2 条');
+    await expect(card.locator('.material-report')).toContainText('拆出 2 条');
     // 待确认卡展示原话摘录（提取闸门溯源）
     await expect(page.locator(`.pending-card[data-id="${createdIds[0]}"]`)).toContainText('原话：他说女儿十月办婚礼');
     await card.getByRole('button', { name: '确认这 2 条' }).click();
@@ -165,8 +238,8 @@ test.describe('关系记忆工作台', () => {
     await page.locator('.contact-row', { hasText: 'E2E 待删除' }).click();
     await expect(page.locator('#contact-detail')).toContainText('将被级联删除的记忆');
 
-    page.once('dialog', (dialog) => dialog.accept());
     await page.locator('.detail-actions').getByRole('button', { name: '删除' }).click();
+    await page.locator('#rel-dialog-ok').click();
     await expect(page.locator('#toast')).toContainText('已删除联系人');
     await expect(page.locator('.contact-row', { hasText: 'E2E 待删除' })).toHaveCount(0);
     await expect(page.locator('#contact-detail')).toBeHidden();
@@ -209,9 +282,10 @@ test.describe('关系记忆工作台', () => {
   });
 
   test('嵌入 DSH（sandbox iframe 同 lib/client.js）删除联系人可用', async ({ page, request, baseURL }) => {
-    // 回归：lib/client.js 的 iframe sandbox 若缺 allow-modals，浏览器会吞掉
-    // window.confirm()（返回 false 且无弹窗），删除联系人等操作静默失效。
-    // sandbox 属性实时提取自 lib/client.js，改回去这里就会红。
+    // 回归：删除确认走页面内 confirmDialog（#rel-dialog），不依赖 iframe 的
+    // allow-modals——Electron 沙箱 iframe 里原生 confirm() 返回值经常拿不回来，
+    // 会让删除静默失效。sandbox 属性实时提取自 lib/client.js，删除流程必须
+    // 在同样的沙箱里走通。
     const clientSrc = fs.readFileSync('lib/client.js', 'utf8');
     const sandboxAttr = /setAttribute\('sandbox',\s*'([^']+)'\)/.exec(clientSrc)?.[1];
     expect(sandboxAttr, 'lib/client.js 中应能提取到 iframe sandbox 属性').toBeTruthy();
@@ -225,8 +299,6 @@ test.describe('关系记忆工作台', () => {
         <iframe src="/" sandbox="${sandboxAttr}" style="width:100vw;height:100vh;border:0"></iframe>
       </body></html>`,
     }));
-    let dialogSeen = false;
-    page.on('dialog', (dialog) => { dialogSeen = true; dialog.accept().catch(() => {}); });
 
     await page.goto(`${baseURL}/__embedded-host.html`);
     const frame = page.frames().find((f) => f.url() === `${baseURL}/`);
@@ -234,9 +306,11 @@ test.describe('关系记忆工作台', () => {
     await frame.locator('.nav-item[data-view="contacts"]').click();
     await frame.locator('.contact-row', { hasText: 'E2E 嵌入删除' }).click();
     await frame.locator('.detail-actions').getByRole('button', { name: '删除' }).click();
+    // 页面内确认弹窗必须真实出现并可点击（这才是沙箱里的可靠确认方式）
+    await expect(frame.locator('#rel-dialog')).toBeVisible();
+    await frame.locator('#rel-dialog-ok').click();
     await expect(frame.locator('#toast')).toContainText('已删除联系人');
 
-    expect(dialogSeen, '确认弹窗应真实出现（sandbox 缺 allow-modals 时会被静默吞掉）').toBe(true);
     const contacts = await (await request.get('/api/contacts')).json();
     expect(contacts.contacts.some((c) => c.id === contactId)).toBe(false);
   });
@@ -259,8 +333,9 @@ test.describe('关系记忆工作台', () => {
     await page.goto('/');
     const card = page.locator(`.pending-card[data-id="${pendingId}"]`);
     await expect(card).toContainText('好像在杭州上班');
-    page.once('dialog', (dialog) => dialog.accept(keepId));
     await card.getByRole('button', { name: '被取代' }).click();
+    await page.locator('#rel-dialog-input').fill(keepId);
+    await page.locator('#rel-dialog-ok').click();
     await expect(page.locator('#toast')).toContainText('已标记被取代');
     // 点完即从待确认队列消失（toast 与队列行为一致）
     await expect(page.locator(`.pending-card[data-id="${pendingId}"]`)).toHaveCount(0);

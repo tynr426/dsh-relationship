@@ -8,7 +8,7 @@ use std::path::Path;
 
 use deck::sqlite::{DataRow, Helper};
 use deck::{Connector, DatabaseType};
-use tube::{err_log, error, Result};
+use tube::{err_log, error, Result, Value};
 
 const INITIALIZE_SQL: &str = include_str!("../resource/sql/initialize.sql");
 
@@ -90,14 +90,17 @@ impl Initialize {
     /// 老库增量迁移：缺列即 ALTER TABLE 补上（幂等，可安全重跑）。
     /// 新增列必须 NOT NULL DEFAULT，与 initialize.sql 里的建表定义保持一致。
     fn migrate_columns(conn: &Connector) -> Result<()> {
-        let columns: Vec<String> = Helper::query(
-            "PRAGMA table_info('memories')",
-            vec![],
-            |r, _: &Option<Vec<deck::Attribute>>| r.get_string(1), // 1 = name
-            conn,
-            &None,
-        )?;
-        if !columns.iter().any(|c| c == "source_quote") {
+        let table_columns = |table: &str| -> Result<Vec<String>> {
+            Ok(Helper::query(
+                &format!("PRAGMA table_info('{table}')"),
+                vec![],
+                |r, _: &Option<Vec<deck::Attribute>>| r.get_string(1), // 1 = name
+                conn,
+                &None,
+            )?)
+        };
+        let memory_columns = table_columns("memories")?;
+        if !memory_columns.iter().any(|c| c == "source_quote") {
             Helper::execute(
                 "ALTER TABLE memories ADD COLUMN \"source_quote\" TEXT(200) NOT NULL DEFAULT ''",
                 vec![],
@@ -105,6 +108,103 @@ impl Initialize {
             )?;
             err_log!("relstore 增量迁移：memories 补列 source_quote");
         }
+        let contact_columns = table_columns("contacts")?;
+        if !contact_columns.iter().any(|c| c == "status") {
+            Helper::execute(
+                "ALTER TABLE contacts ADD COLUMN \"status\" TEXT(12) NOT NULL DEFAULT 'confirmed' CHECK (\"status\" IN ('pending','confirmed'))",
+                vec![],
+                conn,
+            )?;
+            err_log!("relstore 增量迁移：contacts 补列 status");
+        }
+        Self::ensure_relation_types(conn)?;
+        Self::relax_relation_check(conn)?;
+        Ok(())
+    }
+
+    /// 老库补建 relation_types 注册表（幂等）：缺表即建并播种 6 个内置类型。
+    fn ensure_relation_types(conn: &Connector) -> Result<()> {
+        let exists = Helper::query(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='relation_types'",
+            vec![],
+            |r, _: &Option<Vec<deck::Attribute>>| r.get_string(0).parse::<u64>().unwrap_or(0),
+            conn,
+            &None,
+        )?;
+        if exists.first().copied().unwrap_or(0) > 0 {
+            return Ok(());
+        }
+        for stmt in [
+            "CREATE TABLE \"relation_types\" (\
+               \"key\" TEXT(32) NOT NULL, \"label\" TEXT(64) NOT NULL, \
+               \"sort\" INTEGER NOT NULL DEFAULT 100, \"builtin\" INTEGER NOT NULL DEFAULT 0, \
+               \"created_at\" TEXT(64), \"updated_at\" TEXT(64), \
+               PRIMARY KEY (\"key\"), CHECK (\"builtin\" IN (0,1)))",
+            "INSERT INTO \"relation_types\" (\"key\", \"label\", \"sort\", \"builtin\") VALUES \
+               ('family','家人',1,1),('friend','朋友',2,1),('colleague','同事',3,1),\
+               ('client','客户',4,1),('partner','伙伴',5,1),('other','其他',6,1)",
+        ] {
+            Helper::execute(stmt, vec![], conn)?;
+        }
+        err_log!("relstore 增量迁移：新建 relation_types 并播种内置类型");
+        Ok(())
+    }
+
+    /// 老库 contacts 表带着写死的 relation CHECK 约束，会挡住自定义类型写入；
+    /// SQLite 无法删约束，重建表（幂等：以建表 SQL 是否仍含 relation IN 检查为准）。
+    /// 重建走「建新表 → 拷数据 → DROP 旧表 → RENAME 回原名」：不用 RENAME 离场，
+    /// 是因为 PRAGMA 是连接级设置而 deck 存在连接池，PRAGMA+RENAME 会把
+    /// 视图（v_gift_reciprocity）里的表引用一起改掉；DROP 被视图引用的表是
+    /// 允许的（视图短暂悬空，RENAME 回原名后自然恢复）。
+    fn relax_relation_check(conn: &Connector) -> Result<()> {
+        let sql = Helper::query(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='contacts'",
+            vec![],
+            |r, _: &Option<Vec<deck::Attribute>>| r.get_string(0),
+            conn,
+            &None,
+        )?;
+        let Some(create_sql) = sql.first() else { return Ok(()) };
+        // 兼容列名带引号/不带引号的建表 SQL：CHECK (relation IN (...) 变体统一按小写匹配
+        if !create_sql.to_lowercase().contains("relation in (") {
+            return Ok(());
+        }
+        err_log!("relstore 增量迁移：contacts 重建以放宽 relation CHECK 约束");
+        // 全程不允许任何时刻存在悬空视图：schema 解析（任何 DDL 的 prepare）碰到
+        // 引用缺失表的视图都会报 no such table。因此先把引用 contacts 的视图
+        // DROP 掉，RENAME 离场（无视图引用时不会触发引用重写），最后按原 SQL 重建。
+        // 全部语句走 Helper::executes 单连接事务（家法）。
+        let view_sql = Helper::query(
+            "SELECT name, sql FROM sqlite_master WHERE type='view' AND instr(lower(sql), 'contacts') > 0",
+            vec![],
+            |r, _: &Option<Vec<deck::Attribute>>| (r.get_string(0), r.get_string(1)),
+            conn,
+            &None,
+        )?;
+        let mut script: Vec<(String, Vec<(String, Value)>)> = Vec::new();
+        let mut views_to_restore: Vec<String> = Vec::new();
+        for (name, sql) in &view_sql {
+            script.push((format!("DROP VIEW IF EXISTS \"{name}\""), vec![]));
+            views_to_restore.push(sql.clone());
+        }
+        script.push(("ALTER TABLE contacts RENAME TO contacts_rebuild_legacy".to_owned(), vec![]));
+        script.push(("CREATE TABLE \"contacts\" (\
+            \"id\" TEXT(40) NOT NULL, \"name\" TEXT(80) NOT NULL, \
+            \"relation\" TEXT(32) NOT NULL DEFAULT 'other', \"tags\" TEXT(512) DEFAULT '[]', \
+            \"birthday\" TEXT(16) DEFAULT '', \"notes\" TEXT(2048) DEFAULT '', \
+            \"archived\" INTEGER NOT NULL DEFAULT 0, \"status\" TEXT(12) NOT NULL DEFAULT 'confirmed', \
+            \"created_at\" TEXT(64), \"updated_at\" TEXT(64), \
+            PRIMARY KEY (\"id\"), CHECK (\"archived\" IN (0,1)), CHECK (\"status\" IN ('pending','confirmed')))"
+            .to_owned(), vec![]));
+        script.push(("INSERT INTO \"contacts\" (\"id\",\"name\",\"relation\",\"tags\",\"birthday\",\"notes\",\"archived\",\"status\",\"created_at\",\"updated_at\") \
+            SELECT \"id\",\"name\",\"relation\",\"tags\",\"birthday\",\"notes\",\"archived\",\
+              COALESCE(NULLIF(\"status\",''),'confirmed'),\"created_at\",\"updated_at\" \
+            FROM \"contacts_rebuild_legacy\"".to_owned(), vec![]));
+        script.push(("DROP TABLE contacts_rebuild_legacy".to_owned(), vec![]));
+        for sql in &views_to_restore {
+            script.push((sql.clone(), vec![])); // 按原建视图 SQL 重建
+        }
+        Helper::executes(script, conn)?;
         Ok(())
     }
 

@@ -29,7 +29,7 @@ mod service;
 
 use config::resolve_db_path;
 use initialize::Initialize;
-use service::{contact::Contact, derive, material::Material, memory::Memory, migrate, plan::Plan};
+use service::{contact::Contact, derive, material::Material, memory::Memory, migrate, plan::Plan, relation_type::RelationType};
 
 /// CLI 入口：解析参数 → 注册连接器 → 初始化库 → 分发命令
 fn main() {
@@ -54,6 +54,7 @@ fn run(cmd: Cmd) -> tube::Result<()> {
         Cmd::Memory { cmd } => run_memory(cmd),
         Cmd::Material { cmd } => run_material(cmd),
         Cmd::Plan { cmd } => run_plan(cmd),
+        Cmd::RelationType { cmd } => run_relation_type(cmd),
         Cmd::Ledger { json } => {
             let data = derive::ledger()?;
             emit_or_print(json, "✅ 台账已生成", data);
@@ -79,15 +80,16 @@ fn run_contact(cmd: ContactCmd) -> tube::Result<()> {
             emit_or_print(json, &format!("共 {} 个联系人", data.len()), json!({ "ok": true, "contacts": data }));
             Ok(())
         }
-        ContactCmd::Add { name, relation, tags, birthday, notes, json } => {
+        ContactCmd::Add { name, relation, tags, birthday, notes, status, json } => {
             let payload = json!({
                 "name": name, "relation": relation, "tags": tags, "birthday": birthday, "notes": notes,
+                "status": status,
             });
             let c = Contact::new(Value::from(payload)).add()?;
             emit_or_print(json, &format!("✅ 已建档 {}", c["id"].as_str().unwrap_or("")), json!({ "ok": true, "contact": c }));
             Ok(())
         }
-        ContactCmd::Set { id, name, relation, tags, birthday, notes, archived, json } => {
+        ContactCmd::Set { id, name, relation, tags, birthday, notes, archived, status, json } => {
             let mut payload = serde_json::Map::new();
             payload.insert("id".into(), json!(id));
             for (k, v) in [("name", name), ("relation", relation), ("tags", tags), ("birthday", birthday), ("notes", notes)] {
@@ -97,6 +99,9 @@ fn run_contact(cmd: ContactCmd) -> tube::Result<()> {
             }
             if let Some(v) = archived {
                 payload.insert("archived".into(), json!(v));
+            }
+            if let Some(v) = status {
+                payload.insert("status".into(), json!(v));
             }
             let c = Contact::new(Value::from(Json::Object(payload))).set()?;
             emit_or_print(json, "✅ 已更新联系人", json!({ "ok": true, "contact": c }));
@@ -336,18 +341,84 @@ enum Cmd {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
+    /// 关系类型管理（内置 6 类不可删除）
+    RelationType {
+        #[command(subcommand)]
+        cmd: RelationTypeCmd,
+    },
+}
+
+fn run_relation_type(cmd: RelationTypeCmd) -> tube::Result<()> {
+    match cmd {
+        RelationTypeCmd::List { json } => {
+            let data = RelationType::list()?;
+            emit_or_print(json, &format!("共 {} 个关系类型", data.len()), json!({ "ok": true, "relationTypes": data }));
+            Ok(())
+        }
+        RelationTypeCmd::Add { key, label, sort, json } => {
+            let t = RelationType::add(&key, &label, sort)?;
+            emit_or_print(json, &format!("✅ 已新增关系类型 {}", t["key"].as_str().unwrap_or("")), json!({ "ok": true, "relationType": t }));
+            Ok(())
+        }
+        RelationTypeCmd::Set { key, label, sort, json } => {
+            let t = RelationType::set(&key, label, sort)?;
+            emit_or_print(json, &format!("✅ 已更新关系类型 {}", t["key"].as_str().unwrap_or("")), json!({ "ok": true, "relationType": t }));
+            Ok(())
+        }
+        RelationTypeCmd::Remove { key, json } => {
+            let removed = RelationType::remove(&key)?;
+            emit_or_print(json, &format!("✅ 已删除关系类型 {removed}"), json!({ "ok": true, "removed": removed }));
+            Ok(())
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum RelationTypeCmd {
+    /// 列出关系类型（sort 升序）
+    List {
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// 新增自定义关系类型
+    Add {
+        #[arg(long, help = "小写字母开头，仅含小写字母/数字/下划线，≤32 字")]
+        key: String,
+        #[arg(long, help = "显示名（≤40 字）")]
+        label: String,
+        #[arg(long)]
+        sort: Option<i64>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// 更新显示名/排序（key 不可改）
+    Set {
+        key: String,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        sort: Option<i64>,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// 删除自定义类型（内置拒绝；仍被联系人使用拒绝）
+    Remove {
+        key: String,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
 enum ContactCmd {
-    /// 列出联系人（默认不含归档，--archived 含归档）
+    /// 列出联系人（默认不含归档；待确认（pending）联系人同样列出，是否纳入由调用方决定）
     List {
         #[arg(long, default_value_t = false)]
         archived: bool,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
-    /// 新增联系人
+    /// 新增联系人（--status pending 进待确认队列，默认 confirmed）
     Add {
         #[arg(long)]
         name: String,
@@ -359,6 +430,8 @@ enum ContactCmd {
         birthday: String,
         #[arg(long, default_value = "")]
         notes: String,
+        #[arg(long, default_value = "confirmed")]
+        status: String,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -377,6 +450,8 @@ enum ContactCmd {
         notes: Option<String>,
         #[arg(long)]
         archived: Option<bool>,
+        #[arg(long, help = "收录状态 pending/confirmed（拍板转正走这里）")]
+        status: Option<String>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },

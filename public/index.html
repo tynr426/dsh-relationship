@@ -87,7 +87,10 @@
             <h1>联系人</h1>
             <p class="view-sub">关系记忆按人聚合</p>
           </div>
-          <button id="btn-new-contact" class="primary-btn" type="button">＋ 新建联系人</button>
+          <div class="view-head-actions">
+            <button id="btn-manage-relations" class="ghost-btn" type="button">关系类型</button>
+            <button id="btn-new-contact" class="primary-btn" type="button">＋ 新建联系人</button>
+          </div>
         </div>
         <div class="contacts-layout">
           <div id="contact-list" class="contact-list" aria-label="联系人列表"></div>
@@ -210,6 +213,21 @@
         <div class="modal-actions">
           <button type="button" class="ghost-btn" id="qmt-cancel">取消</button>
           <button type="submit" class="primary-btn" id="qmt-ok">保存素材</button>
+        </div>
+      </form>
+      <!-- 关系类型管理 -->
+      <form id="form-relations" class="modal-body hidden">
+        <h3>关系类型</h3>
+        <p class="smart-hint">联系人的「关系」从这里取。内置 6 类不可删除（显示名可改）；自定义类型被联系人使用时需先调整联系人。</p>
+        <div id="relation-type-list" class="relation-type-list" aria-label="关系类型列表"></div>
+        <h4 class="rel-add-title">新增类型</h4>
+        <div class="rel-add-row">
+          <input id="rt-key" placeholder="标识（小写英文，如 classmate）" maxlength="32"/>
+          <input id="rt-label" placeholder="显示名（如 同学）" maxlength="40"/>
+          <button type="submit" class="primary-btn" id="rt-ok">添加</button>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="ghost-btn" id="rt-cancel">关闭</button>
         </div>
       </form>
       <!-- 礼物计划 -->

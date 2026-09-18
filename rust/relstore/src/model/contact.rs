@@ -23,6 +23,8 @@ pub struct Contact {
     pub notes: String,
     /// 是否归档（0/1）
     pub archived: i64,
+    /// 收录状态（pending/confirmed：AI 新建一律 pending，工作台拍板转正）
+    pub status: String,
     /// 创建时间
     #[field(rename = "createdAt")]
     pub created_at: String,

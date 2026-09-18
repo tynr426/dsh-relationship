@@ -23,6 +23,9 @@ test('tool registry exposes the documented tool set', () => {
 test('contact_add rejects duplicates until confirmed via contact_search', async () => {
   const first = await tools.executeTool('contact_add', { name: '老李', relation: 'client' });
   assert.equal(first.ok, true);
+  // AI 通道新建一律进待确认队列（拍板收录是 GUI 动作）
+  assert.equal(first.contact.status, 'pending');
+  assert.ok(first.提示.includes('待确认联系人'));
   const dup = await tools.executeTool('contact_add', { name: '老李', relation: 'client' });
   assert.equal(dup.ok, false);
   assert.equal(dup.code, 'DUPLICATE_NAME');
@@ -30,9 +33,48 @@ test('contact_add rejects duplicates until confirmed via contact_search', async 
   const found = await tools.executeTool('contact_search', { query: '老李' });
   assert.equal(found.ok, true);
   assert.equal(found.matches.length, 1);
+  assert.equal(found.matches[0].status, 'pending', 'contact_search 须如实标注 pending');
   const none = await tools.executeTool('contact_search', { query: '不存在的人' });
   assert.equal(none.ok, true);
   assert.equal(none.matches.length, 0);
+});
+
+test('AI 新建联系人进待确认队列：默认列表不可见、可挂记忆、拍板收录后转正', async () => {
+  const added = await tools.executeTool('contact_add', { name: '熊猫', relation: 'friend', tags: ['朋友', '中转站'] });
+  assert.equal(added.ok, true);
+  const id = added.contact.id;
+
+  // pending 联系人不进用户可见列表（联系人页/概览/生日提醒），显式 includePending 才纳入
+  assert.equal(store.listContacts().some((c) => c.id === id), false);
+  assert.ok(store.listContacts({ includePending: true }).some((c) => c.id === id));
+
+  // 整理流程不等收录：pending 联系人可正常挂待确认记忆
+  const mem = await tools.executeTool('memory_add', { contactId: id, type: 'attribute', content: '经营 GPT 中转站' });
+  assert.equal(mem.ok, true);
+  assert.equal(mem.memory.contactName, '熊猫');
+
+  // pending_summary 同时汇报待确认联系人与记忆
+  const summary = await tools.executeTool('pending_summary', {});
+  assert.ok(summary.pendingContacts.some((c) => c.id === id && c.name === '熊猫'));
+  assert.ok(summary.提示.includes('待确认联系人'));
+
+  // overview：pendingContacts 列表与计数
+  const ov = store.overview();
+  assert.ok(ov.pendingContacts.some((c) => c.id === id));
+  assert.ok(ov.counts.pendingContacts >= 1);
+
+  // 拍板收录（store 层 = 工作台路径）→ 转正进入默认列表；重复确认拒绝
+  const confirmed = store.confirmContact(id);
+  assert.equal(confirmed.status, 'confirmed');
+  assert.ok(store.listContacts().some((c) => c.id === id));
+  assert.throws(() => store.confirmContact(id), /只有待确认联系人/);
+
+  // 拒绝 = 删除：pending 联系人连同其待确认记忆一并清除
+  const p2 = await tools.executeTool('contact_add', { name: '会被拒绝的人', relation: 'friend' });
+  await tools.executeTool('memory_add', { contactId: p2.contact.id, type: 'attribute', content: '将被级联删除的属性' });
+  const { removedMemories } = store.deleteContact(p2.contact.id);
+  assert.equal(removedMemories, 1);
+  assert.equal(store.getContact(p2.contact.id), null);
 });
 
 test('memory_add always creates pending; confirm is UI-only (AI channel refuses)', async () => {
@@ -176,4 +218,70 @@ test('material tools: save → list raw → get → batch extract with sourceId/
   await tools.executeTool('gift_plan_delete', { id: planAdd.plan.id });
   assert.equal((await tools.executeTool('gift_plan_list', {})).plans.length, 0);
   assert.equal(await tools.executeTool('material_list', { status: 'raw' }).then((r) => r.materials.some((mt) => mt.id === materialId)), false);
+});
+
+test('material_report 落库整理报告，material_get 随身携带', async () => {
+  const c = store.createContact({ name: '报告小李' });
+  const saved = await tools.executeTool('material_save', { text: '2026-09-11 20:30 小李说他女儿十月办婚礼', contactId: c.id });
+  const mtId = saved.material.id;
+
+  const empty = await tools.executeTool('material_report', { id: mtId, report: '  ' });
+  assert.equal(empty.ok, false);
+  const notFound = await tools.executeTool('material_report', { id: 'mt_none', report: 'x' });
+  assert.equal(notFound.ok, false);
+  assert.equal(notFound.status, 404);
+
+  const okRes = await tools.executeTool('material_report', { id: mtId, report: '拆出 1 条：女儿十月办婚礼；已有记忆覆盖 0 条；无冲突' });
+  assert.equal(okRes.ok, true);
+  assert.ok(okRes.report.reportedAt, '报告应带提交时间');
+  assert.ok(okRes.提示.includes('工作台'));
+
+  const got = await tools.executeTool('material_get', { id: mtId });
+  assert.equal(got.material.report, '拆出 1 条：女儿十月办婚礼；已有记忆覆盖 0 条；无冲突');
+  const listed = await tools.executeTool('material_list', {});
+  assert.equal(listed.materials.find((mt) => mt.id === mtId).hasReport, true);
+
+  // 二次提交覆盖旧报告（AI 重新整理同一素材）
+  const again = await tools.executeTool('material_report', { id: mtId, report: '重新整理：无新增事实' });
+  assert.equal(again.ok, true);
+  assert.equal((await tools.executeTool('material_get', { id: mtId })).material.report, '重新整理：无新增事实');
+});
+
+test('pending_summary 供会话开始提醒：只读、计数与队列一致、不含被取代项', async () => {
+  const c = store.createContact({ name: '待确认小李' });
+  const baseline = (await tools.executeTool('pending_summary', {})).pendingCount;
+  await tools.executeTool('memory_add', { contactId: c.id, type: 'event', content: 'pending_summary 测试事实' });
+  const after = await tools.executeTool('pending_summary', {});
+  assert.equal(after.ok, true);
+  assert.equal(after.pendingCount, baseline + 1);
+  assert.ok(after.提示.includes('回工作台确认'));
+  assert.ok(after.items.some((m) => m.content === 'pending_summary 测试事实' && m.contactName === '待确认小李'));
+
+  // 被取代的 pending 不再进入提醒（与待确认队列口径一致）
+  const keep = store.createMemory({ contactId: c.id, type: 'event', content: '取代依据事实', author: 'user' });
+  const target = store.listMemories({ contactId: c.id, status: 'pending' }).find((m) => m.content === 'pending_summary 测试事实');
+  store.supersedeMemory(target.id, keep.id);
+  const afterSupersede = await tools.executeTool('pending_summary', {});
+  assert.equal(afterSupersede.pendingCount, baseline);
+});
+
+test('relation_type_list 只读工具返回当前可用类型', async () => {
+  const r = await tools.executeTool('relation_type_list', {});
+  assert.equal(r.ok, true);
+  assert.ok(Array.isArray(r.relationTypes));
+  assert.ok(r.relationTypes.length >= 6);
+  const keys = r.relationTypes.map((t) => t.key);
+  assert.ok(keys.includes('family'));
+  assert.ok(keys.includes('friend'));
+  assert.ok(r.提示.includes('contact_add'));
+});
+
+test('contact_add 用自定义关系类型（先注册后使用）', async () => {
+  store.createRelationType({ key: 'mentor', label: '导师' });
+  const added = await tools.executeTool('contact_add', { name: '导师测试', relation: 'mentor' });
+  assert.equal(added.ok, true);
+  assert.equal(added.contact.relation, 'mentor');
+  // 无效 relation 仍被拒
+  const bad = await tools.executeTool('contact_add', { name: '坏关系', relation: 'boss' });
+  assert.equal(bad.ok, false);
 });

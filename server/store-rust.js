@@ -90,14 +90,82 @@ function cleanTags(tags) {
   return [...new Set(cleaned)];
 }
 
+// ---------- 关系类型（注册表：内置 6 类 + 工作台自定义，联系人 relation 的合法值来源） ----------
+const RELATION_KEY_RE = /^[a-z][a-z0-9_]{0,31}$/;
+
+export function listRelationTypes() {
+  const { relationTypes } = cli(['relation-type', 'list']);
+  return relationTypes;
+}
+
+/** 当前注册的全部 relation key（联系人校验用，动态） */
+export function relationKeys() {
+  return listRelationTypes().map((t) => t.key);
+}
+
+function assertRelation(relation) {
+  const keys = relationKeys();
+  if (!keys.includes(relation)) throw httpError(400, `relation 必须是：${keys.join(' / ')}`);
+  return relation;
+}
+
+export function createRelationType({ key, label, sort } = {}) {
+  const k = String(key ?? '').trim();
+  if (!RELATION_KEY_RE.test(k)) throw httpError(400, 'key 非法：小写字母开头，仅含小写字母/数字/下划线，不超过 32 字');
+  const name = String(label ?? '').trim();
+  if (!name) throw httpError(400, '显示名不能为空');
+  if (name.length > 40) throw httpError(400, '显示名不能超过 40 字');
+  const s = sort == null || sort === '' ? undefined : Number(sort);
+  if (s !== undefined && !Number.isInteger(s)) throw httpError(400, 'sort 必须是整数');
+  if (RELATIONS.includes(k)) throw httpError(409, `关系类型已存在: ${k}`);
+  const { relationType } = cli(['relation-type', 'add', '--key', k, '--label', name, ...(s !== undefined ? ['--sort', String(s)] : [])]);
+  return relationType;
+}
+
+export function updateRelationType(key, patch = {}) {
+  const args = ['relation-type', 'set', String(key)];
+  if ('label' in patch) {
+    const name = String(patch.label ?? '').trim();
+    if (!name) throw httpError(400, '显示名不能为空');
+    if (name.length > 40) throw httpError(400, '显示名不能超过 40 字');
+    args.push('--label', name);
+  }
+  if ('sort' in patch) {
+    const s = Number(patch.sort);
+    if (!Number.isInteger(s)) throw httpError(400, 'sort 必须是整数');
+    args.push('--sort', String(s));
+  }
+  if (args.length === 3) throw httpError(400, '未提供要更新的字段');
+  const { relationType } = cli(args);
+  return relationType;
+}
+
+export function deleteRelationType(key) {
+  const k = String(key ?? '').trim();
+  // 内置保护与占用检查在 Node 侧给出准确状态码（403/409），CLI 错误仅作兜底
+  const type = listRelationTypes().find((t) => t.key === k);
+  if (!type) throw httpError(404, '关系类型不存在');
+  if (type.builtin) throw httpError(403, `内置类型不可删除: ${k}`);
+  const using = listContacts({ includeArchived: true, includePending: true }).filter((c) => c.relation === k);
+  if (using.length) {
+    const names = using.slice(0, 5).map((c) => c.name).join('、');
+    throw httpError(409, `该类型正被 ${using.length} 个联系人使用（${names}${using.length > 5 ? ' 等' : ''}），请先调整这些联系人的关系再删除`);
+  }
+  cli(['relation-type', 'remove', k]);
+  return { key: k };
+}
+
 // ---------- 联系人 ----------
-export function listContacts({ includeArchived = true } = {}) {
+// 语义与 JSON 版一致：CLI 层如实返回存储（含 pending），是否纳入待确认联系人是 Node 的调用方决定
+export function listContacts({ includeArchived = true, includePending = false } = {}) {
   const { contacts } = cli(['contact', 'list', ...(includeArchived ? ['--archived'] : [])]);
-  return contacts;
+  let list = contacts;
+  if (!includePending) list = list.filter((c) => (c.status || 'confirmed') !== 'pending');
+  return list;
 }
 
 export function getContact(id) {
-  return listContacts({ includeArchived: true }).find((c) => c.id === id) || null;
+  return listContacts({ includeArchived: true, includePending: true }).find((c) => c.id === id) || null;
 }
 
 export function createContact(fields = {}) {
@@ -105,14 +173,27 @@ export function createContact(fields = {}) {
   if (!name) throw httpError(400, '联系人姓名不能为空');
   if (name.length > 40) throw httpError(400, '姓名不能超过 40 字');
   const relation = fields.relation == null || fields.relation === '' ? 'other' : String(fields.relation);
-  if (!RELATIONS.includes(relation)) throw httpError(400, `relation 必须是：${RELATIONS.join(' / ')}`);
+  assertRelation(relation);
+  // 收录状态：AI 通道显式传 'pending' 进待确认队列；其余（手动创建/缺省）一律 confirmed
+  const status = fields.status == null || fields.status === '' ? 'confirmed' : String(fields.status);
+  if (!['pending', 'confirmed'].includes(status)) throw httpError(400, 'status 必须是：pending / confirmed');
   const { contact } = cli(['contact', 'add',
     '--name', name,
     '--relation', relation,
     '--tags', cleanTags(fields.tags).join(','),
     '--birthday', normalizeFuzzyDate(fields.birthday ?? '', '生日'),
     '--notes', String(fields.notes ?? '').slice(0, 500),
+    '--status', status,
   ]);
+  return contact;
+}
+
+/** 拍板收录待确认联系人（只有 pending 可转正，AI 够不到这一步） */
+export function confirmContact(id) {
+  const c = getContact(id);
+  if (!c) throw httpError(404, '联系人不存在');
+  if ((c.status || 'confirmed') !== 'pending') throw httpError(400, '只有待确认联系人可以确认收录');
+  const { contact } = cli(['contact', 'set', String(id), '--status', 'confirmed']);
   return contact;
 }
 
@@ -126,7 +207,7 @@ export function updateContact(id, patch = {}) {
   }
   if ('relation' in patch) {
     const relation = String(patch.relation ?? '');
-    if (!RELATIONS.includes(relation)) throw httpError(400, `relation 必须是：${RELATIONS.join(' / ')}`);
+    assertRelation(relation);
     args.push('--relation', relation);
   }
   if ('tags' in patch) args.push('--tags', cleanTags(patch.tags).join(','));
@@ -520,6 +601,7 @@ export function overview() {
   // 被取代的 pending 不再进待确认队列（卡片上的「被取代」按钮点完即消失）
   const pending = listMemories({ status: 'pending' }).filter((m) => !m.supersededBy);
   const memories = listMemories();
+  const pendingContacts = listContacts({ includeArchived: false, includePending: true }).filter((c) => c.status === 'pending');
   const upcoming = listContacts({ includeArchived: false })
     .map((c) => ({ contactId: c.id, name: c.name, birthday: c.birthday, inDays: nextBirthdayDays(c.birthday) }))
     .filter((x) => x.inDays !== null)
@@ -532,8 +614,10 @@ export function overview() {
       confirmed: memories.filter((m) => m.status === 'confirmed').length,
       pending: pending.length,
       rejected: memories.filter((m) => m.status === 'rejected').length,
+      pendingContacts: pendingContacts.length,
     },
     pending,
+    pendingContacts,
     upcoming,
   };
 }

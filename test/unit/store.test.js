@@ -403,3 +403,68 @@ test('V5: 礼物计划 CRUD、标已送闭环、回礼派生、台账与时机�
   assert.equal(m5.plans[0].status, 'idea');
   assert.equal(m5.plans[0].source, 'user');
 });
+
+test('V6: 关系类型注册表 CRUD + 内置保护 + 占用检查 + 动态校验', () => {
+  const { listRelationTypes, createRelationType, updateRelationType, deleteRelationType, createContact, updateContact } = store;
+
+  // 播种：内置 6 类
+  const initial = listRelationTypes();
+  assert.ok(initial.length >= 6);
+  assert.ok(initial.every((t) => typeof t.key === 'string' && typeof t.label === 'string'));
+  const builtinKeys = initial.filter((t) => t.builtin).map((t) => t.key);
+  assert.deepEqual([...builtinKeys].sort(), ['client', 'colleague', 'family', 'friend', 'other', 'partner']);
+
+  // 新增自定义类型
+  const t = createRelationType({ key: 'classmate', label: '同学' });
+  assert.equal(t.key, 'classmate');
+  assert.equal(t.label, '同学');
+  assert.equal(t.builtin, false);
+  assert.ok(listRelationTypes().some((x) => x.key === 'classmate'));
+
+  // key 格式校验
+  assert.throws(() => createRelationType({ key: 'Bad', label: 'x' }), /key 非法/);
+  assert.throws(() => createRelationType({ key: '1bad', label: 'x' }), /key 非法/);
+  assert.throws(() => createRelationType({ key: 'a'.repeat(33), label: 'x' }), /key 非法/);
+  assert.throws(() => createRelationType({ key: 'ok', label: '' }), /显示名不能为空/);
+
+  // 重复 key
+  assert.throws(() => createRelationType({ key: 'classmate', label: '同学2' }), /关系类型已存在/);
+  assert.throws(() => createRelationType({ key: 'friend', label: '老友' }), /关系类型已存在/);
+
+  // 改名
+  const renamed = updateRelationType('classmate', { label: '老同学' });
+  assert.equal(renamed.label, '老同学');
+  assert.throws(() => updateRelationType('classmate', { label: '' }), /显示名不能为空/);
+  assert.throws(() => updateRelationType('nope', { label: 'x' }), /关系类型不存在/);
+
+  // 用自定义类型建联系人
+  const c = createContact({ name: '关系类型测试', relation: 'classmate' });
+  assert.equal(c.relation, 'classmate');
+
+  // 无效 relation 被拒
+  assert.throws(() => createContact({ name: '坏关系', relation: 'boss' }), /relation 必须是/);
+  assert.throws(() => updateContact(c.id, { relation: 'boss' }), /relation 必须是/);
+
+  // 占用检查：被引用时不能删除
+  assert.throws(() => deleteRelationType('classmate'), /正被 1 个联系人使用/);
+  // 改掉联系人的关系后可删
+  updateContact(c.id, { relation: 'friend' });
+  const removed = deleteRelationType('classmate');
+  assert.equal(removed.key, 'classmate');
+  assert.equal(listRelationTypes().some((x) => x.key === 'classmate'), false);
+
+  // 内置类型不可删除
+  assert.throws(() => deleteRelationType('family'), /内置类型不可删除/);
+  assert.throws(() => deleteRelationType('friend'), /内置类型不可删除/);
+});
+
+test('V6: 关系类型持久化跨重载', () => {
+  const { listRelationTypes, createRelationType, flush, loadStore } = store;
+  createRelationType({ key: 'neighbor', label: '邻居' });
+  flush();
+  loadStore();
+  const list = listRelationTypes();
+  assert.ok(list.some((t) => t.key === 'neighbor' && t.label === '邻居'));
+  // 内置仍在
+  assert.ok(list.some((t) => t.key === 'family' && t.builtin));
+});

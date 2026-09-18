@@ -10,3 +10,4 @@ pub mod material;
 pub mod memory;
 pub mod migrate;
 pub mod plan;
+pub mod relation_type;

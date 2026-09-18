@@ -6,6 +6,11 @@
   const $$ = (s, root = document) => [...root.querySelectorAll(s)];
 
   const RELATION_CN = { family: '家人', friend: '朋友', colleague: '同事', client: '客户', partner: '伙伴', other: '其他' };
+  // 关系类型显示名：优先用服务端注册表的 label，回退到内置映射，再回退到原始 key（均已转义）
+  function relationCn(key) {
+    const t = state.relationTypes.find((x) => x.key === key);
+    return esc(t?.label || RELATION_CN[key] || key);
+  }
   const TYPE_CN = { preference: '喜好', dislike: '不喜好', taboo: '禁忌', event: '事件', gift: '礼物', promise: '承诺', interaction: '往来', attribute: '基础' };
   const TYPE_ORDER = ['event', 'preference', 'dislike', 'taboo', 'gift', 'promise', 'interaction', 'attribute'];
 
@@ -28,6 +33,7 @@
     editingPlanId: null,
     suggestContactId: null,
     suggestPlanId: null,
+    relationTypes: [],
   };
 
   const DSH_SESSION_KEY = 'rel.dshSessionId';
@@ -57,6 +63,68 @@
     el.classList.remove('hidden');
     clearTimeout(toastTimer);
     toastTimer = setTimeout(() => el.classList.add('hidden'), 2600);
+  }
+
+  // 页面内确认/输入对话框：iframe 沙箱里 window.confirm/prompt 的返回值在 Electron
+  // 下经常拿不回来（弹窗能弹、点击结果不回传，confirm() 返回 falsy 导致删除静默失效），
+  // 一律改用 DOM 对话框。
+  let dialogResolver = null;
+  function closeDialog(value) {
+    const bd = $('#rel-dialog');
+    if (!bd) return;
+    bd.remove();
+    const r = dialogResolver; dialogResolver = null;
+    if (r) r(value);
+  }
+  // confirmDialog(msg) → Promise<boolean>；promptDialog(msg, placeholder) → Promise<string|null>
+  function confirmDialog(msg, { danger = false } = {}) {
+    return new Promise((resolve) => {
+      closeDialog(null); // 顺带清掉残留对话框
+      dialogResolver = resolve;
+      const bd = document.createElement('div');
+      bd.id = 'rel-dialog';
+      bd.className = 'modal-backdrop';
+      bd.innerHTML = `<div class="modal" role="alertdialog" aria-modal="true">
+        <div class="modal-body">
+          <h3>${danger ? '危险操作' : '请确认'}</h3>
+          <p style="margin:0;font-size:13.5px;line-height:1.6;white-space:pre-wrap">${esc(msg)}</p>
+          <div class="modal-actions">
+            <button type="button" id="rel-dialog-cancel" class="ghost-btn">取消</button>
+            <button type="button" id="rel-dialog-ok" class="primary-btn" ${danger ? 'style="background:#c0392b"' : ''}>确定</button>
+          </div>
+        </div></div>`;
+      document.body.appendChild(bd);
+      $('#rel-dialog-cancel').onclick = () => closeDialog(false);
+      $('#rel-dialog-ok').onclick = () => closeDialog(true);
+      bd.addEventListener('mousedown', (e) => { if (e.target === bd) closeDialog(false); });
+      $('#rel-dialog-ok').focus();
+    });
+  }
+  function promptDialog(msg, placeholder = '') {
+    return new Promise((resolve) => {
+      closeDialog(null);
+      dialogResolver = resolve;
+      const bd = document.createElement('div');
+      bd.id = 'rel-dialog';
+      bd.className = 'modal-backdrop';
+      bd.innerHTML = `<div class="modal" role="dialog" aria-modal="true">
+        <div class="modal-body">
+          <h3>请输入</h3>
+          <p style="margin:0;font-size:13.5px;line-height:1.6">${esc(msg)}</p>
+          <input id="rel-dialog-input" placeholder="${esc(placeholder)}" style="padding:8px 10px;border:1px solid var(--border);border-radius:8px">
+          <div class="modal-actions">
+            <button type="button" id="rel-dialog-cancel" class="ghost-btn">取消</button>
+            <button type="button" id="rel-dialog-ok" class="primary-btn">确定</button>
+          </div>
+        </div></div>`;
+      document.body.appendChild(bd);
+      const input = $('#rel-dialog-input');
+      $('#rel-dialog-cancel').onclick = () => closeDialog(null);
+      $('#rel-dialog-ok').onclick = () => closeDialog(input.value.trim() || null);
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') closeDialog(input.value.trim() || null); });
+      bd.addEventListener('mousedown', (e) => { if (e.target === bd) closeDialog(null); });
+      input.focus();
+    });
   }
 
   async function api(path, opts = {}) {
@@ -141,13 +209,15 @@
 
   async function refresh() {
     try {
-      const [overview, contacts, materials, gifts] = await Promise.all([
+      const [overview, contacts, materials, gifts, relations] = await Promise.all([
         api('/api/overview'), api('/api/contacts'), api('/api/materials'),
         api('/api/gifts/occasions').catch(() => null),
+        api('/api/relations').catch(() => ({ relationTypes: [] })),
       ]);
       state.overview = overview;
       state.contacts = contacts.contacts;
       state.materials = materials.materials;
+      state.relationTypes = relations.relationTypes || [];
       if (gifts) {
         state.gift.occasions = gifts.occasions || [];
         state.plans = gifts.plans || [];
@@ -196,7 +266,7 @@
   function renderNav() {
     $$('.nav-item').forEach((btn) => btn.classList.toggle('active', btn.dataset.view === state.view));
     $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${state.view}`));
-    const pending = state.overview.counts.pending || 0;
+    const pending = (state.overview.counts.pending || 0) + (state.overview.counts.pendingContacts || 0);
     const navPending = $('#nav-pending-count');
     navPending.textContent = String(pending);
     navPending.classList.toggle('hidden', pending === 0);
@@ -208,25 +278,45 @@
 
   function renderHome() {
     const c = state.overview.counts;
+    const pendingTotal = (c.pending || 0) + (c.pendingContacts || 0);
     $('#metric-cards').innerHTML = [
       { label: '联系人', value: c.contacts || 0 },
       { label: '长期记忆', value: c.confirmed || 0 },
-      { label: '待确认', value: c.pending || 0, alert: (c.pending || 0) > 0 },
+      { label: '待确认', value: pendingTotal, alert: pendingTotal > 0 },
       { label: '已驳回', value: c.rejected || 0 },
     ].map((m) => `<div class="metric-card${m.alert ? ' alert' : ''}"><b>${m.value}</b><span>${m.label}</span></div>`).join('');
 
     $('#onboarding').classList.toggle('hidden', (c.contacts || 0) > 0);
 
     const queue = state.overview.pending || [];
+    const pendingContacts = state.overview.pendingContacts || [];
     const queueEl = $('#pending-queue');
-    if (!queue.length) {
+    if (!queue.length && !pendingContacts.length) {
       queueEl.innerHTML = `<div class="empty">${(c.contacts || 0) === 0 ? '还没有联系人。新建一个，或在 DSH 会话里对助手说出你想记住的事。' : '没有待确认的记忆，一切就绪。'}</div>`;
     } else {
+      // AI 新建联系人也进拍板队列：确认收录 / 不要（连带删掉 AI 为 TA 挂的待确认记忆）
+      const contactCards = pendingContacts.map((ct) => `
+        <article class="pending-card contact-pending" data-id="${esc(ct.id)}">
+          <div class="pending-main">
+            <p class="pending-content"><b>${esc(ct.name)}</b> · ${relationCn(ct.relation)}${ct.tags?.length ? ' · ' + esc(ct.tags.join(' / ')) : ''}</p>
+            ${ct.notes ? `<p class="pending-content">${esc(ct.notes)}</p>` : ''}
+            <div class="pending-meta">
+              <span class="badge type">AI 新建联系人</span>
+              <span>AI 认为 TA 值得记住，待你确认收录</span>
+            </div>
+          </div>
+          <div class="pending-actions">
+            <button class="primary-btn" data-action="confirm-contact" data-id="${esc(ct.id)}">确认收录</button>
+            <button class="ghost-btn" data-action="reject-contact" data-id="${esc(ct.id)}">不要</button>
+          </div>
+        </article>`).join('');
       const toolbar = queue.length > 1
         ? `<div class="queue-toolbar"><button class="ghost-btn" data-action="confirm-all">全部确认（${queue.length} 条）</button></div>`
         : '';
-      queueEl.innerHTML = toolbar + queue.map((m) => {
-        const contact = state.contacts.find((x) => x.id === m.contactId);
+      queueEl.innerHTML = contactCards + toolbar + queue.map((m) => {
+        // 待确认记忆可能挂在待确认联系人名下（AI 整理新建的人），两处一起找名字
+        const contact = state.contacts.find((x) => x.id === m.contactId)
+          || pendingContacts.find((x) => x.id === m.contactId);
         const editing = state.editingPendingId === m.id;
         const typeOptions = TYPE_ORDER.map((t) => `<option value="${t}"${m.type === t ? ' selected' : ''}>${TYPE_CN[t]}</option>`).join('');
         const dirOptions = [['', '无（自身属性）'], ['user_to_contact', '我对TA'], ['contact_to_user', 'TA对我'], ['both', '双向']]
@@ -303,6 +393,10 @@
             ${mt.contactName ? `<span class="badge">${esc(mt.contactName)}</span>` : ''}
             <span>${esc((mt.capturedAt || '').slice(0, 10))}</span>
           </div>
+          ${mt.report ? `<details class="material-report"${pendingCount ? ' open' : ''}>
+            <summary>AI 整理报告${mt.reportedAt ? ` · ${esc((mt.reportedAt || '').slice(0, 10))}` : ''}</summary>
+            <pre>${esc(mt.report)}</pre>
+          </details>` : ''}
         </div>
         <div class="material-actions">
           ${pendingCount ? `<button class="primary-btn" data-action="confirm-material" data-id="${esc(mt.id)}">确认这 ${pendingCount} 条</button>` : ''}
@@ -406,7 +500,7 @@
       listEl.innerHTML = state.contacts.map((c) => `
         <button type="button" class="contact-row${c.id === state.activeContactId ? ' active' : ''}" data-id="${esc(c.id)}">
           <span class="avatar">${esc(initial(c.name))}</span>
-          <span class="who"><b>${esc(c.name)}</b><small>${RELATION_CN[c.relation] || esc(c.relation)}${c.tags.length ? ' · ' + esc(c.tags.join(' / ')) : ''}</small></span>
+          <span class="who"><b>${esc(c.name)}</b><small>${relationCn(c.relation)}${c.tags.length ? ' · ' + esc(c.tags.join(' / ')) : ''}</small></span>
           ${c.archived ? '<span class="badge archived-tag">已归档</span>' : ''}
         </button>`).join('');
     }
@@ -433,7 +527,7 @@
         <div>
           <h2>${esc(c.name)}</h2>
           <div class="detail-meta">
-            <span class="badge type">${RELATION_CN[c.relation] || esc(c.relation)}</span>
+            <span class="badge type">${relationCn(c.relation)}</span>
             ${c.birthday ? `<span class="badge date">生日 ${esc(fmtDate(c.birthday))}</span>` : ''}
             ${c.tags.map((x) => `<span class="badge">${esc(x)}</span>`).join('')}
           </div>
@@ -510,6 +604,16 @@
         await api('/api/memories/confirm', { method: 'POST', body: { ids: [id] } });
         toast('已确认进入长期记忆');
         await refresh();
+      } else if (action === 'confirm-contact') {
+        await api(`/api/contacts/${id}/confirm`, { method: 'POST' });
+        toast('已收录该联系人');
+        await refresh();
+      } else if (action === 'reject-contact') {
+        const r = await confirmDialog('不收录这位联系人？AI 为 TA 登记的待确认记忆会一并删除。', { danger: true });
+        if (!r) return;
+        const del = await api(`/api/contacts/${id}`, { method: 'DELETE' });
+        toast(`已删除（连带 ${del.removedMemories} 条记忆）`);
+        await refresh();
       } else if (action === 'confirm-all') {
         const ids = (state.overview.pending || []).map((m) => m.id);
         if (!ids.length) return;
@@ -534,7 +638,7 @@
           toast('整理提示词已复制，粘贴到 DSH 会话即可');
         } catch (e) { toast(e.message || '复制失败，请手动复制素材 ID：' + id, true); }
       } else if (action === 'delete-material') {
-        if (!window.confirm('删除这段素材？已拆出的记忆不受影响。')) return;
+        if (!(await confirmDialog('删除这段素材？已拆出的记忆不受影响。', { danger: true }))) return;
         await api(`/api/materials/${id}`, { method: 'DELETE' });
         toast('已删除素材');
         await refresh();
@@ -552,7 +656,7 @@
       } else if (action === 'plan-edit') {
         openPlanModal(undefined, undefined, undefined, state.plans.find((p) => p.id === id));
       } else if (action === 'plan-delete') {
-        if (!window.confirm('删除这个礼物计划？')) return;
+        if (!(await confirmDialog('删除这个礼物计划？', { danger: true }))) return;
         await api(`/api/plans/${id}`, { method: 'DELETE' });
         toast('已删除计划');
         await refresh();
@@ -591,7 +695,7 @@
         toast('已驳回（可在需要时恢复）');
         await refresh();
       } else if (action === 'supersede-ask') {
-        const keepId = window.prompt('这条记忆被哪条已确认记忆取代了？粘贴那条记忆的 ID（m_ 开头，时间线里可查）：');
+        const keepId = await promptDialog('这条记忆被哪条已确认记忆取代了？粘贴那条记忆的 ID（m_ 开头，时间线里可查）：', 'm_…');
         if (!keepId) return;
         try {
           await api('/api/memories/supersede', { method: 'POST', body: { id, keepId: keepId.trim() } });
@@ -613,7 +717,7 @@
         toast('已保存');
         await refresh();
       } else if (action === 'delete-memory') {
-        if (!window.confirm('删除这条记忆？删除即真删，不可恢复。')) return;
+        if (!(await confirmDialog('删除这条记忆？删除即真删，不可恢复。', { danger: true }))) return;
         await api(`/api/memories/${id}`, { method: 'DELETE' });
         toast('已删除');
         await refresh();
@@ -623,10 +727,27 @@
         toast(contact?.archived ? '已取消归档' : '已归档');
         await refresh();
       } else if (action === 'delete-contact') {
-        if (!window.confirm('删除该联系人及其全部记忆？删除即真删，不可恢复。')) return;
+        if (!(await confirmDialog('删除该联系人及其全部记忆？删除即真删，不可恢复。', { danger: true }))) return;
         const r = await api(`/api/contacts/${id}`, { method: 'DELETE' });
         toast(`已删除联系人（含 ${r.removedMemories} 条记忆）`);
         await refresh();
+      } else if (action === 'rel-rename') {
+        const key = actionBtn.dataset.key;
+        const t = state.relationTypes.find((x) => x.key === key);
+        const label = await promptDialog(`把「${t?.label || key}」的显示名改为：`, t?.label || '');
+        if (!label) return;
+        await api(`/api/relations/${key}`, { method: 'PATCH', body: { label } });
+        toast('已改名');
+        await refresh();
+        renderRelationTypes();
+      } else if (action === 'rel-delete') {
+        const key = actionBtn.dataset.key;
+        const t = state.relationTypes.find((x) => x.key === key);
+        if (!(await confirmDialog(`删除关系类型「${t?.label || key}」？被引用时将拒绝删除。`, { danger: true }))) return;
+        await api(`/api/relations/${key}`, { method: 'DELETE' });
+        toast('已删除');
+        await refresh();
+        renderRelationTypes();
       }
     } catch (err) {
       toast(err.message || '操作失败', true);
@@ -646,9 +767,30 @@
     $('#qmt-contact').innerHTML = '<option value="">自动识别（可能涉及多人）</option>' + options;
   }
 
+  function fillRelationSelect(selected = 'friend') {
+    if (!state.relationTypes.length) return; // 保留 HTML 静态 options 作为兜底
+    const sel = $('#nc-relation');
+    const cur = sel.value || selected;
+    sel.innerHTML = state.relationTypes.map((t) => `<option value="${esc(t.key)}"${t.key === cur ? ' selected' : ''}>${esc(t.label)}</option>`).join('');
+  }
+
+  function renderRelationTypes() {
+    const list = state.relationTypes;
+    $('#relation-type-list').innerHTML = list.length ? list.map((t) => `
+      <div class="rel-type-row" data-key="${esc(t.key)}">
+        <span class="rel-type-label"><b>${esc(t.label)}</b> <small>${esc(t.key)}</small></span>
+        ${t.builtin ? '<span class="badge">内置</span>' : ''}
+        <span class="rel-type-actions">
+          <button type="button" class="icon-btn" data-action="rel-rename" data-key="${esc(t.key)}">改名</button>
+          ${t.builtin ? '' : `<button type="button" class="icon-btn danger" data-action="rel-delete" data-key="${esc(t.key)}">删除</button>`}
+        </span>
+      </div>`).join('') : '<div class="empty">还没有关系类型。</div>';
+  }
+
   function openModal(which) {
     $('#modal-backdrop').classList.remove('hidden');
     $('#form-contact').classList.toggle('hidden', which !== 'contact');
+    if (which === 'contact') fillRelationSelect();
     const isMemory = which === 'memory';
     $$('.modal-tabs').forEach((t) => t.classList.toggle('hidden', !isMemory));
     if (isMemory) {
@@ -658,7 +800,9 @@
     }
     $('#form-plan').classList.toggle('hidden', which !== 'plan');
     $('#form-suggest').classList.toggle('hidden', which !== 'suggest');
-    ($(`#${which === 'contact' ? 'nc-name' : which === 'plan' ? 'plan-contact' : which === 'suggest' ? 'suggest-list' : 'qm-content'}`))?.focus?.();
+    $('#form-relations').classList.toggle('hidden', which !== 'relations');
+    if (which === 'relations') renderRelationTypes();
+    ($(`#${which === 'contact' ? 'nc-name' : which === 'plan' ? 'plan-contact' : which === 'suggest' ? 'suggest-list' : which === 'relations' ? 'rt-key' : 'qm-content'}`))?.focus?.();
   }
   function closeModal() {
     $('#modal-backdrop').classList.add('hidden');
@@ -666,16 +810,19 @@
     $('#form-quick-memory').reset();
     $('#form-plan').reset();
     $('#form-suggest').reset();
+    $('#form-relations').reset();
     state.editingPlanId = null;
     state.suggestContactId = null;
     state.suggestPlanId = null;
   }
   $('#btn-new-contact').addEventListener('click', () => openModal('contact'));
+  $('#btn-manage-relations').addEventListener('click', () => openModal('relations'));
   $('#btn-quick-memory').addEventListener('click', () => {
     if (!state.contacts.length) { toast('先新建一个联系人', true); openModal('contact'); return; }
     openModal('memory');
   });
   $('#nc-cancel').addEventListener('click', closeModal);
+  $('#rt-cancel').addEventListener('click', closeModal);
   $('#qm-cancel').addEventListener('click', closeModal);
   $('#qmt-cancel').addEventListener('click', closeModal);
   $$('#modal-backdrop [data-role="plan-cancel"]').forEach((btn) => btn.addEventListener('click', closeModal));
@@ -696,6 +843,21 @@
       closeModal();
       toast('联系人已创建');
       await refresh();
+    } catch (err) { toast(err.message, true); }
+  });
+
+  $('#form-relations').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const key = $('#rt-key').value.trim();
+    const label = $('#rt-label').value.trim();
+    if (!key || !label) { toast('标识和显示名都不能为空', true); return; }
+    try {
+      await api('/api/relations', { method: 'POST', body: { key, label } });
+      $('#rt-key').value = '';
+      $('#rt-label').value = '';
+      toast('已添加');
+      await refresh();
+      renderRelationTypes();
     } catch (err) { toast(err.message, true); }
   });
 
@@ -825,7 +987,7 @@
   // ---------- SSE ----------
   function connectEvents() {
     const es = new EventSource('api/events');
-    const relevant = ['memory.changed', 'contact.changed', 'material.changed', 'plan.changed', 'overview'];
+    const relevant = ['memory.changed', 'contact.changed', 'material.changed', 'plan.changed', 'relation.changed', 'overview'];
     for (const name of relevant) es.addEventListener(name, scheduleRefresh);
     es.onopen = () => markStatus(true);
     es.onerror = () => markStatus(false);

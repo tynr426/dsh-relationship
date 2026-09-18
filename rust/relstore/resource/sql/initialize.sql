@@ -9,20 +9,44 @@ DROP TABLE IF EXISTS "memories";
 DROP TABLE IF EXISTS "materials";
 DROP TABLE IF EXISTS "plans";
 DROP TABLE IF EXISTS "contacts";
+DROP TABLE IF EXISTS "relation_types";
+
+-- 关系类型注册表：key 为联系人 relation 字段的存储值，label 为显示名。
+-- 自定义类型由工作台增删改；内置 6 类（builtin=1）不可删除。
+CREATE TABLE "relation_types" (
+  "key" TEXT(32) NOT NULL,
+  "label" TEXT(64) NOT NULL,
+  "sort" INTEGER NOT NULL DEFAULT 100,
+  "builtin" INTEGER NOT NULL DEFAULT 0,
+  "created_at" TEXT(64),
+  "updated_at" TEXT(64),
+  PRIMARY KEY ("key"),
+  CHECK ("builtin" IN (0,1))
+);
+
+-- 播种内置类型（与历史写死列表一致；created_at 留空表示出厂内置）
+INSERT INTO "relation_types" ("key", "label", "sort", "builtin") VALUES
+  ('family', '家人', 1, 1),
+  ('friend', '朋友', 2, 1),
+  ('colleague', '同事', 3, 1),
+  ('client', '客户', 4, 1),
+  ('partner', '伙伴', 5, 1),
+  ('other', '其他', 6, 1);
 
 CREATE TABLE "contacts" (
   "id" TEXT(40) NOT NULL,
   "name" TEXT(80) NOT NULL,
-  "relation" TEXT(16) NOT NULL DEFAULT 'other',
+  "relation" TEXT(32) NOT NULL DEFAULT 'other',
   "tags" TEXT(512) DEFAULT '[]',
   "birthday" TEXT(16) DEFAULT '',
   "notes" TEXT(2048) DEFAULT '',
   "archived" INTEGER NOT NULL DEFAULT 0,
+  "status" TEXT(12) NOT NULL DEFAULT 'confirmed',
   "created_at" TEXT(64),
   "updated_at" TEXT(64),
   PRIMARY KEY ("id"),
-  CHECK ("relation" IN ('family','friend','colleague','client','partner','other')),
-  CHECK ("archived" IN (0,1))
+  CHECK ("archived" IN (0,1)),
+  CHECK ("status" IN ('pending','confirmed'))
 );
 
 CREATE TABLE "materials" (
