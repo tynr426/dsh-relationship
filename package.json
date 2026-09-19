@@ -3,6 +3,16 @@
   "version": "0.1.0",
   "description": "dsh-relationship 关系记忆工作台: a local relationship-memory workbench plugin for DeepSeek Harness. Contacts, confirmable AI memory extraction, pending queue, contact timelines, native relationship preset.",
   "type": "module",
+  "license": "Apache-2.0",
+  "author": "tynr426",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tynr426/dsh-relationship.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tynr426/dsh-relationship/issues"
+  },
+  "homepage": "https://github.com/tynr426/dsh-relationship#readme",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",

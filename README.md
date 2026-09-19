@@ -9,9 +9,7 @@
 3. **整理归 AI**——归类、去重、冲突标记由 AI 完成，你只做确认和删改。
 4. **本地存储**——数据保存在本机，不上传任何服务。
 
-设计文档：`docs/`（源自《AI关系记忆与智能礼赠平台商业计划书》关系记忆模块的插件化设计）。
-
-## 功能（M1）
+## 功能
 
 - 联系人管理：关系类型、标签、生日（支持只记月日）。
 - 待确认队列：AI 提取的候选记忆逐条确认 / 编辑 / 驳回，支持一键全部确认。
@@ -19,6 +17,7 @@
 - 联系人时间线：已确认记忆按人聚合，按类型筛选。
 - 手动记一笔：不经过 AI 的直接录入（即录即确认）。
 - relationship preset：绑定 DSH 原生会话的「关系记忆」AI 行为。
+- 双存储后端：默认零依赖 JSON 文件存储；可选 rust 实现的 SQLite 后端（`npm run build:relstore` 编译，无二进制时自动回退 JSON）。
 
 ## 使用方式
 
@@ -27,7 +26,8 @@
 安装 dsh-relationship 插件包后，GUI 侧边栏出现「关系记忆」入口；数据存于 `~/.dsh/dsh-relationship`。DSH 会话中选择「关系记忆」preset（或经安装脚本安装）即可对话录入：
 
 ```sh
-scripts/install-relationship-preset.sh   # 安装 preset 到 ~/.dsh/.agent-presets/relationship
+dsh plugin --profile web add tynr426/dsh-relationship   # 从 GitHub 安装插件
+scripts/install-relationship-preset.sh                   # 安装 preset 到 ~/.dsh/.agent-presets/relationship
 ```
 
 ### 独立运行
@@ -61,3 +61,7 @@ npm test
 ```
 
 详见 `AGENTS.md`。
+
+## License
+
+[Apache-2.0](LICENSE)
