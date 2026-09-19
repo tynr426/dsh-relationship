@@ -141,6 +141,39 @@ test('闸门边界：摘录在首个时间戳之前（无锚点）只做集合�
   assert.equal(honest.ok, true);
 });
 
+test('闸门：摘录跨消息（内含时间戳）拒绝；同一摘录对同一联系人只支撑一条事实', async () => {
+  // 跨消息摘录：把时间戳前缀包进摘录，内含完整时间戳即拒（打包多条的典型形态）
+  const spans = await tools.executeTool('memory_add', { contactId: contact.id, type: 'event', content: '跨消息打包的庆祝计划', sourceId: materialId, sourceQuote: '2026年09月10日 20:03 妈妈：方老师说周五想给孩子们办个小庆祝', saidAt: '2026-09-10 20:03' });
+  assert.equal(spans.ok, false);
+  assert.equal(spans.code, 'QUOTE_SPANS_STAMP');
+
+  // 同批两条不同事实复用同一摘录（同联系人）→ 第二条拒绝
+  const batch = await tools.executeTool('memory_batch_add', { entries: [
+    { contactId: contact.id, type: 'attribute', content: '孩子特别喜欢方老师的课', sourceId: materialId, sourceQuote: '孩子特别喜欢', saidAt: '2026-09-10 20:11' },
+    { contactId: contact.id, type: 'attribute', content: '孩子对方老师印象很好', sourceId: materialId, sourceQuote: '孩子特别喜欢', saidAt: '2026-09-10 20:11' },
+  ] });
+  assert.equal(batch.created.length, 1);
+  assert.equal(batch.failed.length, 1);
+  assert.equal(batch.failed[0].index, 1);
+  assert.equal(batch.failed[0].code, 'DUPLICATE_QUOTE');
+
+  // 既有 pending 记忆占住的摘录，同联系人换个内容复用也拒
+  const again = await tools.executeTool('memory_add', { contactId: contact.id, type: 'attribute', content: '孩子很认方老师', sourceId: materialId, sourceQuote: '孩子特别喜欢', saidAt: '2026-09-10 20:11' });
+  assert.equal(again.ok, false);
+  assert.equal(again.code, 'DUPLICATE_QUOTE');
+
+  // 跨联系人复用放行：素材里同一句话可同时涉及多人
+  const relay = store.createContact({ name: '转述人' });
+  const cross = await tools.executeTool('memory_add', { contactId: relay.id, type: 'event', content: '转述了方老师的庆祝计划', direction: 'contact_to_user', sourceId: materialId, sourceQuote: '方老师说周五想给孩子们办个小庆祝', saidAt: '2026-09-10 20:03' });
+  assert.equal(cross.ok, true, JSON.stringify(cross));
+
+  // 驳回后摘录释放：用户驳回后 AI 重新提取同一事实不受已驳回摘录阻塞
+  const rejected = store.listMemories({ contactId: contact.id }).find((m) => m.content === '孩子特别喜欢方老师的课');
+  store.rejectMemory(rejected.id, '不要这条');
+  const reextract = await tools.executeTool('memory_add', { contactId: contact.id, type: 'attribute', content: '孩子特别喜欢方老师的课', sourceId: materialId, sourceQuote: '孩子特别喜欢', saidAt: '2026-09-10 20:11' });
+  assert.equal(reextract.ok, true, JSON.stringify(reextract));
+});
+
 test('会话直录（无 sourceId）：不做素材闸门，但方向校验仍生效', async () => {
   const c3 = store.createContact({ name: '会话联系人' });
   const noDir = await tools.executeTool('memory_add', { contactId: c3.id, type: 'interaction', content: '约了下周三吃饭' });

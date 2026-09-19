@@ -50,7 +50,7 @@ export const TOOL_DEFS = [
       occasion: { type: 'string', description: '场景标签：teacher_day/birthday/thank_you/visit 等小写标签，可自由定义；能判断场景时填' },
       sourceId: { type: 'string', description: '来源素材 ID（从素材提取时必填，用于溯源）' },
       sourceQuote: { type: 'string', description: '原话摘录：逐字摘自素材原文、只覆盖该条事实（≤200 字）；带 sourceId 时必填，闸门校验是否真在素材里' } }, additionalProperties: false } } },
-  { type: 'function', function: { name: 'memory_batch_add', description: '一段素材拆出多条事实时批量登记，每条独立校验（含提取闸门：sourceQuote 原话摘录、saidAt 时间戳命中、direction 必填、查重）', parameters: { type: 'object', required: ['entries'], properties: {
+  { type: 'function', function: { name: 'memory_batch_add', description: '一段素材拆出多条事实时批量登记，每条独立校验（含提取闸门：sourceQuote 原话摘录、saidAt 时间戳命中、direction 必填、查重、同一摘录对同一联系人不得复用且不得跨消息）', parameters: { type: 'object', required: ['entries'], properties: {
       entries: { type: 'array', items: { type: 'object', properties: {
         contactId: { type: 'string' }, type: { type: 'string', enum: MEMORY_TYPES }, content: { type: 'string' },
         date: { type: 'string', description: '事实时间' }, saidAt: { type: 'string', description: '话语时间，如 2026-09-11 20:03' },
@@ -114,8 +114,10 @@ function changedStats() {
 // ---------- 提取质量闸门（AI 通道） ----------
 // 素材提取（带 sourceId）逐条硬校验，坏条目拒绝落库并给出可修正的错误：
 // ① interaction/gift/promise 必带 direction；② sourceQuote 原话摘录必填且
-// 逐字出自素材原文；③ saidAt 必须命中素材时间戳（摘录所在消息的时间就是话语
-// 时间，错位/编造一律拒）；④ 内容与既有已确认/待确认记忆或同批条目重复即拒。
+// 逐字出自素材原文，内含完整时间戳（跨消息摘录）即拒；③ saidAt 必须命中素材
+// 时间戳（摘录所在消息的时间就是话语时间，错位/编造一律拒）；④ 内容与既有
+// 已确认/待确认记忆或同批条目重复即拒；⑤ 同一摘录对同一联系人只支撑一条
+// 事实，复用即拒（跨联系人放行：素材里一句话可同时涉及多人；驳回后释放）。
 const DIRECTION_REQUIRED_TYPES = ['interaction', 'gift', 'promise'];
 const STAMP_RE = /(\d{4})[年\-/.](\d{1,2})[月\-/.](\d{1,2})日?\s*(\d{1,2})[：:](\d{2})/g;
 const STAMP_ONLY_RE = /^(\d{4})[年\-/.](\d{1,2})[月\-/.](\d{1,2})日?\s*(\d{1,2})[：:](\d{2})$/;
@@ -164,6 +166,10 @@ function gateError(entry, ctx) {
   if (exactAt < 0 && !looseOk) {
     return { code: 'QUOTE_MISMATCH', error: 'sourceQuote 必须逐字摘自素材原文（不得改写、拼接或凭印象复述）' };
   }
+  // 摘录内含完整时间戳 = 跨多条消息摘录，疑似把多条事实打包成一条
+  if ([...quote.matchAll(STAMP_RE)].length > 0) {
+    return { code: 'QUOTE_SPANS_STAMP', error: 'sourceQuote 内含完整时间戳，说明摘录跨越了多条消息：一条摘录只覆盖该条事实所在的单条消息原话' };
+  }
 
   const { full, bareTimes } = ctx.stamps(sourceId, text);
   const saidAt = String(entry.saidAt ?? '').trim();
@@ -191,15 +197,22 @@ function gateError(entry, ctx) {
   if (dup) {
     return { code: 'DUPLICATE_CONTENT', error: `与${dup.status === 'confirmed' ? '已确认' : '待确认'}记忆 ${dup.id}「${String(dup.content).slice(0, 40)}」重复：已被覆盖的事实不重复登记` };
   }
+  // 一条摘录只支撑一条事实：同一摘录对同一联系人复用即拒；跨联系人放行
+  // （素材里一句话可同时涉及多人），驳回/被取代的记忆不占摘录
+  if (sourceId && ctx.quoteDup(mt, quote.replace(/\s+/g, ''), String(entry.contactId ?? ''))) {
+    return { code: 'DUPLICATE_QUOTE', error: 'sourceQuote 已被该联系人的另一条记忆引用：一条摘录只支撑一条事实，请为本条另选只覆盖它的原话' };
+  }
   return null;
 }
 
-/** 批量/单条共用的懒加载上下文：素材、时间戳集合、按联系人的既有记忆。 */
+/** 批量/单条共用的懒加载上下文：素材、时间戳集合、按联系人的既有记忆、摘录占用。 */
 function gateContext() {
   const materials = new Map();
   const stamps = new Map();
   const existing = new Map();
   const seen = new Map();
+  // 摘录占用：sourceId -> (规范化摘录 -> 引用过它的联系人集合)，懒加载自既有记忆
+  const quoteOwners = new Map();
   return {
     material(id) {
       if (!materials.has(id)) materials.set(id, store.getMaterial(id) || null);
@@ -221,6 +234,28 @@ function gateContext() {
       if (!contactId || !content) return;
       if (!seen.has(contactId)) seen.set(contactId, new Set());
       seen.get(contactId).add(content);
+    },
+    quoteDup(mt, normQuote, contactId) {
+      if (!quoteOwners.has(mt.id)) {
+        const owners = new Map();
+        for (const m of store.materialMemories(mt)) {
+          if (m.supersededBy || (m.status !== 'confirmed' && m.status !== 'pending')) continue;
+          const q = String(m.sourceQuote ?? '').replace(/\s+/g, '');
+          if (!q) continue;
+          if (!owners.has(q)) owners.set(q, new Set());
+          owners.get(q).add(String(m.contactId));
+        }
+        quoteOwners.set(mt.id, owners);
+      }
+      const owners = quoteOwners.get(mt.id).get(normQuote);
+      return owners ? owners.has(contactId) : false;
+    },
+    markQuote(sourceId, contactId, normQuote) {
+      if (!sourceId || !contactId || !normQuote) return;
+      if (!quoteOwners.has(sourceId)) quoteOwners.set(sourceId, new Map());
+      const owners = quoteOwners.get(sourceId);
+      if (!owners.has(normQuote)) owners.set(normQuote, new Set());
+      owners.get(normQuote).add(contactId);
     },
   };
 }
@@ -287,6 +322,7 @@ async function run(name, args) {
         else {
           valid.push({ index, entry });
           ctx.mark(String(entry.contactId ?? ''), String(entry.content ?? '').trim());
+          ctx.markQuote(String(entry.sourceId ?? '').trim(), String(entry.contactId ?? ''), String(entry.sourceQuote ?? '').trim().replace(/\s+/g, ''));
         }
       }
       let created = [];
