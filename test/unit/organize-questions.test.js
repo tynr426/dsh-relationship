@@ -1,5 +1,6 @@
-// 整理反问测试：登记/校验/清除四条路径——AI 登记（工具层校验 options）、
-// 用户工作台作答后清除、整理报告提交自动清除、素材删除级联清除。
+// 整理反问测试：登记/校验/送达状态机/清除四条路径——AI 登记（工具层校验 options）、
+// 工作台送达标记（sent/copied，标记不清除）、AI done 或报告提交权威清除、
+// 用户手动放弃清除、素材删除级联清除。
 // 场景动机：反问只落在对话里会让工作台用户无感知（一直没反应）。
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -45,9 +46,41 @@ test('登记：工具校验 + 落库可读', async () => {
   assert.equal(q.options.length, 2);
   assert.ok(q.options.every((o) => o.label && o.command && o.command.includes(mt.id)), '作答指令须自足（含素材 ID）');
   assert.ok(store.allOrganizeQuestions()[mt.id], '全量映射含该素材');
+  assert.equal(q.status, 'pending', '新登记的待答反问');
+  assert.equal(q.sentAt, '');
+  assert.equal(q.copiedAt, '');
 });
 
-test('清除①：工作台作答（REST 同款 facade 调用）', () => {
+test('状态机：发送标记送达、复制只记时间（复制不算送达）、标记一律不清除', async () => {
+  await executeTool('organize_question', {
+    materialId: mt.id,
+    question: '这条记忆要不要登记？',
+    options: [
+      { label: '照常登记', command: `素材 ${mt.id} 照常登记` },
+      { label: '跳过', command: `素材 ${mt.id} 跳过` },
+    ],
+  });
+  // 独立模式作答=复制：只记 copiedAt，不算送达
+  store.markOrganizeQuestionCopied(mt.id);
+  let q = store.organizeQuestion(mt.id);
+  assert.equal(q.status, 'pending', '复制不算送达');
+  assert.ok(q.copiedAt, '记录复制时间');
+  assert.equal(q.sentAt, '');
+  assert.ok(q, '复制后反问保留，等粘贴到 DSH / AI done / 手动放弃');
+  // 嵌入模式作答=发送成功：标 sent
+  store.markOrganizeQuestionSent(mt.id);
+  q = store.organizeQuestion(mt.id);
+  assert.equal(q.status, 'sent');
+  assert.ok(q.sentAt, '记录送达时间');
+  assert.ok(q, '送达标记不清除反问——清除是 AI done / 报告 / 手动放弃的事');
+  // 素材不存在 404（与登记同款校验）
+  assert.throws(() => store.markOrganizeQuestionSent('mt_ghost'), /素材不存在/);
+  assert.throws(() => store.markOrganizeQuestionCopied('mt_ghost'), /素材不存在/);
+  store.clearOrganizeQuestion(mt.id);
+  assert.equal(store.organizeQuestion(mt.id), null);
+});
+
+test('清除①：用户手动放弃（REST 同款 facade 调用）', () => {
   store.clearOrganizeQuestion(mt.id);
   assert.equal(store.organizeQuestion(mt.id), null);
 });

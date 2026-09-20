@@ -62,6 +62,16 @@ function allOrganizeQuestions() {
 function clearOrganizeQuestion(id) {
   organizeQuestions.removeOrganizeQuestions([String(id)]);
 }
+// 送达标记：嵌入模式发送成功 / 独立模式复制成功由前端上报（复制不算送达，status 不变）。
+// 标记不清除反问——清除只由 AI done、整理报告提交、用户手动放弃（DELETE）触发。
+function markOrganizeQuestionSent(id) {
+  if (!impl.getMaterial(String(id))) throw impl.httpError(404, '素材不存在');
+  return organizeQuestions.markOrganizeQuestionSent(String(id));
+}
+function markOrganizeQuestionCopied(id) {
+  if (!impl.getMaterial(String(id))) throw impl.httpError(404, '素材不存在');
+  return organizeQuestions.markOrganizeQuestionCopied(String(id));
+}
 // ---------- 计划建议关联（facade 层，侧车存储） ----------
 /** 登记建议关联：planId 围绕 basedOnPlanId 出的主意（gift_plan_add 带 basedOnPlanId 时调用）。 */
 function linkPlanSuggestion(planId, basedOnPlanId) {
@@ -113,6 +123,8 @@ export default {
   organizeQuestion,
   allOrganizeQuestions,
   clearOrganizeQuestion,
+  markOrganizeQuestionSent,
+  markOrganizeQuestionCopied,
   linkPlanSuggestion,
   planSuggestionBase,
   allPlanBases,

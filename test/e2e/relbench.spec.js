@@ -1,6 +1,9 @@
 import { test, expect } from '@playwright/test';
 import fs from 'node:fs';
 
+// 独立模式作答走 navigator.clipboard.writeText，需授权（Chromium 默认拒绝）
+test.use({ permissions: ['clipboard-write'] });
+
 test.describe('关系记忆工作台', () => {
   test('首页可访问并显示核心区块', async ({ page }) => {
     await page.goto('/');
@@ -204,6 +207,23 @@ test.describe('关系记忆工作台', () => {
     await expect(card).toContainText('已拆出 2 条');
     await expect(card).toContainText('整理未完成');
     await expect(card.getByRole('button', { name: '继续整理' })).toBeVisible();
+
+    // 反问生命周期：AI 登记 → 横幅出现；独立模式作答=复制（不算送达，横幅保留）→ 手动放弃清除
+    const asked = await request.post('/api/tools', { data: { name: 'organize_question', args: { materialId: material.id, question: '还有一条模糊提及的茶叶，要不要单独登记？', options: [
+      { label: '照常登记', command: `素材 ${material.id} 照常登记茶叶记忆` },
+      { label: '跳过', command: `素材 ${material.id} 跳过茶叶` },
+    ] } } });
+    expect(asked.ok()).toBeTruthy();
+    const banner = card.locator('.material-question');
+    await expect(banner).toContainText('AI 在等你回答');
+    await banner.locator('.mq-btn').first().click();
+    await expect(page.locator('#toast')).toContainText('作答指令已复制');
+    await expect(banner).toContainText('已复制', '复制不算送达，横幅保留并提示粘贴去处');
+    await expect(banner).toContainText('AI 在等你回答', '状态仍为待答');
+    await banner.getByRole('button', { name: '不再等待' }).click();
+    await page.locator('#rel-dialog-ok').click();
+    await expect(page.locator('#toast')).toContainText('已清除反问');
+    await expect(banner).toHaveCount(0);
 
     // AI 整理完提交整理报告：对话里的汇报经 material_report 落进工作台素材卡
     const reported = await request.post('/api/tools', { data: { name: 'material_report', args: { id: material.id, report: '拆出 2 条：女儿十月办婚礼、对花生过敏；已被既有记忆覆盖 0 条；无冲突。' } } });

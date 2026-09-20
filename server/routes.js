@@ -367,7 +367,21 @@ async function api(req, res, url, body) {
     ok(res, { prompt: FLOWS.materialOrganize.build(parts[2], toolsUrl) });
     return true;
   }
-  // 反问作答后的清除：工作台用户点了选项（已发送/复制作答指令）即清横幅
+  // 反问送达标记：嵌入模式发送成功（sent）/ 独立模式复制成功（copied）由前端上报。
+  // 复制不算送达；标记不清除反问，清除只由 AI done / 整理报告 / 手动放弃触发。
+  if (parts[1] === 'materials' && parts[2] && parts[3] === 'question' && parts[4] === 'sent' && m('POST')) {
+    store.markOrganizeQuestionSent(parts[2]);
+    broadcast('material.changed', { action: 'question-sent', materialId: parts[2] });
+    ok(res, {});
+    return true;
+  }
+  if (parts[1] === 'materials' && parts[2] && parts[3] === 'question' && parts[4] === 'copied' && m('POST')) {
+    store.markOrganizeQuestionCopied(parts[2]);
+    broadcast('material.changed', { action: 'question-copied', materialId: parts[2] });
+    ok(res, {});
+    return true;
+  }
+  // 反问手动放弃清除：权威清除是 AI done 与整理报告提交，这里是用户明确「不再等待」
   if (parts[1] === 'materials' && parts[2] && parts[3] === 'question' && m('DELETE')) {
     store.clearOrganizeQuestion(parts[2]);
     broadcast('material.changed', { action: 'question-cleared', materialId: parts[2] });

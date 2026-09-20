@@ -402,12 +402,16 @@
             <span>${esc((mt.capturedAt || '').slice(0, 10))}</span>
           </div>
           ${mt.question ? `<div class="material-question">
-            <p class="mq-title">AI 在等你回答</p>
+            <p class="mq-title">${mt.question.status === 'sent' ? '已发送作答' : 'AI 在等你回答'}<button class="mq-dismiss" data-action="dismiss-question" data-id="${esc(mt.id)}">不再等待</button></p>
             <p class="mq-text">${esc(mt.question.question || '')}</p>
-            <div class="mq-options">${(mt.question.options || []).map((o, i) => `
+            ${mt.question.status === 'sent' ? '' : `<div class="mq-options">${(mt.question.options || []).map((o, i) => `
               <button class="mq-btn" data-action="answer-question" data-id="${esc(mt.id)}" data-index="${i}">${esc(o.label)}</button>`).join('')}
-            </div>
-            <p class="mq-hint">${state.dshEmbedded ? '点击即发送作答，AI 会继续整理' : '点击复制作答指令，粘贴到 DSH 会话'}</p>
+            </div>`}
+            <p class="mq-hint">${mt.question.status === 'sent'
+              ? '已发送到 DSH 会话，AI 继续整理并提交报告后自动清除'
+              : mt.question.copiedAt
+                ? '作答指令已复制，粘贴到 DSH 会话即可；AI 收到作答后会自动清除'
+                : (state.dshEmbedded ? '点击即发送作答，AI 会继续整理' : '点击复制作答指令，粘贴到 DSH 会话')}</p>
           </div>` : ''}
           ${mt.report ? `<details class="material-report"${pendingCount ? ' open' : ''}>
             <summary>AI 整理报告${mt.reportedAt ? ` · ${esc((mt.reportedAt || '').slice(0, 10))}` : ''}</summary>
@@ -668,20 +672,32 @@
           toast('整理提示词已复制，粘贴到 DSH 会话即可');
         } catch (e) { toast(e.message || '复制失败，请手动复制素材 ID：' + id, true); }
       } else if (action === 'answer-question') {
-        // AI 整理反问的工作台作答：嵌入模式直发宿主会话，独立模式复制作答指令；作答后清横幅
+        // AI 整理反问的工作台作答：嵌入模式直发宿主会话，独立模式复制作答指令。
+        // 发送/复制失败横幅保留待重试；成功只标送达/已复制，不清横幅——
+        // 权威清除是 AI done / 整理报告提交 / 用户手动放弃（复制不算送达）。
         const mt = state.materials.find((x) => x.id === id);
         const opt = mt?.question?.options?.[Number(actionBtn.dataset.index)];
         if (!opt) return;
-        try {
-          if (state.dshEmbedded) {
+        if (state.dshEmbedded) {
+          try {
             await sendToSession(opt.command);
-            toast('已发送作答，AI 会继续整理');
-          } else {
-            try { await navigator.clipboard.writeText(opt.command); toast('作答指令已复制，粘贴到 DSH 会话即可'); }
-            catch { toast('复制失败，请到 DSH 会话里直接回复', true); }
-          }
-        } catch (e) { toast(e.message || '发送失败，请到 DSH 会话里直接回复', true); }
+            await api(`/api/materials/${id}/question/sent`, { method: 'POST' });
+            toast('已发送作答，AI 会继续整理；完成后横幅自动清除');
+            await refresh();
+          } catch (e) { toast(e.message || '发送失败，稍后重试或到 DSH 会话里直接回复', true); }
+        } else {
+          try {
+            await navigator.clipboard.writeText(opt.command);
+            await api(`/api/materials/${id}/question/copied`, { method: 'POST' });
+            toast('作答指令已复制，粘贴到 DSH 会话；AI 收到会自动清除');
+            await refresh();
+          } catch { toast('复制失败，稍后重试或到 DSH 会话里直接回复', true); }
+        }
+      } else if (action === 'dismiss-question') {
+        // 用户明确放弃等待：唯一的用户侧清除入口（AI 若还在等，到会话里直接回复它即可）
+        if (!(await confirmDialog('不再等待这条反问？清除后若 AI 还在等，请到 DSH 会话里直接回复。', { danger: true }))) return;
         await api(`/api/materials/${id}/question`, { method: 'DELETE' });
+        toast('已清除反问');
         await refresh();
       } else if (action === 'delete-material') {
         if (!(await confirmDialog('删除这段素材？已拆出的记忆不受影响。', { danger: true }))) return;
