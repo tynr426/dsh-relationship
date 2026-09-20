@@ -210,12 +210,41 @@ test('material tools: save → list raw → get → batch extract with sourceId/
   assert.equal(planAdd.ok, true);
   assert.equal(planAdd.plan.source, 'ai');
   assert.equal(planAdd.plan.status, 'idea');
+  // 查重闸门：同联系人相同想法（忽略空白差异）拒绝，防止 AI 出主意重复建卡
+  const dupSame = await tools.executeTool('gift_plan_add', { contactId: c.id, idea: '小主持课体验卡（她非常喜欢小主持）' });
+  assert.equal(dupSame.ok, false);
+  assert.equal(dupSame.status, 409);
+  const dupSpaces = await tools.executeTool('gift_plan_add', { contactId: c.id, idea: '小主持课体验卡 （她非常喜欢小主持）  ' });
+  assert.equal(dupSpaces.ok, false, '空白差异不算新想法');
+  const dupOther = await tools.executeTool('gift_plan_add', { contactId: c.id, idea: '完全不同的另一个方案' });
+  assert.equal(dupOther.ok, true, '不同想法正常建卡');
   const planList = await tools.executeTool('gift_plan_list', { contactId: c.id });
-  assert.equal(planList.plans.length, 1);
+  assert.equal(planList.plans.length, 2);
   assert.equal(planList.plans[0].contactName, c.name);
   await tools.executeTool('gift_plan_update', { id: planAdd.plan.id, status: 'decided' });
   assert.equal((await tools.executeTool('gift_plan_list', { status: 'decided' })).plans.length, 1);
   await tools.executeTool('gift_plan_delete', { id: planAdd.plan.id });
+  await tools.executeTool('gift_plan_delete', { id: dupOther.plan.id });
+  assert.equal((await tools.executeTool('gift_plan_list', {})).plans.length, 0);
+
+  // basedOnPlanId：围绕已有计划出主意的新方案卡关联原计划（工作台「删这批建议」的数据源）
+  const basePlan = await tools.executeTool('gift_plan_add', { contactId: c.id, idea: '中秋节伴手礼' });
+  const sug1 = await tools.executeTool('gift_plan_add', { contactId: c.id, idea: '手作茶点礼盒', basedOnPlanId: basePlan.plan.id });
+  const sug2 = await tools.executeTool('gift_plan_add', { contactId: c.id, idea: '手写感谢卡', basedOnPlanId: basePlan.plan.id });
+  assert.equal(sug1.ok, true);
+  assert.equal(sug2.ok, true);
+  assert.equal(sug1.plan.basedOnPlanId, undefined, 'basedOnPlanId 是关联元数据，不得泄进计划实体');
+  assert.equal(store.planSuggestionBase(sug1.plan.id), basePlan.plan.id);
+  assert.equal(store.plansBasedOn(basePlan.plan.id).length, 2);
+  const ghostBase = await tools.executeTool('gift_plan_add', { contactId: c.id, idea: '另一个方案', basedOnPlanId: 'gp_ghost' });
+  assert.equal(ghostBase.ok, false);
+  assert.equal(ghostBase.status, 404);
+  // 删原计划：建议卡保留、关联解除（降级为独立卡）
+  await tools.executeTool('gift_plan_delete', { id: basePlan.plan.id });
+  assert.equal(store.planSuggestionBase(sug1.plan.id), '');
+  assert.equal((await tools.executeTool('gift_plan_list', {})).plans.length, 2);
+  await tools.executeTool('gift_plan_delete', { id: sug1.plan.id });
+  await tools.executeTool('gift_plan_delete', { id: sug2.plan.id });
   assert.equal((await tools.executeTool('gift_plan_list', {})).plans.length, 0);
   assert.equal(await tools.executeTool('material_list', { status: 'raw' }).then((r) => r.materials.some((mt) => mt.id === materialId)), false);
 });

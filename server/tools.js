@@ -26,6 +26,7 @@ export const TOOL_CN = {
   material_list: '列出待整理素材',
   material_get: '读取素材全文',
   material_report: '提交素材整理报告',
+  organize_question: '登记/清除整理反问',
   relation_type_list: '列出关系类型',
   pending_summary: '查看待确认队列',
 };
@@ -50,7 +51,7 @@ export const TOOL_DEFS = [
       occasion: { type: 'string', description: '场景标签：teacher_day/birthday/thank_you/visit 等小写标签，可自由定义；能判断场景时填' },
       sourceId: { type: 'string', description: '来源素材 ID（从素材提取时必填，用于溯源）' },
       sourceQuote: { type: 'string', description: '原话摘录：逐字摘自素材原文、只覆盖该条事实（≤200 字）；带 sourceId 时必填，闸门校验是否真在素材里' } }, additionalProperties: false } } },
-  { type: 'function', function: { name: 'memory_batch_add', description: '一段素材拆出多条事实时批量登记，每条独立校验（含提取闸门：sourceQuote 原话摘录、saidAt 时间戳命中、direction 必填、查重、同一摘录对同一联系人不得复用且不得跨消息）', parameters: { type: 'object', required: ['entries'], properties: {
+  { type: 'function', function: { name: 'memory_batch_add', description: '一段素材拆出多条事实时批量登记，每条独立校验（含提取闸门：sourceQuote 原话摘录、saidAt 时间戳命中、direction 必填、查重、同一摘录对同一联系人不得复用且不得跨消息）；长素材分多批提取——每批只覆盖一段消息、从上一批结束处继续，被拒条目修正后单独重报，勿整批重发', parameters: { type: 'object', required: ['entries'], properties: {
       entries: { type: 'array', items: { type: 'object', properties: {
         contactId: { type: 'string' }, type: { type: 'string', enum: MEMORY_TYPES }, content: { type: 'string' },
         date: { type: 'string', description: '事实时间' }, saidAt: { type: 'string', description: '话语时间，如 2026-09-11 20:03' },
@@ -71,11 +72,12 @@ export const TOOL_DEFS = [
       lifespan: { type: 'string', enum: ['long', 'short'], description: '记忆寿命过滤' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'timeline_get', description: '读取某联系人的完整时间线（基础信息 + 已确认记忆）', parameters: { type: 'object', required: ['contactId'], properties: {
       contactId: { type: 'string' } }, additionalProperties: false } } },
-  { type: 'function', function: { name: 'gift_plan_add', description: '为联系人创建礼物计划卡（想法/已定/已送）。礼物建议必须基于已确认记忆（喜好/禁忌/送过记录），方案理由引用记忆点，禁忌品类明确排除', parameters: { type: 'object', required: ['contactId', 'idea'], properties: {
+  { type: 'function', function: { name: 'gift_plan_add', description: '为联系人创建礼物计划卡（想法/已定/已送）。礼物建议必须基于已确认记忆（喜好/禁忌/送过记录），方案理由引用记忆点，禁忌品类明确排除；先 gift_plan_list 查已有计划——同联系人相同想法会被拒绝（409），优化已有计划用 gift_plan_update 更新原卡，不另建新卡', parameters: { type: 'object', required: ['contactId', 'idea'], properties: {
       contactId: { type: 'string' }, idea: { type: 'string', description: '礼物方案名与一句话理由（≤200 字）' },
       occasion: { type: 'string', description: '场景标签，如 teacher_day/birthday' },
       occasionDate: { type: 'string', description: '这一次的具体日期 YYYY-MM-DD，可留空' },
-      budget: { type: 'string', description: '预算，可留空' } }, additionalProperties: false } } },
+      budget: { type: 'string', description: '预算，可留空' },
+      basedOnPlanId: { type: 'string', description: '围绕某个已有计划出主意时必填：该计划的 ID（出主意 prompt 会给出）——工作台会把这批新方案归到它名下，用户可一键删除这批建议；独立方案留空' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'gift_plan_list', description: '列出礼物计划（默认全部）', parameters: { type: 'object', required: [], properties: {
       contactId: { type: 'string' }, status: { type: 'string', enum: ['idea', 'decided', 'sent'] } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'gift_plan_update', description: '更新礼物计划（方案/预算/状态）', parameters: { type: 'object', required: ['id'], properties: {
@@ -84,13 +86,20 @@ export const TOOL_DEFS = [
       id: { type: 'string' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'material_save', description: '把用户主动提供的原始素材（粘贴的聊天记录、转发文本、口述长段）存档溯源，随后用 memory_batch_add 逐条提取', parameters: { type: 'object', required: ['text'], properties: {
       text: { type: 'string' }, contactId: { type: 'string', description: '素材主要涉及的联系人，可留空' }, occasion: { type: 'string', description: '素材所属场景，如 teacher_day/birthday；提取的记忆会继承' } }, additionalProperties: false } } },
-  { type: 'function', function: { name: 'material_list', description: '列出素材（默认待整理 raw），用户说"整理素材"时先调用', parameters: { type: 'object', required: [], properties: {
+  { type: 'function', function: { name: 'material_list', description: '列出素材（默认待整理 raw），用户说"整理素材"时先调用；有已拆条数但无整理报告的素材是整理未完成，应续跑而非重拆', parameters: { type: 'object', required: [], properties: {
       status: { type: 'string', enum: ['raw', 'processed'], description: 'raw=待整理，processed=已拆出记忆' } }, additionalProperties: false } } },
-  { type: 'function', function: { name: 'material_get', description: '读取素材全文（提取前调用），返回 text 与已提取的记忆', parameters: { type: 'object', required: ['id'], properties: {
+  { type: 'function', function: { name: 'material_get', description: '读取素材全文（提取前调用），返回 text 与已提取的记忆（extracted 列表，续跑时对照它跳过已覆盖的消息）', parameters: { type: 'object', required: ['id'], properties: {
       id: { type: 'string' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'material_report', description: '素材整理完提交整理报告：拆出的记忆清单、哪些已被既有记忆覆盖而未重复登记、发现的冲突。报告会显示在工作台素材卡上，供用户逐条确认时对照——对话里的汇报说完就没了，这是它落进工作台的唯一通道', parameters: { type: 'object', required: ['id', 'report'], properties: {
       id: { type: 'string', description: '素材 ID' },
       report: { type: 'string', description: '整理报告全文（拆出清单 / 已覆盖未重复登记项 / 冲突说明）' } }, additionalProperties: false } } },
+  { type: 'function', function: { name: 'organize_question', description: '素材整理中确需用户拍板才能继续时登记反问：先调本工具再在对话里提问，工作台素材卡会实时显示「AI 在等你回答」，用户可在工作台直接作答（嵌入模式一键发送、独立模式复制作答指令）。整理反问是最后手段——判断一律以当前库为准，已删除的素材与记忆视为不存在，库里没有的记忆直接照常登记（重复登记会被闸门拦下），不得为此反问。用户作答后（无论从哪个通道收到）调用本工具并带 done=true 清除登记', parameters: { type: 'object', required: ['materialId'], properties: {
+      materialId: { type: 'string', description: '素材 ID' },
+      question: { type: 'string', description: '反问内容（一句话说清要用户拍板什么）' },
+      options: { type: 'array', items: { type: 'object', required: ['label', 'command'], properties: {
+        label: { type: 'string', description: '选项短名，如 照常整理 / 跳过不登记' },
+        command: { type: 'string', description: '该选项的自足作答指令：含素材 ID 与明确决定，发到任意关系记忆会话都能据此继续，如「素材 mt_xx 照常整理：当前库里没有这些记忆，直接全部登记」' } } }, description: '2-4 个选项' },
+      done: { type: 'boolean', description: 'true=用户已作答，清除该素材的反问登记' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'relation_type_list', description: '列出当前可用的关系类型（内置 6 类 + 工作台自定义）。contact_add/contact_update 的 relation 字段必须取这里的 key；自定义类型由用户在工作台维护，AI 只读', parameters: { type: 'object', required: [], properties: {}, additionalProperties: false } } },
   { type: 'function', function: { name: 'pending_summary', description: '查看待确认队列概览（会话开始时先调用）：有待确认记忆或待确认联系人就主动提醒用户回工作台确认。只读——确认/驳回/收录是用户的拍板动作，没有对应 AI 工具', parameters: { type: 'object', required: [], properties: {}, additionalProperties: false } } },
 ];
@@ -119,14 +128,17 @@ function changedStats() {
 // 已确认/待确认记忆或同批条目重复即拒；⑤ 同一摘录对同一联系人只支撑一条
 // 事实，复用即拒（跨联系人放行：素材里一句话可同时涉及多人；驳回后释放）。
 const DIRECTION_REQUIRED_TYPES = ['interaction', 'gift', 'promise'];
+export { DIRECTION_REQUIRED_TYPES };
 const STAMP_RE = /(\d{4})[年\-/.](\d{1,2})[月\-/.](\d{1,2})日?\s*(\d{1,2})[：:](\d{2})/g;
+export { STAMP_RE };
 const STAMP_ONLY_RE = /^(\d{4})[年\-/.](\d{1,2})[月\-/.](\d{1,2})日?\s*(\d{1,2})[：:](\d{2})$/;
 const BARE_TIME_RE = /(?<![\d:])(\d{1,2})[：:](\d{2})(?![\d:])/g;
 
 const pad2 = (s) => String(s).padStart(2, '0');
+export { pad2 };
 const stampOf = (y, mo, d, h, mi) => `${y}-${pad2(mo)}-${pad2(d)} ${pad2(h)}:${mi}`;
 
-function extractStamps(text) {
+export function extractStamps(text) {
   const full = [];
   for (const m of text.matchAll(STAMP_RE)) {
     full.push({ stamp: stampOf(m[1], m[2], m[3], m[4], m[5]), index: m.index, end: m.index + m[0].length });
@@ -140,7 +152,7 @@ function extractStamps(text) {
   return { full, bareTimes };
 }
 
-function normalizeSaidAtStamp(v) {
+export function normalizeSaidAtStamp(v) {
   const m = STAMP_ONLY_RE.exec(String(v ?? '').trim());
   return m ? stampOf(m[1], m[2], m[3], m[4], m[5]) : '';
 }
@@ -378,9 +390,25 @@ async function run(name, args) {
     }
 
     case 'gift_plan_add': {
-      const plan = store.createPlan({ ...args, source: 'ai' });
+      // 查重闸门：同联系人已有相同想法（忽略空白差异）的未送出计划直接拒绝——
+      // AI 出主意可能重复建卡（曾一次生成 4 张同场合卡），提示词之外兜底
+      const norm = (s) => String(s ?? '').replace(/\s+/g, '');
+      const idea = norm(args.idea);
+      const dup = store.listPlans({ contactId: String(args.contactId ?? '') })
+        .find((p) => p.status !== 'sent' && norm(p.idea) === idea);
+      if (dup) {
+        return { ok: false, error: `该联系人已有相同想法的计划卡 ${dup.id}（${dup.idea}）：不要重复建卡——要完善它就用 gift_plan_update 更新这张卡`, status: 409 };
+      }
+      // 围绕已有计划出主意时带 basedOnPlanId：工作台把这类建议归到原计划名下，可一键删除这批
+      const { basedOnPlanId, ...rest } = args;
+      const baseId = basedOnPlanId ? String(basedOnPlanId).trim() : '';
+      if (baseId && !store.listPlans({}).some((p) => p.id === baseId)) {
+        return { ok: false, error: `basedOnPlanId 对应的计划不存在：${baseId}（围绕已有计划出主意时才填，独立方案留空）`, status: 404 };
+      }
+      const plan = store.createPlan({ ...rest, source: 'ai' });
+      if (baseId) store.linkPlanSuggestion(plan.id, baseId);
       broadcast('plan.changed', { action: 'created', planId: plan.id });
-      return { ok: true, plan, 提示: '计划卡已创建（想法状态），用户会在礼赠页看到；方案理由须能对应到已确认记忆' };
+      return { ok: true, plan, 提示: baseId ? '计划卡已创建并关联到原计划（工作台可一键删除这批建议）；方案理由须能对应到已确认记忆' : '计划卡已创建（想法状态），用户会在礼赠页看到；方案理由须能对应到已确认记忆' };
     }
     case 'gift_plan_list': {
       const list = store.listPlans({ contactId: args.contactId ? String(args.contactId) : undefined, status: args.status || undefined });
@@ -436,6 +464,27 @@ async function run(name, args) {
       const saved = store.saveMaterialReport(id, report);
       broadcast('material.changed', { action: 'reported', materialId: id });
       return { ok: true, report: saved, 提示: '整理报告已提交，将显示在工作台素材卡上；请提示用户回工作台逐条确认这批记忆' };
+    }
+
+    case 'organize_question': {
+      const id = String(args.materialId ?? '').trim();
+      if (!id) return { ok: false, error: 'materialId 不能为空' };
+      if (!store.getMaterial(id)) return { ok: false, error: `素材不存在：${id}`, status: 404 };
+      if (args.done === true) {
+        store.clearOrganizeQuestion(id);
+        broadcast('material.changed', { action: 'question-cleared', materialId: id });
+        return { ok: true, cleared: true };
+      }
+      const question = String(args.question ?? '').trim();
+      if (!question) return { ok: false, error: 'question 不能为空：一句话说清要用户拍板什么' };
+      if (question.length > 2000) return { ok: false, error: 'question 过长（上限 2000 字符）' };
+      const norm = (Array.isArray(args.options) ? args.options : [])
+        .map((o) => ({ label: String(o?.label ?? '').trim(), command: String(o?.command ?? '').trim() }))
+        .filter((o) => o.label && o.command);
+      if (norm.length < 2 || norm.length > 4) return { ok: false, error: 'options 须为 2-4 个，每个含 label（选项短名）与 command（自足作答指令：含素材 ID 与明确决定，发到任意关系记忆会话都能据此继续）' };
+      const saved = store.saveOrganizeQuestion(id, question, norm);
+      broadcast('material.changed', { action: 'question', materialId: id });
+      return { ok: true, question: saved, 提示: '反问已登记，工作台素材卡会显示「AI 在等你回答」，用户可在工作台直接作答；请在对话里同步提问，用户从任一通道作答后调用 organize_question 带 done=true 清除登记' };
     }
 
     case 'relation_type_list': {

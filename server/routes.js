@@ -238,8 +238,9 @@ async function api(req, res, url, body) {
 
   // ---------- 礼物计划与礼赠视图 ----------
   if (p === '/api/plans' && m('GET')) {
+    const bases = store.allPlanBases();
     const list = store.listPlans({ contactId: url.searchParams.get('contact_id') || undefined, status: url.searchParams.get('status') || undefined })
-      .map((p) => ({ ...p, contactName: store.getContact(p.contactId)?.name || '' }));
+      .map((p) => ({ ...p, contactName: store.getContact(p.contactId)?.name || '', basedOnPlanId: bases[p.id] || '' }));
     ok(res, { plans: list });
     return true;
   }
@@ -267,6 +268,16 @@ async function api(req, res, url, body) {
       }
     } catch (e) { failFrom(res, e); return true; }
   }
+  // 一键删除「围绕某计划出主意」产生的这批建议（原计划保留；已送的台账卡不动）
+  if (parts[1] === 'plans' && parts[2] && parts[3] === 'suggestions' && m('DELETE')) {
+    try {
+      const doomed = store.plansBasedOn(parts[2]).filter((p) => p.status !== 'sent');
+      for (const p of doomed) store.deletePlan(p.id);
+      broadcast('plan.changed', { action: 'deleted', planId: parts[2] });
+      ok(res, { deleted: doomed.length });
+    } catch (e) { failFrom(res, e); }
+    return true;
+  }
   if (parts[1] === 'plans' && parts[2] && parts[3] === 'sent' && m('POST')) {
     try {
       const { plan, memory } = store.markPlanSent(parts[2]);
@@ -279,7 +290,8 @@ async function api(req, res, url, body) {
   }
   if (p === '/api/gifts/occasions' && m('GET')) {
     const days = Number(url.searchParams.get('days')) || 30;
-    ok(res, { occasions: store.giftOccasions(days), plans: store.listPlans().map((p) => ({ ...p, contactName: store.getContact(p.contactId)?.name || '' })) });
+    const bases = store.allPlanBases();
+    ok(res, { occasions: store.giftOccasions(days), plans: store.listPlans().map((p) => ({ ...p, contactName: store.getContact(p.contactId)?.name || '', basedOnPlanId: bases[p.id] || '' })) });
     return true;
   }
   if (p === '/api/gifts/reciprocity' && m('GET')) {
@@ -330,6 +342,7 @@ async function api(req, res, url, body) {
     }
     const contactName = new Map(store.listContacts({ includeArchived: true, includePending: true }).map((c) => [c.id, c.name]));
     const reports = store.allMaterialReports();
+    const questions = store.allOrganizeQuestions();
     const materials = mts.map((mt) => ({
       id: mt.id,
       status: store.materialStatus(mt),
@@ -340,6 +353,7 @@ async function api(req, res, url, body) {
       capturedAt: mt.capturedAt,
       report: reports[mt.id]?.report || '',
       reportedAt: reports[mt.id]?.reportedAt || '',
+      question: questions[mt.id] || null,
       extracted: (memBySource.get(mt.id) || []).map((mem) => ({ id: mem.id, type: mem.type, content: mem.content, status: mem.status, importance: mem.importance })),
     }));
     ok(res, { materials });
@@ -351,6 +365,13 @@ async function api(req, res, url, body) {
       ? `${url.origin}/api/dsh-relationship/workbench/api/tools`
       : `${url.origin}/api/tools`;
     ok(res, { prompt: FLOWS.materialOrganize.build(parts[2], toolsUrl) });
+    return true;
+  }
+  // 反问作答后的清除：工作台用户点了选项（已发送/复制作答指令）即清横幅
+  if (parts[1] === 'materials' && parts[2] && parts[3] === 'question' && m('DELETE')) {
+    store.clearOrganizeQuestion(parts[2]);
+    broadcast('material.changed', { action: 'question-cleared', materialId: parts[2] });
+    ok(res, {});
     return true;
   }
   if (p === '/api/materials' && m('POST')) {

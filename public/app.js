@@ -180,12 +180,8 @@
     return sessionId;
   }
 
-  /** 素材卡一键 AI 整理：直连宿主会话发「整理素材」，模型跑完回工作台确认。 */
-  async function organizeViaHost(materialId) {
-    if (!state.dshEmbedded) {
-      toast('独立模式：请点「复制整理指令」粘贴到 DSH 会话', true);
-      return;
-    }
+  /** 直连宿主关系记忆会话发送一条文本（AI 整理 / 反问作答共用）。 */
+  async function sendToSession(text) {
     const sessionId = await ensureDshSession();
     const requestId = globalThis.crypto?.randomUUID?.() || `rel-prompt-${Date.now()}`;
     await dshRpc('session/prompt', {
@@ -193,10 +189,19 @@
         requestId,
         sessionId,
         mode: 'queue',
-        content: [{ type: 'text', text: `整理素材 ${materialId}` }],
+        content: [{ type: 'text', text }],
         clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       },
     });
+  }
+
+  /** 素材卡一键 AI 整理：直连宿主会话发「整理素材」，模型跑完回工作台确认。 */
+  async function organizeViaHost(materialId) {
+    if (!state.dshEmbedded) {
+      toast('独立模式：请点「复制整理指令」粘贴到 DSH 会话', true);
+      return;
+    }
+    await sendToSession(`整理素材 ${materialId}`);
     toast('已交给 AI 整理，完成后回工作台确认', false);
   }
 
@@ -381,8 +386,11 @@
     $('#material-count').textContent = `· ${list.length}`;
     $('#material-list').innerHTML = list.map((mt) => {
       const pendingCount = (mt.extracted || []).filter((m) => m.status === 'pending').length;
+      // 整理未完成：已拆出条目但没有整理报告（中断/分批未完）——保留「继续整理」入口，
+      // 否则用户在工作台永远无法续跑（AI 整理按钮只认 raw 会把 processed 卡锁死）
+      const incomplete = mt.status === 'processed' && !mt.report;
       const statusBadge = mt.status === 'processed'
-        ? `<span class="badge type">已拆出 ${mt.extracted.length} 条${pendingCount ? `，待确认 ${pendingCount} 条` : ''}</span>`
+        ? `<span class="badge type">已拆出 ${mt.extracted.length} 条${pendingCount ? `，待确认 ${pendingCount} 条` : ''}${incomplete ? '，整理未完成' : ''}</span>`
         : '<span class="badge">待 AI 整理</span>';
       return `
       <article class="material-card" data-id="${esc(mt.id)}">
@@ -393,6 +401,14 @@
             ${mt.contactName ? `<span class="badge">${esc(mt.contactName)}</span>` : ''}
             <span>${esc((mt.capturedAt || '').slice(0, 10))}</span>
           </div>
+          ${mt.question ? `<div class="material-question">
+            <p class="mq-title">AI 在等你回答</p>
+            <p class="mq-text">${esc(mt.question.question || '')}</p>
+            <div class="mq-options">${(mt.question.options || []).map((o, i) => `
+              <button class="mq-btn" data-action="answer-question" data-id="${esc(mt.id)}" data-index="${i}">${esc(o.label)}</button>`).join('')}
+            </div>
+            <p class="mq-hint">${state.dshEmbedded ? '点击即发送作答，AI 会继续整理' : '点击复制作答指令，粘贴到 DSH 会话'}</p>
+          </div>` : ''}
           ${mt.report ? `<details class="material-report"${pendingCount ? ' open' : ''}>
             <summary>AI 整理报告${mt.reportedAt ? ` · ${esc((mt.reportedAt || '').slice(0, 10))}` : ''}</summary>
             <pre>${esc(mt.report)}</pre>
@@ -400,7 +416,7 @@
         </div>
         <div class="material-actions">
           ${pendingCount ? `<button class="primary-btn" data-action="confirm-material" data-id="${esc(mt.id)}">确认这 ${pendingCount} 条</button>` : ''}
-          ${mt.status === 'raw' ? `<button class="primary-btn" data-action="organize-material" data-id="${esc(mt.id)}">AI 整理</button>` : ''}
+          ${mt.status === 'raw' || incomplete ? `<button class="primary-btn" data-action="organize-material" data-id="${esc(mt.id)}">${mt.status === 'raw' ? 'AI 整理' : '继续整理'}</button>` : ''}
           ${mt.status === 'raw' ? `<button class="ghost-btn" data-action="copy-material" data-id="${esc(mt.id)}">复制整理指令</button>` : ''}
           <button class="ghost-btn" data-action="delete-material" data-id="${esc(mt.id)}">删除</button>
         </div>
@@ -408,20 +424,31 @@
     }).join('');
   }
 
+  /** 建议卡「围绕某计划」徽标文案：原计划被删后降级为「已删计划」。 */
+  function planBaseBadge(p) {
+    if (!p.basedOnPlanId) return '';
+    const base = state.plans.find((x) => x.id === p.basedOnPlanId);
+    const label = base ? base.idea.slice(0, 12) : '已删计划';
+    return ` <span class="badge">围绕「${esc(label)}」</span>`;
+  }
+
   function planCard(p) {
     const productLine = p.productName || p.productUrl
       ? `<div class="occ-plan product">${p.productUrl ? `<a href="${esc(p.productUrl)}" target="_blank" rel="noreferrer">${esc(p.productName || '查看商品')} ↗</a>` : esc(p.productName)}${p.productPrice ? ` <span class="badge price">${esc(p.productPrice)}</span>` : ''}</div>`
       : '';
+    // 围绕本计划出主意产生的未送出建议数（一键删除这批的入口）
+    const sugCount = state.plans.filter((x) => x.basedOnPlanId === p.id && x.status !== 'sent').length;
     return `
     <article class="occ-card">
       <div class="occ-main">
-        <p class="occ-title"><b>${esc(p.contactName)}</b>${p.occasion ? ` · ${esc(p.occasion)}` : ''}${p.occasionDate ? ` · ${esc(fmtDate(p.occasionDate))}` : ''} <span class="badge type">${PLAN_STATUS_CN[p.status]}</span>${p.source === 'ai' ? ' <span class="badge">AI 建议</span>' : ''}</p>
+        <p class="occ-title"><b>${esc(p.contactName)}</b>${p.occasion ? ` · ${esc(p.occasion)}` : ''}${p.occasionDate ? ` · ${esc(fmtDate(p.occasionDate))}` : ''} <span class="badge type">${PLAN_STATUS_CN[p.status]}</span>${p.source === 'ai' ? ' <span class="badge">AI 建议</span>' : ''}${planBaseBadge(p)}</p>
         <div class="occ-plan">${esc(p.idea)}${p.budget ? ` <span class="muted">（预算 ${esc(p.budget)}）</span>` : ''}</div>
         ${productLine}
       </div>
       <div class="occ-actions">
         <button class="primary-btn" data-action="suggest-open" data-id="${esc(p.contactId)}" data-occasion="${esc(p.occasion || '')}" data-plan="${esc(p.id)}">AI 出主意</button>
         <span class="plan-actions">
+          ${sugCount ? `<button class="icon-btn danger" data-action="plan-delete-suggestions" data-id="${esc(p.id)}">删这批建议(${sugCount})</button>` : ''}
           <button class="icon-btn" data-action="plan-edit" data-id="${esc(p.id)}">编辑</button>
           <button class="icon-btn" data-action="plan-sent" data-id="${esc(p.id)}">已送</button>
           <button class="icon-btn danger" data-action="plan-delete" data-id="${esc(p.id)}">删除</button>
@@ -439,7 +466,7 @@
       const inner = p.productUrl ? `<a href="${esc(p.productUrl)}" target="_blank" rel="noreferrer">${label} ↗</a>` : label;
       return `<div class="occ-plan product">${inner}${p.productPrice ? ` <span class="badge price">${esc(p.productPrice)}</span>` : ''}</div>`;
     };
-    const planLine = (p) => `<div class="occ-plan"><span class="badge type">${PLAN_STATUS_CN[p.status]}</span> ${esc(p.idea)}${p.source === 'ai' ? ' <span class="badge">AI 建议</span>' : ''}
+    const planLine = (p) => `<div class="occ-plan"><span class="badge type">${PLAN_STATUS_CN[p.status]}</span> ${esc(p.idea)}${p.source === 'ai' ? ' <span class="badge">AI 建议</span>' : ''}${planBaseBadge(p)}
        ${productLine(p)}
        <span class="plan-actions"><button class="icon-btn" data-action="plan-edit" data-id="${esc(p.id)}">编辑</button><button class="icon-btn" data-action="plan-sent" data-id="${esc(p.id)}">已送</button><button class="icon-btn danger" data-action="plan-delete" data-id="${esc(p.id)}">删除</button></span></div>`;
 
@@ -628,7 +655,10 @@
         toast(`已确认 ${ids.length} 条素材记忆`);
         await refresh();
       } else if (action === 'organize-material') {
-        // 一键交给宿主 AI：嵌入模式直连 DSH 会话；独立模式提示走复制指令
+        // 一键交给宿主 AI：嵌入模式直连 DSH 会话；独立模式提示走复制指令。
+        // 发送后短暂禁用防连点重复发指令（SSE 重渲染换新节点或 8 秒后自动恢复可点）
+        actionBtn.disabled = true;
+        setTimeout(() => { actionBtn.disabled = false; }, 8000);
         await organizeViaHost(id);
       } else if (action === 'copy-material') {
         // 整理指令由后端从提示词注册表（server/prompts.js）拼装，前端不再手写模板
@@ -637,6 +667,22 @@
           await navigator.clipboard.writeText(prompt);
           toast('整理提示词已复制，粘贴到 DSH 会话即可');
         } catch (e) { toast(e.message || '复制失败，请手动复制素材 ID：' + id, true); }
+      } else if (action === 'answer-question') {
+        // AI 整理反问的工作台作答：嵌入模式直发宿主会话，独立模式复制作答指令；作答后清横幅
+        const mt = state.materials.find((x) => x.id === id);
+        const opt = mt?.question?.options?.[Number(actionBtn.dataset.index)];
+        if (!opt) return;
+        try {
+          if (state.dshEmbedded) {
+            await sendToSession(opt.command);
+            toast('已发送作答，AI 会继续整理');
+          } else {
+            try { await navigator.clipboard.writeText(opt.command); toast('作答指令已复制，粘贴到 DSH 会话即可'); }
+            catch { toast('复制失败，请到 DSH 会话里直接回复', true); }
+          }
+        } catch (e) { toast(e.message || '发送失败，请到 DSH 会话里直接回复', true); }
+        await api(`/api/materials/${id}/question`, { method: 'DELETE' });
+        await refresh();
       } else if (action === 'delete-material') {
         if (!(await confirmDialog('删除这段素材？已拆出的记忆不受影响。', { danger: true }))) return;
         await api(`/api/materials/${id}`, { method: 'DELETE' });
@@ -655,6 +701,14 @@
         openPlanModal(id, card?.dataset.occasion || '', card?.dataset.date || '');
       } else if (action === 'plan-edit') {
         openPlanModal(undefined, undefined, undefined, state.plans.find((p) => p.id === id));
+      } else if (action === 'plan-delete-suggestions') {
+        // 一键删除「围绕该计划出主意」产生的这批建议（原计划保留，已送的台账卡不动）
+        const n = state.plans.filter((x) => x.basedOnPlanId === id && x.status !== 'sent').length;
+        if (!n) return;
+        if (!(await confirmDialog(`删除围绕该计划的 ${n} 条 AI 建议？原计划保留。`, { danger: true }))) return;
+        const r = await api(`/api/plans/${id}/suggestions`, { method: 'DELETE' });
+        toast(`已删除 ${r.deleted} 条 AI 建议`);
+        await refresh();
       } else if (action === 'plan-delete') {
         if (!(await confirmDialog('删除这个礼物计划？', { danger: true }))) return;
         await api(`/api/plans/${id}`, { method: 'DELETE' });

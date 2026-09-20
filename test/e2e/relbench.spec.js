@@ -200,6 +200,11 @@ test.describe('关系记忆工作台', () => {
     expect(extract.ok()).toBeTruthy();
     const createdIds = (await extract.json()).created.map((m) => m.id);
 
+    // 整理未完成态：已拆出条目但无报告——徽标提示 + 保留「继续整理」入口（不被 processed 锁死）
+    await expect(card).toContainText('已拆出 2 条');
+    await expect(card).toContainText('整理未完成');
+    await expect(card.getByRole('button', { name: '继续整理' })).toBeVisible();
+
     // AI 整理完提交整理报告：对话里的汇报经 material_report 落进工作台素材卡
     const reported = await request.post('/api/tools', { data: { name: 'material_report', args: { id: material.id, report: '拆出 2 条：女儿十月办婚礼、对花生过敏；已被既有记忆覆盖 0 条；无冲突。' } } });
     expect(reported.ok()).toBeTruthy();
@@ -209,9 +214,11 @@ test.describe('关系记忆工作台', () => {
     expect(summary.ok).toBe(true);
     expect(summary.items.some((m) => m.id === createdIds[0])).toBe(true);
 
-    // SSE 刷新后素材卡显示已拆出 + AI 整理报告
+    // SSE 刷新后素材卡显示已拆出 + AI 整理报告；整理完成，未完成态与继续整理入口消失
     await expect(card).toContainText('已拆出 2 条');
     await expect(card.locator('.material-report')).toContainText('拆出 2 条');
+    await expect(card).not.toContainText('整理未完成');
+    await expect(card.getByRole('button', { name: '继续整理' })).toHaveCount(0);
     // 待确认卡展示原话摘录（提取闸门溯源）
     await expect(page.locator(`.pending-card[data-id="${createdIds[0]}"]`)).toContainText('原话：他说女儿十月办婚礼');
     await card.getByRole('button', { name: '确认这 2 条' }).click();
@@ -254,6 +261,15 @@ test.describe('关系记忆工作台', () => {
     await page.locator('.nav-item[data-view="gifts"]').click();
     await expect(page.getByRole('heading', { name: '礼赠' })).toBeVisible();
 
+    // 小视口回归：DSH 内嵌 iframe 高度有限，礼物计划表单字段多，
+    // 弹窗必须能滚动且「保存计划」按钮始终可达（曾因无 max-height 被裁出视口）
+    await page.setViewportSize({ width: 420, height: 520 });
+    await page.locator('#btn-new-plan').click();
+    await expect(page.locator('#form-plan')).toBeVisible();
+    await expect(page.locator('#form-plan button[type="submit"]')).toBeVisible();
+    await page.locator('#form-plan [data-role="plan-cancel"]').click();
+    await page.setViewportSize({ width: 1280, height: 800 });
+
     await page.locator('#btn-new-plan').click();
     await page.locator('#plan-contact').selectOption(contactId);
     await page.locator('#plan-occasion').fill('teacher_day');
@@ -267,6 +283,22 @@ test.describe('关系记忆工作台', () => {
     // 计划必然出现在「进行中的计划」（时机窗口随日期变化，不依赖当天日期）
     await expect(page.locator('#plans-list')).toContainText('钢笔礼盒');
     await expect(page.locator('#plans-list a[href="https://e2e.test/pen/hero"]')).toContainText('英雄钢笔经典款');
+
+    // 围绕已有计划出主意：AI 建议卡带 basedOnPlanId 关联；原计划卡可一键删除这批建议
+    const plansNow = (await (await request.get('/api/plans')).json()).plans;
+    const basePlanId = plansNow.find((p) => p.idea.includes('钢笔礼盒')).id;
+    for (const idea of ['手写祝福贺卡', '定制粉笔收纳盒']) {
+      const sug = await request.post('/api/tools', { data: { name: 'gift_plan_add', args: { contactId, idea, occasion: 'teacher_day', basedOnPlanId: basePlanId } } });
+      expect(sug.ok()).toBeTruthy();
+    }
+    await expect(page.locator('#plans-list')).toContainText('围绕「钢笔礼盒');
+    const delBatch = page.locator(`[data-action="plan-delete-suggestions"][data-id="${basePlanId}"]`);
+    await expect(delBatch).toContainText('删这批建议(2)');
+    await delBatch.click();
+    await page.locator('#rel-dialog-ok').click();
+    await expect(page.locator('#toast')).toContainText('已删除 2 条 AI 建议');
+    await expect(page.locator('#plans-list')).not.toContainText('手写祝福贺卡');
+    await expect(page.locator('#plans-list')).toContainText('钢笔礼盒');
 
     // AI 出主意入口（计划卡）——回归：曾因 data-id 缺失点击弹「联系人不存在」
     await page.locator('[data-action="suggest-open"][data-plan]').first().click();

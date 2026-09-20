@@ -34,6 +34,7 @@
     "start": "node server/cli.js",
     "dev": "node --watch server/cli.js",
     "test:unit": "node scripts/run-unit-tests.js",
+    "audit": "node scripts/audit.js",
     "test:e2e": "playwright test",
     "test": "npm run test:unit && npm run test:e2e",
     "build:relstore": "cargo build --release --manifest-path rust/relstore/Cargo.toml && cp rust/relstore/target/release/relstore ~/.openclaw-shared/bin/"
