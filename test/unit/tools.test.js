@@ -8,6 +8,8 @@ const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-rel-tools-'));
 process.env.REL_DATA_DIR = dataDir;
 const tools = await import('../../server/tools.js');
 const store = await import('../../server/store.js');
+// 计划建议关联（basedOnPlanId）是 facade 层侧车，不在 JSON store 上；与 tools 共用同一 DATA_DIR
+const facade = (await import('../../server/store-facade.js')).default;
 
 test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
 
@@ -234,14 +236,14 @@ test('material tools: save → list raw → get → batch extract with sourceId/
   assert.equal(sug1.ok, true);
   assert.equal(sug2.ok, true);
   assert.equal(sug1.plan.basedOnPlanId, undefined, 'basedOnPlanId 是关联元数据，不得泄进计划实体');
-  assert.equal(store.planSuggestionBase(sug1.plan.id), basePlan.plan.id);
-  assert.equal(store.plansBasedOn(basePlan.plan.id).length, 2);
+  assert.equal(facade.planSuggestionBase(sug1.plan.id), basePlan.plan.id);
+  assert.equal(facade.plansBasedOn(basePlan.plan.id).length, 2);
   const ghostBase = await tools.executeTool('gift_plan_add', { contactId: c.id, idea: '另一个方案', basedOnPlanId: 'gp_ghost' });
   assert.equal(ghostBase.ok, false);
   assert.equal(ghostBase.status, 404);
   // 删原计划：建议卡保留、关联解除（降级为独立卡）
   await tools.executeTool('gift_plan_delete', { id: basePlan.plan.id });
-  assert.equal(store.planSuggestionBase(sug1.plan.id), '');
+  assert.equal(facade.planSuggestionBase(sug1.plan.id), '');
   assert.equal((await tools.executeTool('gift_plan_list', {})).plans.length, 2);
   await tools.executeTool('gift_plan_delete', { id: sug1.plan.id });
   await tools.executeTool('gift_plan_delete', { id: sug2.plan.id });
