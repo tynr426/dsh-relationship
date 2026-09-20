@@ -5,12 +5,30 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const ROOT = path.resolve(__dirname, '..');
+
+// 加载项目根目录 .env（零依赖实现；已有环境变量不覆盖）
+{
+  const envPath = path.join(ROOT, '.env');
+  if (fs.existsSync(envPath)) {
+    for (const raw of fs.readFileSync(envPath, 'utf8').split('\n')) {
+      const line = raw.trim();
+      if (!line || line.startsWith('#')) continue;
+      const eq = line.indexOf('=');
+      if (eq < 1) continue;
+      const key = line.slice(0, eq).trim();
+      const val = line.slice(eq + 1).trim();
+      if (!process.env[key]) process.env[key] = val;
+    }
+  }
+}
+
 export const DATA_DIR = process.env.REL_DATA_DIR || path.join(ROOT, 'data');
 export const MATERIALS_DIR = path.join(DATA_DIR, 'materials');
 export const CONTACTS_PATH = path.join(DATA_DIR, 'contacts.json');
 export const MEMORIES_PATH = path.join(DATA_DIR, 'memories.json');
 export const MATERIALS_PATH = path.join(DATA_DIR, 'materials.json');
 export const MATERIAL_REPORTS_PATH = path.join(DATA_DIR, 'material-reports.json');
+export const MEMORY_VECTORS_PATH = path.join(DATA_DIR, 'memory-vectors.json');
 export const ORGANIZE_QUESTIONS_PATH = path.join(DATA_DIR, 'organize-questions.json');
 export const PLAN_SUGGESTIONS_PATH = path.join(DATA_DIR, 'plan-suggestions.json');
 export const PLANS_PATH = path.join(DATA_DIR, 'plans.json');

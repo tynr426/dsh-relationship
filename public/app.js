@@ -22,6 +22,9 @@
     activeContactId: null,
     timeline: { contact: null, memories: [] },
     typeFilter: 'all',
+    memorySearchQuery: '',
+    memorySearchResults: [],
+    memorySearchLoading: false,
     editingPendingId: null,
     editingMemoryId: null,
     smartTab: 'single',
@@ -140,6 +143,35 @@
     return data;
   }
 
+  let memorySearchSeq = 0;
+  let memorySearchTimer = null;
+  let memorySearchComposing = false;
+  async function runMemorySearch(query) {
+    const contactId = state.activeContactId;
+    const seq = ++memorySearchSeq;
+    state.memorySearchQuery = query;
+    state.memorySearchResults = [];
+    if (!query.trim() || !contactId) {
+      state.memorySearchLoading = false;
+      render();
+      return;
+    }
+    state.memorySearchLoading = true;
+    render();
+    try {
+      const r = await api(`/api/contacts/${contactId}/memory-search?q=${encodeURIComponent(query.trim())}`);
+      if (seq !== memorySearchSeq || contactId !== state.activeContactId) return;
+      state.memorySearchResults = r.memories || [];
+    } catch (e) {
+      if (seq === memorySearchSeq) toast(e.message || '搜索失败', true);
+    } finally {
+      if (seq === memorySearchSeq) {
+        state.memorySearchLoading = false;
+        render();
+      }
+    }
+  }
+
   // ---------- 宿主直连（嵌入 DSH 时）：client-request 桥，同 dsh-qa ----------
   async function dshRpc(endpoint, args = {}) {
     if (!state.dshEmbedded) throw new Error('独立模式下无法直连 DSH，请用「复制整理指令」');
@@ -241,10 +273,20 @@
         if (!stillThere) state.activeContactId = null;
       }
       if (state.activeContactId) {
-        try { state.timeline = await api(`/api/contacts/${state.activeContactId}/timeline`); }
+        try {
+          state.timeline = await api(`/api/contacts/${state.activeContactId}/timeline`);
+          if (state.memorySearchQuery.trim()) {
+            const r = await api(`/api/contacts/${state.activeContactId}/memory-search?q=${encodeURIComponent(state.memorySearchQuery.trim())}`);
+            state.memorySearchResults = r.memories || [];
+            state.memorySearchLoading = false;
+          }
+        }
         catch { state.timeline = { contact: null, memories: [] }; state.activeContactId = null; }
       } else {
         state.timeline = { contact: null, memories: [] };
+        state.memorySearchQuery = '';
+        state.memorySearchResults = [];
+        state.memorySearchLoading = false;
       }
       render();
     } catch (e) {
@@ -436,10 +478,29 @@
     return ` <span class="badge">围绕「${esc(label)}」</span>`;
   }
 
+  function safeProductUrl(value, httpsOnly = false) {
+    try {
+      if (!/^(https?:\/\/|\/\/)/i.test(value)) return '';
+      const url = new URL(value, location.href);
+      return (httpsOnly ? url.protocol === 'https:' : ['http:', 'https:'].includes(url.protocol)) && !url.username && !url.password ? url.href : '';
+    } catch { return ''; }
+  }
+
+  function planProductLine(p) {
+    if (!p.productName && !p.productUrl) return '';
+    const url = safeProductUrl(p.productUrl);
+    const cps = url && ['u.jd.com', 'union-click.jd.com'].includes(new URL(url).hostname);
+    const label = esc(p.productName || '查看商品');
+    const inner = url ? `<a href="${esc(url)}" target="_blank" rel="noreferrer noopener">${label} ↗</a>` : label;
+    return `<div class="occ-plan product">${inner}${p.productPrice ? ` <span class="badge price">${cps ? '参考价（非成交价） ' : ''}${esc(p.productPrice)}</span>` : ''}${cps ? ' <span class="badge">CPS 推广链接</span>' : ''}</div>`;
+  }
+
+  function jdPlanButton(p) {
+    return p.status === 'sent' ? '' : `<button type="button" class="ghost-btn" data-action="jd-open" data-id="${esc(p.id)}">京东找同款</button>`;
+  }
+
   function planCard(p) {
-    const productLine = p.productName || p.productUrl
-      ? `<div class="occ-plan product">${p.productUrl ? `<a href="${esc(p.productUrl)}" target="_blank" rel="noreferrer">${esc(p.productName || '查看商品')} ↗</a>` : esc(p.productName)}${p.productPrice ? ` <span class="badge price">${esc(p.productPrice)}</span>` : ''}</div>`
-      : '';
+    const productLine = planProductLine(p);
     // 围绕本计划出主意产生的未送出建议数（一键删除这批的入口）
     const sugCount = state.plans.filter((x) => x.basedOnPlanId === p.id && x.status !== 'sent').length;
     return `
@@ -451,6 +512,7 @@
       </div>
       <div class="occ-actions">
         <button class="primary-btn" data-action="suggest-open" data-id="${esc(p.contactId)}" data-occasion="${esc(p.occasion || '')}" data-plan="${esc(p.id)}">AI 出主意</button>
+        ${jdPlanButton(p)}
         <span class="plan-actions">
           ${sugCount ? `<button class="icon-btn danger" data-action="plan-delete-suggestions" data-id="${esc(p.id)}">删这批建议(${sugCount})</button>` : ''}
           <button class="icon-btn" data-action="plan-edit" data-id="${esc(p.id)}">编辑</button>
@@ -464,15 +526,9 @@
   function renderGifts() {
     const { occasions, reciprocity, given, received } = state.gift;
     const plansOf = (contactId, occasion) => state.plans.filter((p) => p.contactId === contactId && (!occasion || p.occasion === occasion) && p.status !== 'sent');
-    const productLine = (p) => {
-      if (!p.productName && !p.productUrl) return '';
-      const label = esc(p.productName || '查看商品');
-      const inner = p.productUrl ? `<a href="${esc(p.productUrl)}" target="_blank" rel="noreferrer">${label} ↗</a>` : label;
-      return `<div class="occ-plan product">${inner}${p.productPrice ? ` <span class="badge price">${esc(p.productPrice)}</span>` : ''}</div>`;
-    };
     const planLine = (p) => `<div class="occ-plan"><span class="badge type">${PLAN_STATUS_CN[p.status]}</span> ${esc(p.idea)}${p.source === 'ai' ? ' <span class="badge">AI 建议</span>' : ''}${planBaseBadge(p)}
-       ${productLine(p)}
-       <span class="plan-actions"><button class="icon-btn" data-action="plan-edit" data-id="${esc(p.id)}">编辑</button><button class="icon-btn" data-action="plan-sent" data-id="${esc(p.id)}">已送</button><button class="icon-btn danger" data-action="plan-delete" data-id="${esc(p.id)}">删除</button></span></div>`;
+       ${planProductLine(p)}
+       <span class="plan-actions">${jdPlanButton(p)}<button class="icon-btn" data-action="plan-edit" data-id="${esc(p.id)}">编辑</button><button class="icon-btn" data-action="plan-sent" data-id="${esc(p.id)}">已送</button><button class="icon-btn danger" data-action="plan-delete" data-id="${esc(p.id)}">删除</button></span></div>`;
 
     $('#occasions-count').textContent = `· ${occasions.length}`;
     $('#occasions-list').innerHTML = occasions.length ? occasions.map((o) => {
@@ -545,13 +601,18 @@
     }
     detail.classList.remove('hidden');
     const c = t.contact;
-    const types = new Set(t.memories.map((m) => m.type));
+    const searchActive = Boolean(state.memorySearchQuery.trim());
+    const baseMemories = searchActive ? state.memorySearchResults : t.memories;
+    const types = new Set(baseMemories.map((m) => m.type));
     const chips = [
-      `<button type="button" class="chip${state.typeFilter === 'all' ? ' active' : ''}" data-type="all">全部 · ${t.memories.length}</button>`,
+      `<button type="button" class="chip${state.typeFilter === 'all' ? ' active' : ''}" data-type="all">全部 · ${baseMemories.length}</button>`,
       ...TYPE_ORDER.filter((x) => types.has(x)).map((x) =>
-        `<button type="button" class="chip${state.typeFilter === x ? ' active' : ''}" data-type="${x}">${TYPE_CN[x]} · ${t.memories.filter((m) => m.type === x).length}</button>`),
+        `<button type="button" class="chip${state.typeFilter === x ? ' active' : ''}" data-type="${x}">${TYPE_CN[x]} · ${baseMemories.filter((m) => m.type === x).length}</button>`),
     ].join('');
-    const shown = state.typeFilter === 'all' ? t.memories : t.memories.filter((m) => m.type === state.typeFilter);
+    const shown = state.typeFilter === 'all' ? baseMemories : baseMemories.filter((m) => m.type === state.typeFilter);
+    const emptyText = searchActive
+      ? (state.memorySearchLoading ? '正在向量检索相关记忆…' : '没有检索到相关记忆。')
+      : '还没有已确认的长期记忆。';
 
     detail.innerHTML = `
       <div class="detail-head">
@@ -568,6 +629,10 @@
           <button class="ghost-btn" data-action="delete-contact" data-id="${esc(c.id)}">删除</button>
         </div>
       </div>
+      <div class="memory-search">
+        <input id="memory-search-input" type="search" placeholder="关键词向量搜索相关记忆" value="${esc(state.memorySearchQuery)}" autocomplete="off">
+        <span>${searchActive ? (state.memorySearchLoading ? '检索中…' : `找到 ${baseMemories.length} 条`) : '输入关键词检索该联系人的已确认记忆'}</span>
+      </div>
       <div class="chip-row">${chips}</div>
       <div class="timeline">
         ${shown.length ? shown.map((m) => {
@@ -579,15 +644,15 @@
               ? `<textarea class="edit-area" data-role="memory-edit">${esc(m.content)}</textarea>
                  <button class="icon-btn" data-action="save-memory" data-id="${esc(m.id)}">保存</button>
                  <button class="icon-btn" data-action="cancel-memory" data-id="${esc(m.id)}">取消</button>`
-              : `${esc(m.content)} <span class="badge type">${TYPE_CN[m.type] || esc(m.type)}</span>${directionLabel(m.direction) ? ` <span class="badge dir">${directionLabel(m.direction)}</span>` : ''}${m.occasion ? ` <span class="badge occ">${esc(m.occasion)}</span>` : ''}${m.importance === 3 ? ' <span class="badge imp3">关键</span>' : ''}${m.saidAt ? ` <span class="badge">讲于 ${esc(m.saidAt)}</span>` : ''}`}</span>
+              : `${esc(m.content)} <span class="badge type">${TYPE_CN[m.type] || esc(m.type)}</span>${m.lifespan === 'short' ? ' <span class="badge short">临时</span>' : ''}${directionLabel(m.direction) ? ` <span class="badge dir">${directionLabel(m.direction)}</span>` : ''}${m.occasion ? ` <span class="badge occ">${esc(m.occasion)}</span>` : ''}${m.importance === 3 ? ' <span class="badge imp3">关键</span>' : ''}${m.saidAt ? ` <span class="badge">讲于 ${esc(m.saidAt)}</span>` : ''}`}</span>
             <span class="row-actions">
               ${editing ? '' : `<button class="icon-btn" data-action="edit-memory" data-id="${esc(m.id)}">编辑</button>
                                 <button class="icon-btn danger" data-action="delete-memory" data-id="${esc(m.id)}">删除</button>`}
             </span>
           </div>`;
-        }).join('') : '<div class="empty">还没有已确认的长期记忆。</div>'}
+        }).join('') : `<div class="empty">${emptyText}</div>`}
       </div>
-      ${(t.shortItems || []).length ? `
+      ${(t.shortItems || []).length && !searchActive ? `
       <div class="short-section">
         <h4>临时事项（不进长期画像）</h4>
         ${t.shortItems.map((m) => `
@@ -602,6 +667,33 @@
   }
 
   // ---------- 事件 ----------
+  document.addEventListener('compositionstart', () => { memorySearchComposing = true; });
+  document.addEventListener('compositionend', (e) => {
+    memorySearchComposing = false;
+    const search = e.target.closest('#memory-search-input');
+    if (!search) return;
+    const query = search.value;
+    state.memorySearchQuery = query;
+    state.typeFilter = 'all';
+    clearTimeout(memorySearchTimer);
+    if (!query.trim()) { runMemorySearch(''); return; }
+    memorySearchTimer = setTimeout(() => runMemorySearch(query), 180);
+  });
+  document.addEventListener('input', (e) => {
+    const search = e.target.closest('#memory-search-input');
+    if (!search) return;
+    if (memorySearchComposing) return;
+    const query = search.value;
+    state.memorySearchQuery = query;
+    state.typeFilter = 'all';
+    clearTimeout(memorySearchTimer);
+    if (!query.trim()) {
+      runMemorySearch('');
+      return;
+    }
+    memorySearchTimer = setTimeout(() => runMemorySearch(query), 180);
+  });
+
   document.addEventListener('click', async (e) => {
     const nav = e.target.closest('.nav-item');
     if (nav) {
@@ -614,6 +706,11 @@
     if (row) {
       state.activeContactId = row.dataset.id;
       state.typeFilter = 'all';
+      state.memorySearchQuery = '';
+      state.memorySearchResults = [];
+      state.memorySearchLoading = false;
+      clearTimeout(memorySearchTimer);
+      memorySearchSeq++;
       await refresh();
       return;
     }
@@ -717,6 +814,8 @@
         openPlanModal(id, card?.dataset.occasion || '', card?.dataset.date || '');
       } else if (action === 'plan-edit') {
         openPlanModal(undefined, undefined, undefined, state.plans.find((p) => p.id === id));
+      } else if (action === 'jd-open') {
+        openJdModal(id);
       } else if (action === 'plan-delete-suggestions') {
         // 一键删除「围绕该计划出主意」产生的这批建议（原计划保留，已送的台账卡不动）
         const n = state.plans.filter((x) => x.basedOnPlanId === id && x.status !== 'sent').length;
@@ -857,7 +956,19 @@
       </div>`).join('') : '<div class="empty">还没有关系类型。</div>';
   }
 
+  let jdSession = null;
+  function cancelJdSession() {
+    jdSession?.controller.abort();
+    jdSession = null;
+  }
+
   function openModal(which) {
+    cancelJdSession();
+    $('#form-jd').classList.toggle('hidden', which !== 'jd');
+    if (which === 'jd') {
+      $('#form-quick-memory').classList.add('hidden');
+      $('#form-smart').classList.add('hidden');
+    }
     $('#modal-backdrop').classList.remove('hidden');
     $('#form-contact').classList.toggle('hidden', which !== 'contact');
     if (which === 'contact') fillRelationSelect();
@@ -875,6 +986,9 @@
     ($(`#${which === 'contact' ? 'nc-name' : which === 'plan' ? 'plan-contact' : which === 'suggest' ? 'suggest-list' : which === 'relations' ? 'rt-key' : 'qm-content'}`))?.focus?.();
   }
   function closeModal() {
+    cancelJdSession();
+    $('#form-jd').reset();
+    $('#jd-results').replaceChildren();
     $('#modal-backdrop').classList.add('hidden');
     $('#form-contact').reset();
     $('#form-quick-memory').reset();
@@ -964,6 +1078,116 @@
       state.view = 'home'; // 素材卡在首页，保存后带用户回去看
       await refresh();
     } catch (err) { toast(err.message, true); }
+  });
+
+  function jdBusy(session, busy) {
+    session.busy = busy;
+    $('#form-jd').setAttribute('aria-busy', String(busy));
+    $$('#form-jd input, #jd-results button').forEach((el) => { el.disabled = busy; });
+    $('#jd-search').disabled = busy || !session.configured;
+    $('#jd-status-retry').disabled = busy;
+    $('#jd-search').textContent = busy ? '处理中…' : '搜索商品';
+  }
+
+  async function checkJdStatus(session) {
+    if (jdSession !== session || session.busy) return;
+    jdBusy(session, true);
+    $('#jd-status').textContent = '正在检查本机京东配置…';
+    $('#jd-status-retry').classList.add('hidden');
+    try {
+      const result = await api('/api/jd/status', { signal: session.controller.signal });
+      if (jdSession !== session) return;
+      session.configured = result.configured === true;
+      const names = ['JD_APP_KEY', 'JD_APP_SECRET', 'JD_SITE_ID', 'JD_POSITION_ID'];
+      const missing = (result.missing || []).filter((name) => names.includes(name));
+      $('#jd-status').textContent = session.configured
+        ? (session.prefilled ? '配置就绪，关键词已按原计划预填，可直接搜索或修改。' : '配置就绪，请填写商品关键词。')
+        : `京东尚未配置：请在运行 relstore 的本机环境设置 ${missing.join('、') || names.slice(0, 3).join('、')}，JD_POSITION_ID 可选；重启工作台后重新检查。请勿在此输入密钥。`;
+      $('#jd-status-retry').classList.toggle('hidden', session.configured);
+    } catch (err) {
+      if (jdSession !== session) return;
+      session.configured = false;
+      $('#jd-status').textContent = err.message || '配置检查失败，请重试';
+      $('#jd-status-retry').classList.remove('hidden');
+    } finally {
+      if (jdSession === session) jdBusy(session, false);
+    }
+  }
+
+  function jdKeywordFromPlan(plan) {
+    if (plan.productName) return plan.productName.slice(0, 80);
+    const head = (plan.idea || '').split(/[，,。；;！!？?\n：:]/)[0].trim();
+    const stripped = head.replace(/^(?:帮我|准备|挑选|看看|送|买|给|找)(?:个|一下|一件|一款)?/, '').trim();
+    return (stripped || head).slice(0, 80);
+  }
+
+  function openJdModal(id) {
+    const plan = state.plans.find((p) => p.id === id);
+    if (!plan || plan.status === 'sent') { toast('计划不存在或已送出', true); return; }
+    openModal('jd');
+    $('#form-jd').reset();
+    $('#jd-results').replaceChildren();
+    $('#jd-plan-reference').textContent = `原计划（仅本地参考）：${plan.idea}${plan.budget ? `；预算参考：${plan.budget}（请自行填写价格范围）` : ''}`;
+    const keyword = jdKeywordFromPlan(plan);
+    $('#jd-keyword').value = keyword;
+    const session = { planId: id, controller: new AbortController(), configured: false, busy: false, items: [], prefilled: Boolean(keyword) };
+    jdSession = session;
+    checkJdStatus(session);
+    $('#jd-keyword').focus();
+  }
+
+  $('#jd-status-retry').addEventListener('click', () => { if (jdSession) checkJdStatus(jdSession); });
+  $('#form-jd').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const session = jdSession;
+    if (!session || session.busy || !session.configured) return;
+    const body = { keyword: $('#jd-keyword').value.trim() };
+    if (!body.keyword) { $('#jd-status').textContent = '请填写商品关键词'; return; }
+    for (const [field, id] of [['minPrice', 'jd-min-price'], ['maxPrice', 'jd-max-price']]) {
+      const value = $(`#${id}`).value;
+      if (value !== '') body[field] = Number(value);
+    }
+    if (body.minPrice > body.maxPrice) { $('#jd-status').textContent = '最低价不能高于最高价'; return; }
+    session.items = [];
+    $('#jd-results').replaceChildren();
+    $('#jd-status').textContent = '正在京东搜索…';
+    jdBusy(session, true);
+    try {
+      const result = await api(`/api/plans/${encodeURIComponent(session.planId)}/jd/search`, { method: 'POST', body, signal: session.controller.signal });
+      if (jdSession !== session) return;
+      session.items = (result.items || []).slice(0, 20);
+      $('#jd-results').innerHTML = session.items.map((item, index) => {
+        const image = safeProductUrl(item.imageUrl, true);
+        return `<article class="occ-card"><div class="occ-main">${image ? `<img src="${esc(image)}" alt="" width="72" height="72" loading="lazy" referrerpolicy="no-referrer"/>` : ''}<p class="occ-title">${esc(item.name)}</p><p class="muted">参考标价 ¥${esc(item.price)}（非成交价）</p></div><button type="button" class="ghost-btn" data-jd-index="${index}">选中并关联</button></article>`;
+      }).join('');
+      $('#jd-status').textContent = session.items.length ? `找到 ${session.items.length} 件候选商品，选中后生成 CPS 推广链接。` : '没有找到商品，请调整关键词或价格范围后重试。';
+      await refresh();
+    } catch (err) {
+      if (jdSession === session) $('#jd-status').textContent = `${err.message || '搜索失败'}；可修改条件后重新搜索。`;
+    } finally {
+      if (jdSession === session) jdBusy(session, false);
+    }
+  });
+
+  $('#jd-results').addEventListener('click', async (e) => {
+    const button = e.target.closest('[data-jd-index]');
+    const session = jdSession;
+    if (!button || !session || session.busy) return;
+    const item = session.items[Number(button.dataset.jdIndex)];
+    if (!item) return;
+    jdBusy(session, true);
+    $('#jd-status').textContent = '正在验证商品并生成 CPS 推广链接…关闭弹窗不会撤销已发出的关联请求。';
+    try {
+      await api(`/api/plans/${encodeURIComponent(session.planId)}/jd/select`, { method: 'POST', body: { itemId: item.itemId }, signal: session.controller.signal });
+      if (jdSession !== session) return;
+      closeModal();
+      toast('已关联原计划（CPS 推广链接），未购买、未标记已送');
+      await refresh();
+    } catch (err) {
+      if (jdSession === session) $('#jd-status').textContent = `${err.message || '关联失败'}；可再次选择重试。`;
+    } finally {
+      if (jdSession === session) jdBusy(session, false);
+    }
   });
 
   // ---------- 礼赠 ----------

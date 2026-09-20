@@ -24,6 +24,7 @@ extern crate tube;
 
 mod config;
 mod initialize;
+mod jd;
 mod model;
 mod service;
 
@@ -34,6 +35,10 @@ use service::{contact::Contact, derive, material::Material, memory::Memory, migr
 /// CLI 入口：解析参数 → 注册连接器 → 初始化库 → 分发命令
 fn main() {
     let cli = Cli::parse();
+    if let Cmd::Jd { cmd } = cli.cmd {
+        jd::run(cmd);
+        return;
+    }
     let db_path = resolve_db_path(cli.db.as_deref());
     let conn = config::register_connector(&db_path);
     if let Err(err) = Initialize::initialize(&conn) {
@@ -55,6 +60,7 @@ fn run(cmd: Cmd) -> tube::Result<()> {
         Cmd::Material { cmd } => run_material(cmd),
         Cmd::Plan { cmd } => run_plan(cmd),
         Cmd::RelationType { cmd } => run_relation_type(cmd),
+        Cmd::Jd { .. } => unreachable!(),
         Cmd::Ledger { json } => {
             let data = derive::ledger()?;
             emit_or_print(json, "✅ 台账已生成", data);
@@ -292,6 +298,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    Jd {
+        #[command(subcommand)]
+        cmd: jd::Command,
+    },
     /// 从旧 JSON 四文件一次性迁移入 SQLite，并把源文件改名备份
     Migrate {
         /// JSON 文件所在目录（contacts/memories/materials/plans .json）

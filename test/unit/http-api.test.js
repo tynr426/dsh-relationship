@@ -79,6 +79,30 @@ test('manual memory POST is confirmed, tool memory_add is pending, confirm via R
   assert.equal(unknownTool.status, 400);
 });
 
+test('联系人记忆向量搜索只返回相关的已确认未取代记忆', async () => {
+  const created = await (await fetch(`${base}/api/contacts`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: '向量搜索API' }) })).json();
+  const contactId = created.contact.id;
+  const coffee = await (await fetch(`${base}/api/memories`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ contactId, type: 'preference', content: '喜欢手冲咖啡和浅烘豆' }) })).json();
+  const hiking = await (await fetch(`${base}/api/memories`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ contactId, type: 'preference', content: '喜欢周末徒步' }) })).json();
+  await fetch(`${base}/api/tools`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'memory_add', args: { contactId, type: 'preference', content: '待确认的咖啡偏好' } }) });
+  await fetch(`${base}/api/memories/supersede`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: hiking.memory.id, keepId: coffee.memory.id }) });
+
+  const result = await (await fetch(`${base}/api/contacts/${contactId}/memory-search?q=${encodeURIComponent('咖啡')}`)).json();
+  assert.equal(result.ok, true);
+  assert.equal(result.contact.id, contactId);
+  assert.equal(result.memories[0].id, coffee.memory.id);
+  assert.equal(result.memories.some((m) => m.content.includes('待确认')), false);
+  assert.equal(result.memories.some((m) => m.id === hiking.memory.id), false);
+  assert.ok(result.memories[0].score > 0);
+  const vectorCache = JSON.parse(fs.readFileSync(path.join(dataDir, 'memory-vectors.json'), 'utf8'));
+  assert.ok(vectorCache.items[coffee.memory.id]);
+
+  const empty = await (await fetch(`${base}/api/contacts/${contactId}/memory-search?q=${encodeURIComponent('滑雪')}`)).json();
+  assert.deepEqual(empty.memories, []);
+  const missing = await fetch(`${base}/api/contacts/c_none/memory-search?q=咖啡`);
+  assert.equal(missing.status, 404);
+});
+
 test('AI 新建联系人走待确认队列：列表隐藏、手动建档强制已收录、拍板端点与记忆确认联动转正', async () => {
   // AI 通道（tools）新建 → pending
   const viaTool = await (await fetch(`${base}/api/tools`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'contact_add', args: { name: '熊猫API', relation: 'friend', tags: ['朋友'] } }) })).json();
@@ -317,4 +341,29 @@ test('relations API: CRUD + builtin protection + in-use 409', async () => {
   // 确认已删
   const after = await json(await fetch(`${base}/api/relations`));
   assert.equal(after.relationTypes.some((t) => t.key === 'classmate'), false);
+});
+
+test('contact memory-search: 排序与噪声过滤、q 截断 100、已取代退出、404', async () => {
+  const json = (res) => res.json();
+  const created = await json(await fetch(`${base}/api/contacts`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: '检索老王' }) }));
+  const id = created.contact.id;
+  const mk = (content) => fetch(`${base}/api/memories`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ contactId: id, type: 'preference', content }) }).then(json);
+  const tea = await mk('她只喝武夷岩茶，别的茶碰都不碰');
+  const noise = await mk('每周三固定打羽毛球两小时');
+  const outdated = await mk('以前只喝速溶咖啡');
+  await fetch(`${base}/api/memories/supersede`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id: outdated.memory.id, keepId: tea.memory.id }) });
+
+  const hit = await json(await fetch(`${base}/api/contacts/${id}/memory-search?q=${encodeURIComponent('岩茶')}`));
+  assert.equal(hit.ok, true);
+  assert.deepEqual(hit.memories.map((m) => m.id), [tea.memory.id]);
+  assert.ok(hit.memories[0].score >= 0.15);
+
+  const capped = await json(await fetch(`${base}/api/contacts/${id}/memory-search?q=${encodeURIComponent('岩茶'.repeat(60))}`));
+  assert.equal(capped.query.length, 100);
+  assert.ok(capped.memories.length >= 1);
+
+  const missing = await fetch(`${base}/api/contacts/c_none/memory-search?q=${encodeURIComponent('茶')}`);
+  assert.equal(missing.status, 404);
+
+  assert.equal(noise.memory.status, 'confirmed');
 });

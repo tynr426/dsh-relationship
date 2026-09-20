@@ -242,7 +242,7 @@
         <label>预算<input id="plan-budget" maxlength="40" placeholder="如 ¥100-300，可留空"/></label>
         <label>商品名称<input id="plan-product-name" maxlength="100" placeholder="看中的具体商品，可留空（配合下面的链接）"/></label>
         <label>价格<input id="plan-product-price" maxlength="40" placeholder="如 ¥89，可留空"/></label>
-        <label>商品链接<input id="plan-product-url" maxlength="500" placeholder="https://…（淘宝/京东商品页链接）"/></label>
+        <label>商品链接<input id="plan-product-url" maxlength="4096" placeholder="https://…（淘宝/京东商品页链接）"/></label>
         <label>状态
           <select id="plan-status">
             <option value="idea" selected>想法</option>
@@ -253,6 +253,23 @@
           <button type="button" class="ghost-btn" data-role="plan-cancel">取消</button>
           <button type="submit" class="primary-btn">保存计划</button>
         </div>
+      </form>
+
+      <form id="form-jd" class="modal-body hidden">
+        <h3>京东找同款</h3>
+        <p id="jd-plan-reference" class="smart-hint"></p>
+        <p class="smart-hint">仅发送你填写的关键词和价格范围至京东，不发送计划想法、联系人或记忆。关键词已按原计划预填，可修改。选中后生成官方 CPS 推广链接并关联原计划，不会购买或标为已送。</p>
+        <p id="jd-status" role="status" aria-live="polite"></p>
+        <button type="button" id="jd-status-retry" class="ghost-btn hidden">重新检查配置</button>
+        <label>商品关键词<input id="jd-keyword" required maxlength="80" placeholder="请自行填写，如 保温杯" autocomplete="off"/></label>
+        <label>券后最低价（元，可空）<input id="jd-min-price" type="number" min="0" max="1000000" step="any"/></label>
+        <label>券后最高价（元，可空）<input id="jd-max-price" type="number" min="0" max="1000000" step="any"/></label>
+        <p class="smart-hint">价格范围按京东券后价筛选；列表展示参考标价，可能高于筛选上限，并非成交价。优惠资格和实付金额以京东结算页为准。选择商品时仅发送商品编号至京东。</p>
+        <div class="modal-actions">
+          <button type="button" class="ghost-btn" data-role="plan-cancel">取消</button>
+          <button type="submit" id="jd-search" class="primary-btn" disabled>搜索商品</button>
+        </div>
+        <div id="jd-results" class="occasions-list" aria-label="京东候选商品"></div>
       </form>
 
       <!-- AI 出主意 -->

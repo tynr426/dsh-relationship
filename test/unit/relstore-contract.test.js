@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 
 const candidates = [
@@ -156,6 +156,29 @@ test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
 
   assert.throws(() => store.createPlan({ contactId: c.id, idea: 'x', productUrl: 'ftp://a' }), /商品链接/);
   assert.equal(store.deletePlan(p.id).id, p.id);
+});
+
+(hasBinary ? test : test.skip)('Rust SQLite 完整保存 4096 字 CPS 链接，直接 CLI 也拒绝超长写入', () => {
+  const c = store.createContact({ name: '长链接隔离测试' });
+  const url = 'https://u.jd.com/'.padEnd(4096, 'x');
+  const plan = store.createPlan({ contactId: c.id, idea: '长推广链接计划', source: 'ai', productUrl: url });
+  assert.equal(plan.productUrl, url);
+  const updatedUrl = url.slice(0, -1) + 'y';
+  assert.equal(store.updatePlan(plan.id, { productUrl: updatedUrl }).productUrl, updatedUrl);
+  assert.equal(store.getPlan(plan.id).productUrl, updatedUrl);
+  const beforeCount = store.listPlans().length;
+  for (const args of [
+    ['plan', 'add', '--contact', c.id, '--idea', '不能截断', '--product-url', url + 'x'],
+    ['plan', 'set', plan.id, '--product-url', url + 'x'],
+  ]) {
+    const result = spawnSync(bin, [...args, '--json', '--db', process.env.RELSTORE_DB], { encoding: 'utf8' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /4096/);
+  }
+  assert.equal(store.getPlan(plan.id).productUrl, updatedUrl);
+  assert.equal(store.listPlans().length, beforeCount);
+  assert.equal(store.getPlan(plan.id).source, 'ai');
+  assert.equal(store.getPlan(plan.id).status, 'idea');
 });
 
 (hasBinary ? test : test.skip)('删除联系人级联（记忆/素材/计划）', () => {

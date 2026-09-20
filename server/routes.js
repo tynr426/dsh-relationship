@@ -6,6 +6,8 @@ import store from './store-facade.js';
 import { sseHandler, broadcast } from './sse.js';
 import { executeTool, TOOL_CN } from './tools.js';
 import { FLOWS } from './prompts.js';
+import { runAsync } from './relstore-bridge.js';
+import { searchCachedMemoryVectors } from './memory-vectors.js';
 
 const PUBLIC = path.join(ROOT, 'public');
 const MIME = {
@@ -145,6 +147,17 @@ async function api(req, res, url, body) {
     try { ok(res, store.timeline(parts[2])); } catch (e) { failFrom(res, e); }
     return true;
   }
+  if (parts[1] === 'contacts' && parts[2] && parts[3] === 'memory-search' && m('GET')) {
+    try {
+      const contact = store.getContact(parts[2]);
+      if (!contact) throw store.httpError(404, '联系人不存在');
+      const query = (url.searchParams.get('q') || '').slice(0, 100);
+      const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 20, 1), 50);
+      const memories = store.listMemories({ contactId: parts[2], status: 'confirmed' }).filter((x) => !x.supersededBy);
+      ok(res, { contact: publicContact(contact), query, memories: searchCachedMemoryVectors(memories, query, { limit }) });
+    } catch (e) { failFrom(res, e); }
+    return true;
+  }
 
   // ---------- 记忆 ----------
   if (p === '/api/memories' && m('GET')) {
@@ -233,6 +246,52 @@ async function api(req, res, url, body) {
       emitStats();
       ok(res, { memory: mem });
     } catch (e) { failFrom(res, e); }
+    return true;
+  }
+
+  if (p === '/api/jd/status' && m('GET')) {
+    try { ok(res, await runAsync(['jd', 'status'])); }
+    catch (e) { failFrom(res, e); }
+    return true;
+  }
+  if (parts[1] === 'plans' && parts[2] && parts[3] === 'jd' && !parts[5]
+    && ['search', 'select'].includes(parts[4]) && m('POST')) {
+    try {
+      const requireActivePlan = () => {
+        const plan = store.getPlan(parts[2]);
+        if (!plan) throw store.httpError(404, '计划不存在');
+        if (plan.status === 'sent') throw store.httpError(400, '已送出的计划不能选品');
+      };
+      requireActivePlan();
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw store.httpError(400, '请求内容无效');
+      if (parts[4] === 'search') {
+        const keyword = typeof body.keyword === 'string' ? body.keyword.trim() : '';
+        if (!keyword || keyword.length > 80
+          || /[\u0000-\u001f\u007f-\u009f]/.test(keyword)) throw store.httpError(400, '请填写 1–80 字商品关键词');
+        const args = ['jd', 'search', '--keyword', keyword];
+        for (const [field, flag] of [['minPrice', '--min-price'], ['maxPrice', '--max-price']]) {
+          const value = body[field];
+          if (value == null || value === '') continue;
+          if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1000000) throw store.httpError(400, '价格范围须为 0–1000000 之间的数字');
+          args.push(flag, String(value));
+        }
+        if (typeof body.minPrice === 'number' && typeof body.maxPrice === 'number' && body.minPrice > body.maxPrice) throw store.httpError(400, '最低价不能高于最高价');
+        const result = await runAsync(args);
+        requireActivePlan();
+        ok(res, result);
+      } else {
+        if (typeof body.itemId !== 'string' || !body.itemId || body.itemId.length > 256
+          || /[^A-Za-z0-9_+=-]/.test(body.itemId) || body.itemId.startsWith('--')) throw store.httpError(400, '请选择有效商品');
+        const { product } = await runAsync(['jd', 'promote', '--item-id', body.itemId]);
+        requireActivePlan();
+        const plan = store.updatePlan(parts[2], product);
+        broadcast('plan.changed', { action: 'updated', planId: plan.id });
+        ok(res, { plan });
+      }
+    } catch (e) {
+      if ([400, 404, 502, 503, 504].includes(e?.status)) failFrom(res, e);
+      else fail(res, 502, '京东选品暂不可用，请稍后重试');
+    }
     return true;
   }
 

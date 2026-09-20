@@ -18,6 +18,8 @@ test('纪律片段注册表：关键主题一条不缺', () => {
   }
   // 确认下线是安全闭环，任何片段/出口不得再出现「用 memory_confirm 确认」的旧口径
   assert.ok(!DISCIPLINE.confirmHumanOnly.includes('用 memory_confirm'));
+  // 摘录纪律的「逐字」承诺是写入闸门（QUOTE_MISMATCH）的提示词侧镜像，软化即漂移
+  assert.ok(DISCIPLINE.quote.includes('逐字'), '摘录纪律须保留逐字要求');
   // 联系人待确认队列纪律：查不到的人直接新建（进队列），不再打断整理问用户
   assert.ok(DISCIPLINE.searchFirst.includes('待确认队列'), 'searchFirst 应说明新建联系人进待确认队列');
   assert.ok(DISCIPLINE.multiPerson.includes('contact_add'), 'multiPerson 应允许直接新建');

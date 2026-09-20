@@ -127,7 +127,10 @@ impl Plan {
         {
             return Err(error!("occasionDate 必须是 YYYY-MM-DD（这一次的具体日期）"));
         }
-        let product_url = val.get_string("productUrl");
+        let product_url = val.get_string("productUrl").trim().to_owned();
+        if product_url.encode_utf16().count() > 4096 {
+            return Err(error!("商品链接不能超过 4096 字"));
+        }
         if !product_url.is_empty()
             && !product_url.to_lowercase().starts_with("http://")
             && !product_url.to_lowercase().starts_with("https://")
@@ -163,7 +166,7 @@ impl Plan {
             "budget": val.get_string("budget").trim().chars().take(40).collect::<String>(),
             "product_name": val.get_string("productName").trim().chars().take(100).collect::<String>(),
             "product_price": val.get_string("productPrice").trim().chars().take(40).collect::<String>(),
-            "product_url": product_url.trim().chars().take(500).collect::<String>(),
+            "product_url": product_url,
             "status": status,
             "sent_at": sent_at,
             "memory_id": memory_id,
@@ -185,16 +188,22 @@ impl Plan {
             ("budget", "budget", 40),
             ("productName", "product_name", 100),
             ("productPrice", "product_price", 40),
-            ("productUrl", "product_url", 500),
+            ("productUrl", "product_url", 4096),
         ] {
             if let Some(v) = Self::provided(&val, payload_key) {
-                if payload_key == "productUrl" && !v.is_empty() {
+                let v = v.trim();
+                if payload_key == "productUrl" {
+                    if v.encode_utf16().count() > 4096 {
+                        return Err(error!("商品链接不能超过 4096 字"));
+                    }
                     let lower = v.to_lowercase();
-                    if !lower.starts_with("http://") && !lower.starts_with("https://") && !lower.starts_with("//") {
+                    if !v.is_empty() && !lower.starts_with("http://") && !lower.starts_with("https://") && !lower.starts_with("//") {
                         return Err(error!("商品链接要以 http(s):// 开头"));
                     }
+                    data.insert(column, Value::from(v.to_owned()));
+                } else {
+                    data.insert(column, Value::from(v.chars().take(cap).collect::<String>()));
                 }
-                data.insert(column, Value::from(v.trim().chars().take(cap).collect::<String>()));
             }
         }
         if let Some(v) = Self::provided(&val, "occasion") {

@@ -9,10 +9,11 @@ description = "关系记忆工作台存储层（SQLite 单文件，0600）——
 clap = {version = "4", features = ["derive"]}
 chrono = "0.4"
 serde_json = "1.0"
+reqwest = {version = "0.12", default-features = false, features = ["blocking", "rustls-tls"]}
 
 # 统一走 deck kit：sqlite 后端（家法对齐 dsh-qa/rust/dbvault）
 deck = {path = "../../../../rust/kit/deck", default-features = false, features = ["derive", "sqlite"]}
-tube = {path = "../../../../rust/kit/tube"}
+tube = {path = "../../../../rust/kit/tube", features = ["crypto"]}
 
 [[bin]]
 name = "relstore"

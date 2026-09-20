@@ -425,7 +425,8 @@ function validatePlanFields({ occasion, occasionDate, idea, budget, productName,
   if (od && !/^\d{4}-\d{2}-\d{2}$/.test(od)) throw httpError(400, 'occasionDate 必须是 YYYY-MM-DD（这一次的具体日期）');
   const pn = String(productName ?? '').trim().slice(0, 100);
   const pp = String(productPrice ?? '').trim().slice(0, 40);
-  const pu = String(productUrl ?? '').trim().slice(0, 500);
+  const pu = String(productUrl ?? '').trim();
+  if (pu.length > 4096) throw httpError(400, '商品链接不能超过 4096 字');
   if (pu && !/^(https?:\/\/|\/\/)/i.test(pu)) throw httpError(400, '商品链接要以 http(s):// 开头');
   return { occasion: normalizeOccasion(occasion), occasionDate: od, idea: text, budget: String(budget ?? '').trim().slice(0, 40), productName: pn, productPrice: pp, productUrl: pu };
 }

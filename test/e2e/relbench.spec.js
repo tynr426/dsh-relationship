@@ -163,6 +163,15 @@ test.describe('关系记忆工作台', () => {
     await expect(page.locator('#toast')).toContainText('已保存');
     await expect(page.locator('.memory-row', { hasText: '对虾蟹过敏' })).toBeVisible();
 
+    const search = page.locator('#memory-search-input');
+    await search.fill('虾蟹');
+    await expect(page.locator('.memory-search')).toContainText('找到 1 条');
+    await expect(page.locator('.memory-row', { hasText: '对虾蟹过敏' })).toBeVisible();
+    await search.fill('咖啡');
+    await expect(page.locator('.timeline .empty')).toContainText('没有检索到相关记忆');
+    await search.fill('');
+    await expect(page.locator('.memory-row', { hasText: '对虾蟹过敏' })).toBeVisible();
+
     const targetRow = page.locator('.memory-row', { hasText: '对虾蟹过敏' });
     await targetRow.getByRole('button', { name: '删除' }).click();
     await page.locator('#rel-dialog-ok').click();

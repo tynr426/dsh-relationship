@@ -144,6 +144,9 @@ input, select { font: inherit; color: inherit; }
 .detail-head h2 { margin: 0; font-size: 17px; }
 .detail-meta { color: var(--label-2); font-size: 12px; margin-top: 4px; display: flex; flex-wrap: wrap; gap: 6px; }
 .detail-actions { display: flex; gap: 6px; }
+.memory-search { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.memory-search input { flex: 1; min-width: 0; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-base); }
+.memory-search span { flex: none; color: var(--label-2); font-size: 12px; }
 .chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px; }
 .chip { border: 1px solid var(--border); background: var(--bg-panel); border-radius: 999px; padding: 3px 10px; font-size: 12px; color: var(--label-2); }
 .chip.active { background: var(--accent-weak); border-color: var(--accent); color: var(--accent); font-weight: 600; }
@@ -237,6 +240,11 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .short-section { margin-top: 14px; border-top: 1px dashed var(--border); padding-top: 10px; }
 .short-section h4 { margin: 0 0 8px; font-size: 12px; color: var(--label-2); font-weight: 500; }
 @media (max-width: 900px) { .ledger-cols { grid-template-columns: 1fr; } }
+@media (max-width: 600px) {
+  #view-gifts .occ-card { flex-direction: column; }
+  #view-gifts .occ-main { width: 100%; }
+  #view-gifts .occ-actions, .plan-actions { flex-wrap: wrap; }
+}
 .plans-sub { margin: 14px 0 8px; font-size: 12px; color: var(--label-2); font-weight: 500; }
 .occ-plan.product a { color: var(--accent, #3b82f6); text-decoration: none; overflow-wrap: anywhere; }
 .occ-plan.product a:hover { text-decoration: underline; }

@@ -5,7 +5,7 @@
 // 与 dbvault 桥的差异：本桥为同步（spawnSync）——工作台 routes/tools 全是同步
 // store.* 调用，同步桥让存储实现可整体切换（REL_STORE=rust）而无需改造路由层。
 // 单用户本地应用，CLI 单次调用 ~20ms，同步可接受。
-import { spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -61,4 +61,70 @@ export function run(args, { timeout = 10_000 } = {}) {
   } catch {
     throw new Error(`relstore 输出解析失败: ${out.slice(0, 120)}`);
   }
+}
+
+const JD_FAILURE = '京东服务暂不可用，请检查本机 relstore 安装与配置后重试';
+const JD_ENV_NAMES = ['JD_APP_KEY', 'JD_APP_SECRET', 'JD_SITE_ID', 'JD_POSITION_ID'];
+const jdError = (status = 502, message = JD_FAILURE) => Object.assign(new Error(message), { status });
+const boundedText = (value, max) => typeof value === 'string' && value.length <= max && !/[\u0000-\u001f]/.test(value);
+
+function jdResult(command, data) {
+  if (data?.ok !== true) throw jdError();
+  if (command === 'status') {
+    if (typeof data.configured !== 'boolean' || !Array.isArray(data.missing)
+      || data.missing.some((name) => !JD_ENV_NAMES.includes(name))) throw jdError();
+    return { ok: true, configured: data.configured, missing: data.missing };
+  }
+  if (command === 'search') {
+    if (!Array.isArray(data.items) || data.items.length > 20) throw jdError();
+    const items = data.items.map((item) => {
+      if (!item || !boundedText(item.itemId, 256) || !/^[A-Za-z0-9_+=-]+$/.test(item.itemId) || !boundedText(item.name, 1000)
+        || !item.name || typeof item.price !== 'number' || !Number.isFinite(item.price) || item.price < 0
+        || !boundedText(item.imageUrl, 4096)) throw jdError();
+      return { itemId: item.itemId, name: item.name, price: item.price, imageUrl: item.imageUrl };
+    });
+    return { ok: true, items };
+  }
+  const product = data.product;
+  if (!product || !boundedText(product.productName, 1000) || !product.productName
+    || !boundedText(product.productPrice, 40) || !product.productPrice
+    || !boundedText(product.productUrl, 4096)) throw jdError();
+  let url;
+  try { url = new URL(product.productUrl); } catch { throw jdError(); }
+  if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password) throw jdError();
+  return { ok: true, product: { productName: product.productName, productPrice: product.productPrice, productUrl: product.productUrl } };
+}
+
+export async function runAsync(args) {
+  if (!Array.isArray(args) || args[0] !== 'jd' || !['status', 'search', 'promote'].includes(args[1])
+    || args.some((arg) => typeof arg !== 'string' || arg.includes('\0'))) throw jdError(400, '无效的京东请求');
+  const command = args[1];
+  const flags = command === 'search' ? ['--keyword', '--min-price', '--max-price'] : command === 'promote' ? ['--item-id'] : [];
+  const seen = new Set();
+  for (let i = 2; i < args.length; i += 2) {
+    if (!flags.includes(args[i]) || seen.has(args[i]) || args[i + 1] === undefined || args[i + 1].startsWith('--')) throw jdError(400, '无效的京东请求');
+    seen.add(args[i]);
+  }
+  if ((command === 'search' && !seen.has('--keyword')) || (command === 'promote' && !seen.has('--item-id'))) throw jdError(400, '无效的京东请求');
+  let executable;
+  try { executable = bin(); } catch { throw jdError(503); }
+  return new Promise((resolve, reject) => {
+    execFile(executable, [...args, '--json', '--db', relstoreDbPath()], {
+      timeout: 30_000, maxBuffer: 256 * 1024, encoding: 'utf8', shell: false, killSignal: 'SIGKILL',
+    }, (error, stdout) => {
+      if (error && (error.killed || error.signal || typeof error.code !== 'number')) {
+        reject(jdError(error.killed ? 504 : 502));
+        return;
+      }
+      try {
+        const data = JSON.parse(stdout.trim());
+        if (data?.ok === false && [400, 404, 502, 503, 504].includes(data.status)
+          && boundedText(data.error, 200) && data.error) throw jdError(data.status, data.error);
+        if (error) throw jdError();
+        resolve(jdResult(command, data));
+      } catch (e) {
+        reject(e?.status ? e : jdError());
+      }
+    });
+  }).catch((error) => { throw error?.status ? error : jdError(); });
 }
