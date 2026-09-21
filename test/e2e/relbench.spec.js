@@ -7,9 +7,26 @@ test.use({ permissions: ['clipboard-write'] });
 test.describe('关系记忆工作台', () => {
   test('首页可访问并显示核心区块', async ({ page }) => {
     await page.goto('/');
-    await expect(page.locator('#metric-cards')).toBeVisible();
-    await expect(page.locator('#pending-queue')).toBeVisible();
-    await expect(page.getByRole('heading', { name: '待确认队列' })).toBeVisible();
+    await expect(page.getByRole('heading', { name: '帮你记住重要的人，也帮你想下一步怎么做' })).toBeVisible();
+    // 空库：待确认队列折叠（状态并入头部副标），最近记住了不占位
+    await expect(page.locator('#pending-panel')).toBeHidden();
+    await expect(page.locator('#recent-box')).toBeHidden();
+    await expect(page.locator('#home-sub')).toContainText('记忆整理已就绪');
+  });
+
+  test('空库首价值引导：场景 → 建联系人 → 指令就绪', async ({ page }) => {
+    await page.goto('/');
+    await expect(page.locator('#onboarding')).toBeVisible();
+    await expect(page.locator('#attention-list')).toBeEmpty();
+    await page.getByRole('button', { name: '不知道送什么' }).click();
+    await expect(page.locator('#form-first')).toBeVisible();
+    await page.locator('#fr-name').fill('E2E 张老师');
+    await page.locator('#fr-note').fill('教师节送礼，两年没联系');
+    await page.locator('#fr-go').click();
+    await expect(page.locator('#toast')).toContainText('指令已复制');
+    await expect(page.locator('#onboarding')).toBeHidden();
+    await page.locator('.nav-item[data-view="contacts"]').click();
+    await expect(page.locator('#contact-list')).toContainText('E2E 张老师');
   });
 
   test('新建联系人并出现在列表', async ({ page }) => {
@@ -224,14 +241,14 @@ test.describe('关系记忆工作台', () => {
     ] } } });
     expect(asked.ok()).toBeTruthy();
     const banner = card.locator('.material-question');
-    await expect(banner).toContainText('AI 在等你回答');
+    await expect(banner).toContainText('再告诉我一点');
     await banner.locator('.mq-btn').first().click();
     await expect(page.locator('#toast')).toContainText('作答指令已复制');
     await expect(banner).toContainText('已复制', '复制不算送达，横幅保留并提示粘贴去处');
-    await expect(banner).toContainText('AI 在等你回答', '状态仍为待答');
+    await expect(banner).toContainText('等你回答', '状态仍为待答');
     await banner.getByRole('button', { name: '不再等待' }).click();
     await page.locator('#rel-dialog-ok').click();
-    await expect(page.locator('#toast')).toContainText('已清除反问');
+    await expect(page.locator('#toast')).toContainText('已清除');
     await expect(banner).toHaveCount(0);
 
     // AI 整理完提交整理报告：对话里的汇报经 material_report 落进工作台素材卡

@@ -287,3 +287,24 @@ test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
   // 内置不可删
   assert.throws(() => store.deleteRelationType('family'), /内置类型不可删除/);
 });
+
+(hasBinary ? test : test.skip)('疏远预警：rust 链路与 JSON 口径一致（阈值/降序/排除近期）', () => {
+  const daysAgo = (n) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+  const c = store.createContact({ name: '疏远老鲍', relation: 'friend' });
+  store.createMemory({ contactId: c.id, type: 'event', content: '一起爬过山', date: daysAgo(200), author: 'user' });
+  const recent = store.createContact({ name: '常联系老崔', relation: 'friend' });
+  store.createMemory({ contactId: recent.id, type: 'event', content: '刚吃过饭', date: daysAgo(2), author: 'user' });
+
+  const items = store.fadingContacts(90);
+  const hit = items.find((f) => f.contactId === c.id);
+  assert.ok(hit, '200 天未联系上榜');
+  assert.ok(hit.days >= 195 && hit.days <= 205, `天数在容忍区间：${hit.days}`);
+  assert.equal(hit.name, '疏远老鲍');
+  assert.equal(hit.relation, 'friend');
+  assert.match(hit.lastDate, /^\d{4}-\d{2}-\d{2}$/);
+  assert.ok(!items.some((f) => f.contactId === recent.id), '刚联系过的不上榜');
+  assert.ok(items.every((f, i) => i === 0 || items[i - 1].days >= f.days), '按天数降序');
+  const strict = store.fadingContacts(150);
+  assert.ok(strict.some((f) => f.contactId === c.id));
+  assert.ok(!strict.some((f) => f.contactId === recent.id));
+});

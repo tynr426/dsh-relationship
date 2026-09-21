@@ -50,34 +50,43 @@
       <!-- 首页 -->
       <section id="view-home" class="view active" aria-label="首页">
         <div class="view-head">
-          <h1>待确认队列</h1>
-          <p class="view-sub">AI 提取的关系事实先到这里，你确认后才成为长期记忆</p>
+          <h1>帮你记住重要的人，也帮你想下一步怎么做</h1>
+          <p class="view-sub" id="home-sub">你不需要记住所有事情，交给 AI</p>
         </div>
-        <div id="metric-cards" class="metric-cards" aria-label="统计"></div>
+        <div id="attention-list" class="attention-list" aria-label="值得关注"></div>
+        <section id="recent-box" class="panel recent-box hidden" aria-label="最近记住了">
+          <h2>最近记住了</h2>
+          <p class="material-hint">你和 AI 说过的话，它真的在记</p>
+          <div id="recent-list" class="recent-list"></div>
+        </section>
         <div id="onboarding" class="onboarding hidden">
-          <b>在 DSH 会话里直接说话即可录入</b>
-          <p>选择「关系记忆」preset 后，对助手说：「记一下，小李女儿十月办婚礼，他对花生过敏」。AI 会拆成待确认记忆上板，回到这里逐条确认。</p>
+          <b>有没有一个人，你不知道该怎么说、送什么？</b>
+          <p>告诉 AI TA 是谁、你想做什么——AI 会先问你一两个关键问题，再帮你把这件事做好。做好之后，如果愿意，再给 AI 一点你们之间的素材，下次会更像。</p>
+          <div class="onboarding-actions">
+            <button type="button" class="ghost-btn" data-action="first-run" data-scenario="say">不会开口</button>
+            <button type="button" class="ghost-btn" data-action="first-run" data-scenario="gift">不知道送什么</button>
+            <button type="button" class="ghost-btn" data-action="first-run" data-scenario="reconnect">重新联系</button>
+          </div>
+          <small>也可以直接在 DSH 会话里说：「记一下，小李女儿十月办婚礼，他对花生过敏」</small>
         </div>
-        <div id="pending-queue" class="pending-queue" aria-label="待确认记忆"></div>
+        <section id="pending-panel" class="panel" aria-label="待确认队列">
+          <h2>待确认队列</h2>
+          <p class="material-hint">AI 提取的关系事实先到这里，你确认后才成为长期记忆</p>
+          <div id="pending-queue" class="pending-queue" aria-label="待确认记忆"></div>
+        </section>
         <section id="material-box" class="panel material-box hidden" aria-label="待整理素材">
           <h2>待整理素材 <small id="material-count" class="material-count"></small></h2>
           <p class="material-hint">在 DSH 会话里说「整理素材」，AI 会把下面每段内容拆成待确认记忆。</p>
           <div id="material-list" class="material-list"></div>
         </section>
-        <div class="home-two-col">
-          <section class="panel" aria-label="近期生日与纪念日">
-            <h2>近期时间点</h2>
-            <div id="upcoming-list" class="upcoming-list"></div>
-          </section>
-          <section class="panel" aria-label="使用说明">
-            <h2>三条录入通道</h2>
-            <ol class="howto">
-              <li><b>对话即录入</b>：在 DSH 会话里随口说，AI 拆分并上板待确认。</li>
-              <li><b>手动记一笔</b>：右上角「＋ 记一笔」，即录即确认。</li>
-              <li><b>整理</b>：AI 归类去重，你只做确认和删改。</li>
-            </ol>
-          </section>
-        </div>
+        <section class="panel" aria-label="使用说明">
+          <h2>三条录入通道</h2>
+          <ol class="howto">
+            <li><b>对话即录入</b>：在 DSH 会话里随口说，AI 拆分并上板待确认。</li>
+            <li><b>手动记一笔</b>：右上角「＋ 记一笔」，即录即确认。</li>
+            <li><b>整理</b>：AI 归类去重，你只做确认和删改。</li>
+          </ol>
+        </section>
       </section>
 
       <!-- 联系人 -->
@@ -153,6 +162,17 @@
         <div class="modal-actions">
           <button type="button" class="ghost-btn" id="nc-cancel">取消</button>
           <button type="submit" class="primary-btn" id="nc-ok">保存</button>
+        </div>
+      </form>
+      <!-- 空库首价值：场景引导 -->
+      <form id="form-first" class="modal-body hidden">
+        <h3 id="fr-title">不会开口</h3>
+        <p class="smart-hint">AI 会先问你一两个关键问题，再给建议；不会编造你们之间没有的事。</p>
+        <label>TA 叫什么<input id="fr-name" required maxlength="40" placeholder="名字或称呼"/></label>
+        <label>补充一句（可选）<textarea id="fr-note" maxlength="300" placeholder="比如：教师节想给以前的班主任发消息，五年没联系了"></textarea></label>
+        <div class="modal-actions">
+          <button type="button" class="ghost-btn" id="fr-cancel">取消</button>
+          <button type="submit" class="primary-btn" id="fr-go">交给 AI</button>
         </div>
       </form>
       <!-- 手动记一笔 / 智能整理 -->

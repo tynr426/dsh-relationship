@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "docs/2026-09-20-article-product-intro.md",
+                "file": "docs/2026-09-21-handover.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "2026-09-20-article-product-intro"
+              "title": "2026-09-21-handover"
             }
           }
         ]
@@ -99,7 +99,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "docs/2026-09-20-article-product-intro.md",
+                "file": "docs/2026-09-21-handover.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -118,7 +118,7 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "docs/2026-09-20-article-product-intro.md",
+                "file": "docs/2026-09-21-handover.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
@@ -161,7 +161,7 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "docs/2026-09-20-article-product-intro.md",
+                "file": "docs/2026-09-21-handover.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
@@ -191,21 +191,26 @@
   "active": "86b4e17b3fd3924f",
   "lastOpenFiles": [
     "test-results",
-    "test/unit/memory-vectors.test.js",
-    "server/routes.js.tmp.91363.1789896265431",
-    "server/memory-vectors.js.tmp.91363.1789896235783",
-    "server/memory-vectors.js",
-    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.temp-stream-af3d02",
+    "test-results/relbench-关系记忆工作台-空库首价值引导：场景-→-建联系人-→-指令就绪/trace.zip",
+    "test-results/relbench-关系记忆工作台-空库首价值引导：场景-→-建联系人-→-指令就绪/error-context.md",
+    "test-results/relbench-关系记忆工作台-空库首价值引导：场景-→-建联系人-→-指令就绪",
+    "docs/2026-09-20-article-collab-architecture.md",
+    "docs/2026-09-21-handover.md",
+    "docs/images/figure-2-collab-architecture.png",
+    "docs/2026-09-20-article-product-intro.md",
+    "test-results/jd-products-窄屏-20-条候选可滚动到底，参考标价超过券后上限仍显示/trace.zip",
+    "test-results/jd-products-窄屏-20-条候选可滚动到底，参考标价超过券后上限仍显示/error-context.md",
+    "test-results/jd-products-窄屏-20-条候选可滚动到底，参考标价超过券后上限仍显示",
+    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.temp-stream-a1ebaf",
     "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de",
     "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.00.rcgu.o",
-    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.07.rcgu.o",
-    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.06.rcgu.o",
-    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.04.rcgu.o",
+    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.02.rcgu.o",
+    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.10.rcgu.o",
+    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.13.rcgu.o",
     "docs/images/figure-6-electron-sandbox-iframe.png",
     "docs/images/figure-5-prompt-as-config.png",
     "docs/images/figure-4-organize-question.png",
     "docs/images/figure-3-ai-memory-gates.png",
-    "docs/images/figure-2-collab-architecture.png",
     "docs/images/figure-1-product-intro.png"
   ]
 }

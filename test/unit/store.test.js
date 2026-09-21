@@ -468,3 +468,68 @@ test('V6: 关系类型持久化跨重载', () => {
   // 内置仍在
   assert.ok(list.some((t) => t.key === 'family' && t.builtin));
 });
+
+test('疏远预警：距最近已确认记忆超阈值上榜，排除近期/归档/待确认/无记忆/被取代/未来日期', () => {
+  const { createContact, createMemory, updateContact, supersedeMemory, fadingContacts } = store;
+  const daysAgo = (n) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+  const cOld = createContact({ name: '疏远老陈', relation: 'friend' });
+  createMemory({ contactId: cOld.id, type: 'event', content: '上次一起爬山', date: daysAgo(200), author: 'user' });
+  const cMid = createContact({ name: '疏远老孙', relation: 'colleague' });
+  createMemory({ contactId: cMid.id, type: 'event', content: '项目碰头', date: daysAgo(120), author: 'user' });
+  const cNew = createContact({ name: '常联系老周', relation: 'friend' });
+  createMemory({ contactId: cNew.id, type: 'preference', content: '只喝美式', date: daysAgo(3), author: 'user' });
+  // 归档联系人不再提醒
+  const cArch = createContact({ name: '归档老吴', relation: 'friend' });
+  createMemory({ contactId: cArch.id, type: 'event', content: '老记忆', date: daysAgo(300), author: 'user' });
+  updateContact(cArch.id, { archived: true });
+  // 待确认联系人不上板
+  const cPend = createContact({ name: '待确认老郑', relation: 'friend', status: 'pending' });
+  createMemory({ contactId: cPend.id, type: 'event', content: '一面之缘', date: daysAgo(400), author: 'user' });
+  // 无记忆联系人不进预警（无基线）
+  const cBlank = createContact({ name: '空白老冯', relation: 'friend' });
+  // 被取代的旧记忆不算数，以保留的新记忆为准
+  const cSup = createContact({ name: '被取代老褚', relation: 'friend' });
+  const supOld = createMemory({ contactId: cSup.id, type: 'preference', content: '以前只喝速溶', date: daysAgo(250), author: 'user' });
+  const supNew = createMemory({ contactId: cSup.id, type: 'preference', content: '现在喝手冲', date: daysAgo(5), author: 'user' });
+  supersedeMemory(supOld.id, supNew.id);
+  // 未来日期不算互动
+  const cFuture = createContact({ name: '未来老卫', relation: 'friend' });
+  createMemory({ contactId: cFuture.id, type: 'event', content: '还没发生的聚会', date: daysAgo(-30), author: 'user' });
+  // 无 date 的记忆回退 createdAt（刚创建 → 今天 → 不上榜）
+  const cNoDate = createContact({ name: '无日期老蒋', relation: 'friend' });
+  createMemory({ contactId: cNoDate.id, type: 'promise', content: '没写日期的约定', author: 'user' });
+
+  const list = fadingContacts();
+  const ids = list.map((f) => f.contactId);
+  assert.ok(ids.includes(cOld.id) && ids.includes(cMid.id), '200/120 天的两人上榜');
+  assert.ok(!ids.includes(cNew.id) && !ids.includes(cArch.id) && !ids.includes(cPend.id), '近期/归档/待确认不上榜');
+  assert.ok(!ids.includes(cBlank.id) && !ids.includes(cSup.id) && !ids.includes(cFuture.id) && !ids.includes(cNoDate.id), '无基线/被取代/未来/今天均不上榜');
+  assert.ok(list.every((f, i) => i === 0 || list[i - 1].days >= f.days), '按天数降序');
+  const oldRow = list.find((f) => f.contactId === cOld.id);
+  assert.equal(oldRow.name, '疏远老陈');
+  assert.equal(oldRow.relation, 'friend');
+  assert.ok(oldRow.days >= 195 && oldRow.days <= 205, `天数在容忍区间：${oldRow.days}`);
+  assert.match(oldRow.lastDate, /^\d{4}-\d{2}-\d{2}$/);
+  // 阈值可调：150 天窗只剩 200 天档
+  const strict = fadingContacts(150);
+  assert.ok(strict.some((f) => f.contactId === cOld.id));
+  assert.ok(!strict.some((f) => f.contactId === cMid.id));
+});
+
+test('生日时机回归：每年- 前缀与完整年份格式都能进窗（窗口跟随调用方）', () => {
+  const { createContact, giftOccasions } = store;
+  const mk = (offsetDays) => {
+    const d = new Date(Date.now() + offsetDays * 86_400_000);
+    return `每年-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  };
+  const cNear = createContact({ name: '生日老袁', relation: 'friend', birthday: mk(20) });
+  const cFar = createContact({ name: '生日老邓', relation: 'friend', birthday: mk(60) });
+  const cFull = createContact({ name: '生日老林', relation: 'friend', birthday: `1990-${mk(20).slice(3)}` });
+  const near = fadingHasOccasion(giftOccasions(90), cNear.id);
+  assert.ok(near, '每年式生日（20 天后）须进 90 天窗');
+  const far = fadingHasOccasion(giftOccasions(90), cFar.id);
+  assert.ok(far && far.inDays >= 55 && far.inDays <= 65, '60 天后的生日须进 90 天窗（旧实现硬编码 30 天会漏）');
+  assert.equal(fadingHasOccasion(giftOccasions(30), cFar.id), undefined, '30 天窗不含 60 天后生日');
+  assert.ok(fadingHasOccasion(giftOccasions(90), cFull.id), '完整年份格式生日同样进窗');
+  function fadingHasOccasion(list, cid) { return list.find((o) => o.contactId === cid && o.occasion === 'birthday'); }
+});

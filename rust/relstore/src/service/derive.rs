@@ -2,6 +2,8 @@
 //! reciprocity 直接读视图；occasion 的日期数学留在 Rust（每年循环 + 标签正则）
 //! created by tynan 2026-09-16
 
+use std::collections::HashMap;
+
 use serde_json::{json, Value as Json};
 use tube::{error, Value};
 
@@ -199,4 +201,53 @@ pub fn occasions(days: i64) -> tube::Result<Json> {
     items.sort_by_key(|i| i["inDays"].as_i64().unwrap_or(i64::MAX));
     items.truncate(12);
     Ok(json!({ "ok": true, "occasions": items }))
+}
+
+/// 疏远预警：每联系人最近一条已确认记忆距今天数，超过窗口的列出。
+/// 取代过的记忆不算；「每年-MM-DD」这类循环日期不是互动事件，解析失败直接跳过（与 JSON 实现口径一致）。
+pub fn fading(days: i64) -> tube::Result<Json> {
+    let conn = crate::config::relstore_connector();
+    let today = chrono::Utc::now().date_naive();
+    let sql = "SELECT m.contact_id, c.name, c.relation, \
+               COALESCE(NULLIF(m.date,''), substr(m.created_at,1,10)) AS last_day \
+               FROM memories m JOIN contacts c ON c.id = m.contact_id \
+               WHERE m.status='confirmed' AND (m.superseded_by='' OR m.superseded_by IS NULL) \
+                 AND c.archived=0 AND c.status!='pending' AND m.contact_id!=''";
+    let rows = Helper::query(
+        sql,
+        vec![],
+        |r, _: &Option<Vec<deck::Attribute>>| (0..4).map(|i| r.get_string(i)).collect::<Vec<String>>(),
+        &conn,
+        &None,
+    )
+    .map_err(|e| error!("查疏远预警失败: {e}"))?;
+    // 每联系人取最近一条可解析日期；不在 SQL 里 MAX 是为了避免非法日期串按字典序压过合法日期
+    let mut best: HashMap<String, (String, String, chrono::NaiveDate)> = HashMap::new();
+    for r in &rows {
+        let raw = r[3].as_str();
+        let parsed = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+            .or_else(|_| chrono::NaiveDate::parse_from_str(raw.get(..10).unwrap_or(""), "%Y-%m-%d"));
+        let Ok(d) = parsed else { continue };
+        match best.get(&r[0]) {
+            Some((_, _, prev)) if *prev >= d => {}
+            _ => {
+                best.insert(r[0].clone(), (r[1].clone(), r[2].clone(), d));
+            }
+        }
+    }
+    let mut items: Vec<Json> = best
+        .into_iter()
+        .filter_map(|(cid, (name, relation, d))| {
+            let gap = (today - d).num_days();
+            if gap < days {
+                return None;
+            }
+            Some(json!({
+                "contactId": cid, "name": name, "relation": relation,
+                "lastDate": d.format("%Y-%m-%d").to_string(), "days": gap,
+            }))
+        })
+        .collect();
+    items.sort_by(|a, b| b["days"].as_i64().unwrap_or(0).cmp(&a["days"].as_i64().unwrap_or(0)));
+    Ok(json!({ "ok": true, "fading": items }))
 }

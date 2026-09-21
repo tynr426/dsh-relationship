@@ -41,6 +41,29 @@ function emitStats() { broadcast('overview', { counts: store.counts() }); }
 
 function publicContact(c) { return { ...c }; }
 
+// 见面简报事实卡：纯派生聚合（互动间隔/时机/回礼/承诺/相处注意）。
+// timeline 响应用它做原生渲染（零 AI、随 SSE 刷新）；POST /api/briefing 用它组装话术 prompt。
+function briefingFacts(c) {
+  const confirmed = store.listMemories({ contactId: c.id, status: 'confirmed' }).filter((m) => !m.supersededBy);
+  const byDateDesc = (a, b) => (b.date || b.createdAt || '').localeCompare(a.date || a.createdAt || '');
+  // 禁忌/不喜好与承诺全量保留（安全与跟进关键），其余类型只取最近 12 条，更深的让 AI 用 timeline_get 补读
+  const promises = confirmed.filter((m) => m.type === 'promise').sort(byDateDesc)
+    .map((m) => ({ id: m.id, content: m.content, date: m.date || '' }));
+  const cautions = confirmed.filter((m) => m.type === 'taboo' || m.type === 'dislike').sort(byDateDesc)
+    .map((m) => ({ id: m.id, type: m.type, content: m.content }));
+  const factLines = confirmed.filter((m) => !['promise', 'taboo', 'dislike'].includes(m.type)).sort(byDateDesc).slice(0, 12);
+  return {
+    lastSeen: store.fadingContacts(1).find((f) => f.contactId === c.id) || null,
+    occasions: store.giftOccasions(90).filter((o) => o.contactId === c.id)
+      .map((o) => ({ label: o.label, date: o.date, inDays: o.inDays })),
+    reciprocity: store.giftReciprocity().filter((r) => r.contactId === c.id)
+      .map((r) => ({ content: r.content, date: r.date, hasActivePlan: r.hasActivePlan })),
+    promises,
+    cautions,
+    factLines,
+  };
+}
+
 // ---------- API 处理器（body 已由外层读取） ----------
 async function api(req, res, url, body) {
   const p = url.pathname;
@@ -144,7 +167,12 @@ async function api(req, res, url, body) {
     } catch (e) { failFrom(res, e); return true; }
   }
   if (parts[1] === 'contacts' && parts[2] && parts[3] === 'timeline' && m('GET')) {
-    try { ok(res, store.timeline(parts[2])); } catch (e) { failFrom(res, e); }
+    try {
+      const t = store.timeline(parts[2]);
+      const c = store.getContact(parts[2]);
+      // 见面简报事实卡搭 timeline 的车：打开联系人即到，SSE 刷新自动更新
+      ok(res, c ? { ...t, briefing: briefingFacts(c) } : t);
+    } catch (e) { failFrom(res, e); }
     return true;
   }
   if (parts[1] === 'contacts' && parts[2] && parts[3] === 'memory-search' && m('GET')) {
@@ -357,6 +385,131 @@ async function api(req, res, url, body) {
     ok(res, { items: store.giftReciprocity() });
     return true;
   }
+  // 疏远预警：days 阈值默认 90（钳 1-365），limit 默认 20（钳 1-50）；tier 按天数分档（>=180 stale）
+  if (p === '/api/fading' && m('GET')) {
+    const days = Math.min(365, Math.max(1, Number(url.searchParams.get('days')) || 90));
+    const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit')) || 20));
+    const fading = store.fadingContacts(days).slice(0, limit)
+      .map((f) => ({ ...f, tier: f.days >= 180 ? 'stale' : 'attention' }));
+    ok(res, { fading, thresholdDays: days });
+    return true;
+  }
+  // 值得关注 feed：四类派生（时机/疏远/待跟进承诺/回礼待回应）合成一条按紧急度排序的行动流。
+  // 纯派生零 AI；每类先取各自最紧急的 KIND_CAP 条，再全局按天数升序（当天/逾期最久的排前）截 limit。
+  if (p === '/api/attention' && m('GET')) {
+    const days = Math.min(365, Math.max(1, Number(url.searchParams.get('days')) || 90));
+    const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit')) || 20));
+    const KIND_CAP = 8;
+    const contacts = new Map(store.listContacts({ includeArchived: false }).map((c) => [c.id, c]));
+    const daysSince = (d) => {
+      const t = Date.parse(String(d || '').slice(0, 10));
+      return Number.isNaN(t) ? null : Math.max(0, Math.floor((Date.now() - t) / 86_400_000));
+    };
+    const items = [];
+    // ① 时机：生日/节日/计划日期（store 已按 inDays 升序、总量封顶）
+    for (const o of store.giftOccasions(days).slice(0, KIND_CAP)) {
+      const c = contacts.get(o.contactId);
+      if (!c) continue;
+      items.push({
+        kind: 'occasion', action: 'gift', contactId: o.contactId, contactName: c.name, relation: c.relation,
+        label: o.label, occasion: o.label, date: o.date, days: o.inDays,
+        text: `${o.label}${o.inDays === 0 ? '就是今天' : `还有 ${o.inDays} 天`}`,
+      });
+    }
+    // ② 疏远：store 按天数降序，取最疏远的前 KIND_CAP
+    for (const f of store.fadingContacts(90).slice(0, KIND_CAP)) {
+      const c = contacts.get(f.contactId);
+      if (!c) continue;
+      items.push({
+        kind: 'fading', action: 'briefing', contactId: f.contactId, contactName: c.name, relation: c.relation,
+        label: '疏远', date: f.lastDate, days: f.days,
+        text: `${f.days} 天没有有记录的互动`,
+      });
+    }
+    // ③ 待跟进承诺：已确认未取代的 promise 全量，按逾期天数降序取前 KIND_CAP
+    const promises = store.listMemories({ type: 'promise', status: 'confirmed' })
+      .filter((m) => !m.supersededBy && contacts.has(m.contactId))
+      .map((m) => ({ m, d: daysSince(m.date) ?? daysSince((m.createdAt || '').slice(0, 10)) ?? 0 }))
+      .sort((a, b) => b.d - a.d).slice(0, KIND_CAP);
+    for (const { m, d } of promises) {
+      const c = contacts.get(m.contactId);
+      items.push({
+        kind: 'promise', action: 'briefing', contactId: m.contactId, contactName: c.name, relation: c.relation,
+        label: '待跟进', date: m.date || (m.createdAt || '').slice(0, 10), days: d,
+        text: `答应过的事还没跟进：${m.content}`,
+      });
+    }
+    // ④ 回礼待回应：按收礼时间降序取前 KIND_CAP
+    const recip = store.giftReciprocity().filter((r) => contacts.has(r.contactId))
+      .map((r) => ({ r, d: daysSince(r.date) ?? 0 })).sort((a, b) => b.d - a.d).slice(0, KIND_CAP);
+    for (const { r, d } of recip) {
+      const c = contacts.get(r.contactId);
+      items.push({
+        kind: 'reciprocity', action: 'gift', contactId: r.contactId, contactName: c.name, relation: c.relation,
+        label: '回礼', date: r.date, days: d, hasActivePlan: r.hasActivePlan,
+        text: `TA 送过「${r.content}」还没回礼${r.hasActivePlan ? '（已有礼物计划）' : ''}`,
+      });
+    }
+    // 行内上下文：为什么是这个人（相处注意/同场合历史/送礼历史/已有计划/上次互动）。
+    // 纯派生零 AI：行上只放真实记忆引用，「怎么避开重复、出什么主意」留给点击后的 AI 会话现场判断。
+    const lastSeenBy = new Map(store.fadingContacts(1).map((f) => [f.contactId, f]));
+    const givenBy = new Map(); // 每人最近一次送出（giftLedger.given 已按日期降序）
+    for (const g of store.giftLedger().given) if (!givenBy.has(g.contactId)) givenBy.set(g.contactId, g);
+    const plansBy = new Map(); // 每人进行中的计划（未送出）
+    for (const p of store.listPlans()) {
+      if (p.status === 'sent') continue;
+      if (!plansBy.has(p.contactId)) plansBy.set(p.contactId, []);
+      plansBy.get(p.contactId).push({ id: p.id, idea: p.idea, status: p.status, occasion: p.occasion || '' });
+    }
+    const byDateDesc = (a, b) => (b.date || b.createdAt || '').localeCompare(a.date || a.createdAt || '');
+    for (const item of items) {
+      const f = lastSeenBy.get(item.contactId);
+      item.lastSeen = f ? { date: f.lastDate, days: f.days } : null;
+      const confirmed = store.listMemories({ contactId: item.contactId, status: 'confirmed' }).filter((m) => !m.supersededBy);
+      const evidence = [];
+      const cautions = confirmed.filter((m) => m.type === 'taboo' || m.type === 'dislike');
+      if (cautions.length) evidence.push({ kind: 'caution', text: `相处注意：${cautions.map((m) => m.content).join('；')}` });
+      if (item.kind === 'occasion') {
+        const sameOccasion = confirmed.filter((m) => item.occasion && m.occasion === String(item.occasion).toLowerCase());
+        const past = sameOccasion.find((m) => m.direction === 'user_to_contact' || m.direction === 'both') || sameOccasion[0];
+        if (past) evidence.push({ kind: 'history', text: `${past.date ? `${past.date}：` : ''}${past.content}` });
+      }
+      if (item.kind === 'fading') {
+        const last = [...confirmed].sort(byDateDesc)[0];
+        if (last) evidence.push({ kind: 'last', text: `上次互动${last.date ? `（${last.date}）` : ''}：${last.content}` });
+      }
+      if (item.kind === 'occasion' || item.kind === 'reciprocity') {
+        const given = givenBy.get(item.contactId);
+        if (given) evidence.push({ kind: 'gift', text: `上次送过：${given.content}${given.date ? `（${given.date}）` : ''}` });
+      }
+      item.evidence = evidence;
+      if (item.action === 'gift') {
+        const ps = plansBy.get(item.contactId) || [];
+        item.plans = ps.slice(0, 3);
+        item.plansTotal = ps.length;
+      }
+    }
+    items.sort((a, b) => (a.days ?? Infinity) - (b.days ?? Infinity));
+    ok(res, { items: items.slice(0, limit), days });
+    return true;
+  }
+  // 最近记住了：已确认记忆按确认时间倒序取前 N 条（确认闸门之后才进这里，pending 不出现）。
+  // 强化产品核心体感「它真的在帮我记」；归档联系人的记忆不再出现在首页。
+  if (p === '/api/memories/recent' && m('GET')) {
+    const limit = Math.min(20, Math.max(1, Number(url.searchParams.get('limit')) || 5));
+    const activeContacts = new Map(store.listContacts({ includeArchived: false }).map((c) => [c.id, c]));
+    const items = store.listMemories({ status: 'confirmed' })
+      .filter((x) => !x.supersededBy && activeContacts.has(x.contactId))
+      .sort((a, b) => (b.confirmedAt || b.createdAt || '').localeCompare(a.confirmedAt || a.createdAt || ''))
+      .slice(0, limit)
+      .map((x) => ({
+        id: x.id, contactId: x.contactId, contactName: activeContacts.get(x.contactId).name,
+        type: x.type, content: x.content, date: x.date || '', occasion: x.occasion || '',
+        confirmedAt: x.confirmedAt || x.createdAt || '',
+      }));
+    ok(res, { items });
+    return true;
+  }
   if (p === '/api/gifts/ledger' && m('GET')) {
     ok(res, store.giftLedger());
     return true;
@@ -366,9 +519,19 @@ async function api(req, res, url, body) {
       const c = store.getContact(String(body.contactId ?? ''));
       if (!c) throw store.httpError(404, '联系人不存在');
       const ids = Array.isArray(body.memoryIds) ? body.memoryIds.map(String) : [];
-      const evidences = ids
-        .map((id) => store.getMemory(id))
-        .filter((m) => m && m.contactId === c.id && m.status === 'confirmed');
+      // auto=true：调用方没预选证据（如首页值得关注行）时，自动取该联系人最近 12 条已确认记忆作依据
+      let evidences;
+      if (ids.length) {
+        evidences = ids.map((id) => store.getMemory(id))
+          .filter((m) => m && m.contactId === c.id && m.status === 'confirmed');
+      } else if (body.auto) {
+        evidences = store.listMemories({ contactId: c.id, status: 'confirmed' })
+          .filter((m) => !m.supersededBy)
+          .sort((a, b) => (b.date || b.createdAt || '').localeCompare(a.date || a.createdAt || ''))
+          .slice(0, 12);
+      } else {
+        evidences = [];
+      }
       const lines = evidences.map((m) => {
         const label = { preference: '喜好', dislike: '不喜好', taboo: '禁忌', gift: '送过/收过', event: '事件', interaction: '往来', attribute: '基础', promise: '承诺' }[m.type] || m.type;
         const dir = m.direction === 'contact_to_user' ? '（TA对我）' : m.direction === 'user_to_contact' ? '（我对TA）' : '';
@@ -376,12 +539,55 @@ async function api(req, res, url, body) {
       });
       const budget = String(body.budget ?? '').trim();
       const occasion = String(body.occasion ?? '').trim();
+      // 触发时机的日期（首页关注行传入）：AI 建卡必须沿用，防止日期漂移繁殖出重复提醒行
+      const occasionDate = String(body.occasionDate ?? '').trim();
       const plan = body.planId ? store.listPlans().find((p) => p.id === String(body.planId)) : null;
       // prompt 由提示词注册表组装（纪律唯一出处）
       const prompt = FLOWS.giftSuggest.build({
-        contactName: c.name, relation: c.relation, occasion, budget, plan, lines,
+        contactName: c.name, relation: c.relation, occasion, occasionDate, budget, plan, lines,
       });
       ok(res, { prompt, evidenceCount: evidences.length });
+    } catch (e) { failFrom(res, e); }
+    return true;
+  }
+  // AI 出话术：事实卡已在工作台原生展示，此端点把同一份事实交给 DSH 会话生成话术建议，不落库
+  if (p === '/api/briefing' && m('POST')) {
+    try {
+      const c = store.getContact(String(body.contactId ?? ''));
+      if (!c) throw store.httpError(404, '联系人不存在');
+      const f = briefingFacts(c);
+      const label = (m) => ({ preference: '喜好', dislike: '不喜好', taboo: '禁忌', gift: '送过/收过', event: '事件', interaction: '往来', attribute: '基础', promise: '承诺' }[m.type] || m.type);
+      const dirOf = (m) => (m.direction === 'contact_to_user' ? '（TA对我）' : m.direction === 'user_to_contact' ? '（我对TA）' : '');
+      const line = (m) => `- [${label(m)}${dirOf(m)}] ${m.content}${m.date ? `（${m.date}）` : ''}`;
+      const prompt = FLOWS.meetupBriefing.build({
+        contactName: c.name, relation: c.relation,
+        tags: (c.tags || []).join(' / '), birthday: c.birthday || '',
+        lastSeen: f.lastSeen,
+        occasions: f.occasions.map((o) => `${o.label}${o.inDays === 0 ? '就是今天' : `还有 ${o.inDays} 天`}`),
+        reciprocity: f.reciprocity, promises: f.promises.map(line), taboos: f.cautions.map(line), facts: f.factLines.map(line),
+      });
+      ok(res, { prompt, evidenceCount: f.factLines.length + f.promises.length + f.cautions.length });
+    } catch (e) { failFrom(res, e); }
+    return true;
+  }
+  // 空库首价值：名字+场景建联系人（用户主动建 → confirmed；同名复用不建重），返回先问后给的引导 prompt
+  if (p === '/api/first-run' && m('POST')) {
+    try {
+      const name = String(body.name ?? '').trim().slice(0, 40);
+      if (!name) throw store.httpError(400, '名字不能为空');
+      const SCENARIOS = {
+        say: '不知道该怎么开口（要发消息/见面想好说什么）',
+        gift: '不知道送什么（要选礼物）',
+        reconnect: '想重新联系（很久没联系了）',
+      };
+      const scenario = String(body.scenario ?? '');
+      if (!SCENARIOS[scenario]) throw store.httpError(400, '未知场景');
+      const note = String(body.note ?? '').trim().slice(0, 300);
+      // 先查后建：用户忘了已建过时直接复用既有联系人
+      const existing = store.listContacts({ includeArchived: false }).find((c) => c.name === name);
+      const c = existing || store.createContact({ name });
+      const prompt = FLOWS.firstRun.build({ contactName: c.name, scenario: SCENARIOS[scenario], note });
+      ok(res, { prompt, contactId: c.id, created: !existing });
     } catch (e) { failFrom(res, e); }
     return true;
   }

@@ -76,6 +76,11 @@ fn run(cmd: Cmd) -> tube::Result<()> {
             emit_or_print(json, "✅ 时机已生成", data);
             Ok(())
         }
+        Cmd::Fading { days, json } => {
+            let data = derive::fading(days)?;
+            emit_or_print(json, "✅ 疏远预警已生成", data);
+            Ok(())
+        }
     }
 }
 
@@ -347,6 +352,13 @@ enum Cmd {
     /// 送礼时机（生日 + 相关节日 + 计划日期，默认 30 天窗）
     Occasion {
         #[arg(long, default_value_t = 30)]
+        days: i64,
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+    /// 疏远预警（距最近一条已确认记忆超过 N 天的联系人，默认 90 天）
+    Fading {
+        #[arg(long, default_value_t = 90)]
         days: i64,
         #[arg(long, default_value_t = false)]
         json: bool,

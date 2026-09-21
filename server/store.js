@@ -727,8 +727,8 @@ export function giftOccasions(days = 30) {
     items.push(item);
   };
   for (const c of listContacts({ includeArchived: false })) {
-    // ① 生日（每年）
-    const bd = nextBirthdayDays(c.birthday);
+    // ① 生日（每年）——窗口跟随调用方（首页 overview 默认 30 天不变）
+    const bd = nextBirthdayDays(c.birthday, days);
     if (bd !== null) push({ contactId: c.id, name: c.name, occasion: 'birthday', label: '生日', date: '', inDays: bd, source: 'birthday' });
     // ② 相关固定节日
     for (const h of FIXED_HOLIDAYS) {
@@ -738,15 +738,47 @@ export function giftOccasions(days = 30) {
         if (diff >= 0 && diff <= days) push({ contactId: c.id, name: c.name, occasion: h.occasion, label: h.label, date: `${year}-${h.md}`, inDays: diff, source: 'holiday' });
       }
     }
-    // ③ 计划里的具体日期
+    // ③ 计划里的具体日期。同人同日已有生日/节日/计划时机行则跳过：
+    // 计划是"应对"，其上下文已并入该行的已有计划展示；同日再出提醒行 = 自我繁殖
+    // （AI 帮想落的新卡场合标签可能与原卡不同——中秋/中秋节，故按天去重而非按标签）
     for (const p of db.plans) {
       if (p.contactId !== c.id || !p.occasionDate || p.status === 'sent') continue;
       const [y, m, d] = p.occasionDate.split('-').map(Number);
       const diff = dayDiff(new Date(y, m - 1, d));
-      if (diff >= 0 && diff <= days) push({ contactId: c.id, name: c.name, occasion: p.occasion || 'custom', label: p.occasion || '自定义', date: p.occasionDate, inDays: diff, source: 'plan', planId: p.id, idea: p.idea, status: p.status });
+      if (diff >= 0 && diff <= days && !items.some((x) => x.contactId === c.id && x.inDays === diff)) push({ contactId: c.id, name: c.name, occasion: p.occasion || 'custom', label: p.occasion || '自定义', date: p.occasionDate, inDays: diff, source: 'plan', planId: p.id, idea: p.idea, status: p.status });
     }
   }
   return items.sort((a, b) => a.inDays - b.inDays).slice(0, 12);
+}
+
+/**
+ * 疏远预警：每联系人距最近一条已确认（未被取代）记忆的天数，超过阈值的按天数降序列出。
+ * 归档/待确认联系人、无记忆联系人（无基线）不参与；「每年-MM-DD」循环日期不是互动事件，跳过。
+ */
+export function fadingContacts(days = 90) {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const contactById = new Map(listContacts({ includeArchived: false }).map((c) => [c.id, c]));
+  const lastByContact = new Map();
+  for (const m of db.memories) {
+    if (m.status !== 'confirmed' || m.supersededBy) continue;
+    const cid = m.contactId || '';
+    if (!cid || !contactById.has(cid)) continue;
+    const raw = String(m.date || '').trim();
+    const dayStr = raw ? raw.slice(0, 10) : String(m.createdAt || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dayStr)) continue;
+    const d = new Date(`${dayStr}T00:00:00`);
+    const prev = lastByContact.get(cid);
+    if (!prev || d > prev.d) lastByContact.set(cid, { dayStr, d });
+  }
+  const items = [];
+  for (const [cid, { dayStr, d }] of lastByContact) {
+    const gap = Math.round((today - d) / 86_400_000);
+    if (gap < days) continue;
+    const c = contactById.get(cid);
+    items.push({ contactId: cid, name: c.name, relation: c.relation, lastDate: dayStr, days: gap });
+  }
+  return items.sort((a, b) => b.days - a.days);
 }
 
 // ---------- 素材（原始素材与结构化记忆分离，只作溯源存档） ----------
@@ -803,8 +835,10 @@ export function deleteMaterial(id) {
 const TYPE_CN = { preference: '喜好', dislike: '不喜好', taboo: '禁忌', event: '事件', gift: '礼物', promise: '承诺', interaction: '往来', attribute: '基础' };
 export function typeCn(t) { return TYPE_CN[t] || t; }
 
-function nextBirthdayDays(birthday) {
-  const match = /^(\d{4})?-(\d{2})-(\d{2})$/.exec(birthday.replace('每年-', '')) || /^(\d{2})-(\d{2})$/.exec(birthday);
+function nextBirthdayDays(birthday, days = 30) {
+  // 与 rust birthday_md 同口径：先剥「每年-」前缀，再按 YYYY-MM-DD / MM-DD 解析；窗口由调用方给（rust 侧同为窗口制）
+  const stripped = String(birthday || '').replace('每年-', '');
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(stripped) || /^(\d{2})-(\d{2})$/.exec(stripped);
   if (!match) return null;
   const month = Number(match[match.length - 2]);
   const day = Number(match[match.length - 1]);
@@ -814,7 +848,7 @@ function nextBirthdayDays(birthday) {
   for (const year of [today.getFullYear(), today.getFullYear() + 1]) {
     const next = new Date(year, month - 1, day);
     const diff = Math.round((next - today) / 86_400_000);
-    if (diff >= 0 && diff <= 30) return diff;
+    if (diff >= 0 && diff <= days) return diff;
   }
   return null;
 }

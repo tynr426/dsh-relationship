@@ -88,17 +88,13 @@ input, select { font: inherit; color: inherit; }
 .view-head h1 { margin: 0 0 2px; font-size: 20px; }
 .view-sub { margin: 0; color: var(--label-2); font-size: 13px; }
 
-/* ---------- 统计卡 ---------- */
-.metric-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 16px; }
-.metric-card { padding: 12px 14px; border-radius: var(--radius); background: var(--bg-panel); border: 1px solid var(--border); }
-.metric-card b { display: block; font-size: 22px; }
-.metric-card span { color: var(--label-2); font-size: 12px; }
-.metric-card.alert b { color: var(--warn); }
-
 /* ---------- 待确认队列 ---------- */
 .queue-toolbar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
 .onboarding { padding: 12px 14px; border-radius: var(--radius); background: var(--accent-weak); color: var(--label); margin-bottom: 14px; }
 .onboarding p { margin: 4px 0 0; color: var(--label-2); }
+.onboarding-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.onboarding small { display: block; margin-top: 10px; color: var(--label-2); }
+#form-first textarea { resize: vertical; min-height: 72px; font: inherit; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-base); }
 .pending-queue { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
 .pending-card { display: flex; gap: 12px; padding: 12px 14px; border-radius: var(--radius); background: var(--bg-panel); border: 1px solid var(--border); box-shadow: var(--shadow); }
 .pending-card.contact-pending { border-color: var(--accent); background: var(--accent-weak); }
@@ -118,13 +114,37 @@ input, select { font: inherit; color: inherit; }
 .edit-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--label-2); }
 .edit-grid select, .edit-grid input { padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-panel); color: var(--label); font-size: 13px; }
 
-/* ---------- 首页两栏 ---------- */
-.home-two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+/* ---------- 首页 ---------- */
+/* 值得关注 feed：四类派生合成的行动流，首页主视觉 */
+.attention-list { display: flex; flex-direction: column; gap: 10px; margin-bottom: 20px; }
+/* 关注卡片：人 × 为什么 × 已有计划 × 动作 */
+.attention-card { padding: 12px 14px; border-radius: var(--radius); background: var(--bg-panel); border: 1px solid var(--border); cursor: pointer; }
+.attention-card:hover { border-color: var(--accent); background: var(--bg-hover); }
+.att-top { display: flex; align-items: center; gap: 10px; }
+.att-what { flex: 1; min-width: 0; font-size: 13px; }
+.att-what b, .att-what strong { font-weight: 600; }
+.att-when { flex: none; color: var(--label-2); font-size: 12px; }
+.att-sub { display: flex; gap: 12px; margin-top: 6px; color: var(--label-2); font-size: 12px; }
+/* 为什么：引用线样式，弱化为背景信息；安全项完整保留 */
+.att-why { margin-top: 8px; padding: 1px 0 1px 10px; border-left: 2px solid var(--border); }
+.att-why p { margin: 0; font-size: 12px; color: var(--label-2); line-height: 1.55; }
+.att-why p + p { margin-top: 3px; }
+.att-why p.caution { color: var(--warn, #b45309); }
+.att-plans { margin-top: 7px; font-size: 12px; color: var(--label-2); }
+.att-actions { display: flex; gap: 8px; margin-top: 10px; }
+.att-actions .ghost-btn { padding: 4px 10px; font-size: 12px; }
+
+/* 最近记住了 */
+.recent-list { display: flex; flex-direction: column; }
+.recent-row { display: flex; align-items: center; gap: 12px; padding: 9px 4px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.recent-row:last-child { border-bottom: none; }
+.recent-row:hover { background: var(--bg-hover); }
+.recent-main { flex: 1; min-width: 0; }
+.recent-main b { font-size: 13px; }
+.recent-main p { margin: 2px 0 0; font-size: 12.5px; color: var(--label-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recent-meta { flex: none; display: flex; gap: 6px; }
 .panel { padding: 14px 16px; border-radius: var(--radius); background: var(--bg-panel); border: 1px solid var(--border); }
 .panel h2 { margin: 0 0 10px; font-size: 14px; }
-.upcoming-list { display: flex; flex-direction: column; gap: 8px; }
-.upcoming-row { display: flex; justify-content: space-between; gap: 8px; }
-.upcoming-row small { color: var(--label-2); }
 .howto { margin: 0; padding-left: 18px; color: var(--label-2); display: flex; flex-direction: column; gap: 6px; }
 .howto b { color: var(--label); }
 
@@ -144,6 +164,11 @@ input, select { font: inherit; color: inherit; }
 .detail-head h2 { margin: 0; font-size: 17px; }
 .detail-meta { color: var(--label-2); font-size: 12px; margin-top: 4px; display: flex; flex-wrap: wrap; gap: 6px; }
 .detail-actions { display: flex; gap: 6px; }
+/* 见面简报事实卡：纯派生速览，位于详情头部与记忆检索之间 */
+.briefing-card { border: 1px solid var(--border); border-left: 3px solid var(--accent); border-radius: 8px; background: var(--bg-hover); padding: 10px 12px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 6px; }
+.briefing-card h4 { margin: 0 0 2px; font-size: 12px; color: var(--label-2); font-weight: 600; }
+.briefing-row { display: flex; align-items: baseline; gap: 8px; font-size: 13px; line-height: 1.45; }
+.briefing-row .badge { flex: none; }
 .memory-search { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
 .memory-search input { flex: 1; min-width: 0; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-base); }
 .memory-search span { flex: none; color: var(--label-2); font-size: 12px; }
@@ -204,7 +229,7 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .toast.error { background: var(--danger); }
 
 @media (max-width: 900px) {
-  .contacts-layout, .home-two-col { grid-template-columns: 1fr; }
+  .contacts-layout { grid-template-columns: 1fr; }
   #rail { width: 56px; }
   .nav-item span, .privacy-note span, .brand-copy { display: none; }
 }

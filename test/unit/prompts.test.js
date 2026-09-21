@@ -86,3 +86,23 @@ test('工具目录：无 memory_confirm（AI 通道禁确认）', () => {
   assert.ok(toolCatalog().includes('organize_question'), 'toolCatalog 应含 organize_question');
   assert.ok(toolCatalog().includes('pending_summary'), 'toolCatalog 应含 pending_summary');
 });
+
+test('出口⑤见面简报（FLOWS.meetupBriefing）：纯生成不落库 + 承诺/禁忌分区 + 事实推断分离', () => {
+  const prompt = FLOWS.meetupBriefing.build({
+    contactName: '测试', relation: 'friend', tags: '球友', birthday: '每年-05-01',
+    lastSeen: { days: 120, lastDate: '2026-05-20' },
+    occasions: ['生日还有 12 天'], reciprocity: [{ date: '2026-08-01', content: '茶叶', hasActivePlan: false }],
+    promises: ['- [承诺] 答应带老家特产（2026-05-01）'],
+    taboos: ['- [禁忌] 对花生过敏'],
+    facts: ['- [喜好] 只喝武夷岩茶（2026-06-01）'],
+  });
+  for (const frag of ['见面简报', '不调用任何写入工具', 'timeline_get', '待跟进承诺', '相处注意', '距上次有记录的互动已 120 天', '对花生过敏', '尚未回礼', '生日还有 12 天', '推测']) {
+    assert.ok(prompt.includes(frag), `见面简报缺关键内容：${frag}`);
+  }
+  // 播报与 preset 都要教过简报纪律（对话里说"见面简报"也认识）
+  assert.ok(announcementBody().includes(DISCIPLINE.briefingRules), '播报须含简报纪律');
+  assert.ok(presetBody().includes(DISCIPLINE.briefingRules), 'preset 须含简报纪律');
+  // 空库不编造：各区明说无记录
+  const empty = FLOWS.meetupBriefing.build({ contactName: '测试', relation: 'friend', tags: '', birthday: '', lastSeen: null, occasions: [], reciprocity: [], promises: [], taboos: [], facts: [] });
+  assert.ok(empty.includes('暂无可推算的互动记录') && empty.match(/- 无记录/g).length >= 3, '空库须明说无记录');
+});

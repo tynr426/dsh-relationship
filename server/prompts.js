@@ -27,7 +27,8 @@ export const DISCIPLINE = {
   conflict: '新事实与旧记忆矛盾时告诉用户，不强行修改旧事实（必要时用取代机制，确认队列卡片上有"被取代"入口）',
   recallFirst: '生成祝福、问候、礼物建议前必须先 memory_search（必要时 timeline_get）检索该联系人的已确认记忆，产出中引用具体记忆点（如"因为他上次说过喜欢岩茶"）；检索为空时明说"还没有这个人的记忆"，不编造',
   recallAvoidRepeat: '表达回顾（生成节日祝福/感谢/问候前执行）：① 用 memory_search 检索该联系人过去同类场合、direction=user_to_contact 的历史表达；② 列出已表达过的核心要点；③ 检索那之后新增的关系事件；④ 生成时明确避开已表达过的核心角度，结合新事件寻找新角度；⑤ 可基于多条已确认记忆做推断辅助表达，但输出中须与事实区分，不得把推断写成断言',
-  giftRules: '给出 2-3 个具体方案，每个方案的理由必须引用具体记忆点；禁忌与不喜好涉及的品类必须明确排除并说明原因；曾送过的礼物不重复建议；建卡纪律：每个方案用 gift_plan_add 落成计划卡，但先 gift_plan_list 查该联系人已有计划——围绕已有计划出主意时，优化/替代方案用 gift_plan_update 更新原卡（不另建新卡，避免同一想法两张卡），只有全新方案才 gift_plan_add；同一联系人同一场合不重复建相同想法的卡。创建完列出建了哪几张/更新了哪几张，提示用户在礼赠页查看、编辑或标记已送',
+  giftRules: '给出 2-3 个具体方案，每个方案的理由必须引用具体记忆点；禁忌与不喜好涉及的品类必须明确排除并说明原因；曾送过的礼物不重复建议；建卡纪律：每个方案用 gift_plan_add 落成计划卡，但先 gift_plan_list 查该联系人已有计划——围绕已有计划出主意时，优化/替代方案用 gift_plan_update 更新原卡（不另建新卡，避免同一想法两张卡），只有全新方案才 gift_plan_add；同一联系人同一场合不重复建相同想法的卡；新卡 occasion/occasionDate 沿用本次场合与已有计划，日期不确定就留空，绝不自行推断（工作台按计划日期派生提醒，日期漂移会产生重复提醒行）。创建完列出建了哪几张/更新了哪几张，提示用户在礼赠页查看、编辑或标记已送',
+  briefingRules: '见面简报是纯生成任务，不落库：不调用任何写入工具（不建记忆、不建计划、不写素材），需要更多细节可用 timeline_get 读取；产出必须引用具体记忆点，推断与事实分开标注；禁忌与不喜好置顶醒目；记忆不足处明说，不编造',
   toolEntry: '所有读写经工作台 REST 完成：工具入口 POST {TOOLS_URL}，body 为 {"name":"工具名","args":{...}}',
   privacy: '不索要、不建议导入任何聊天记录；只处理用户主动说出的内容；关系数据只存本地工作台，不外传。语言跟随用户',
 };
@@ -62,11 +63,15 @@ export const FLOWS = {
     title: '礼物建议',
     steps: ['recallFirst', 'giftRules'],
     /** 礼物建议 prompt（/api/gift-suggest 组装） */
-    build({ contactName, relation, occasion, budget, plan, lines }) {
+    build({ contactName, relation, occasion, occasionDate, budget, plan, lines }) {
       const t = DISCIPLINE;
       return [
         `请为「${contactName}」准备礼物建议（relation: ${relation}${occasion ? `，场合：${occasion}` : ''}）。`,
         budget ? `预算：${budget}。` : '预算：不限。',
+        // 日期锚定：AI 推断日期会让新卡繁殖出重复的时机提醒行（工作台按计划日期派生提醒）
+        occasionDate || plan
+          ? `建卡纪律：新卡的 occasionDate 一律用「${occasionDate || plan?.occasionDate || ''}」${occasion ? `、occasion 用「${occasion}」` : ''}，与已有计划保持一致；绝不自行推断或改动日期，日期留空也比编一个强。`
+          : '建卡纪律：occasionDate 不确定就留空，绝不自行推断日期（工作台按计划日期派生提醒，日期漂移会产生重复提醒）。',
         plan ? `用户已有一个礼物计划：想法「${plan.idea}」${plan.budget ? `，预算 ${plan.budget}` : ''}${plan.productName ? `，已看中商品：${plan.productName}` : ''}。请在此基础上优化，或给出替代方案：优化/替代用 gift_plan_update 更新原卡（计划 ID：${plan.id}），不要为同一想法另建新卡；为该计划出的每个全新方案 gift_plan_add 时都带 basedOnPlanId="${plan.id}"（工作台会把这批建议归到它名下，用户可一键删除这批）。` : '',
         '先 gift_plan_list 查该联系人已有计划：同一场合已有相同想法的卡不重复建；只有与已有计划都不同的全新方案才 gift_plan_add。',
         lines.length ? '已确认的记忆依据（必须围绕这些，不得编造记忆里没有的偏好）：' : '该联系人还没有可用记忆依据，请明确说明这一点，只给通用保守建议：',
@@ -77,6 +82,51 @@ export const FLOWS = {
       ].filter(Boolean).join('\n');
     },
   },
+  // 见面简报（读路径 D：纯生成不落库）
+  meetupBriefing: {
+    title: '见面简报',
+    steps: ['briefingRules'],
+    /** 见面简报 prompt（/api/briefing 组装） */
+    build({ contactName, relation, tags, birthday, lastSeen, occasions, reciprocity, promises, taboos, facts }) {
+      const t = DISCIPLINE;
+      const list = (lines, empty) => (lines.length ? lines : [`- ${empty}`]);
+      return [
+        `请为「${contactName}」准备一份见面简报（relation: ${relation}${tags ? `，标签：${tags}` : ''}${birthday ? `，生日：${birthday}` : ''}）：下次见面或主动联系前，该聊什么、该跟进什么、要注意什么。`,
+        `互动间隔：${lastSeen ? `距上次有记录的互动已 ${lastSeen.days} 天（最后记录 ${lastSeen.lastDate}）` : '暂无可推算的互动记录'}`,
+        occasions.length ? `近期时间点：${occasions.join('；')}` : '',
+        reciprocity.length ? `回礼待回应：${reciprocity.map((r) => `TA 于 ${r.date} 送过「${r.content}」，我方尚未回礼（${r.hasActivePlan ? '已有礼物计划' : '尚无计划'}）`).join('；')}` : '',
+        '待跟进承诺（逐条给出跟进建议）：',
+        ...list(promises, '无记录'),
+        '相处注意（置顶醒目，见面/送礼场合必须避开）：',
+        ...list(taboos, '无记录'),
+        '记忆依据（其余已确认记忆，引用以这些为准，不得编造记忆里没有的事；需要更多细节可用 timeline_get 读取）：',
+        ...list(facts, '无记录'),
+        '要求：',
+        `1. ${t.briefingRules}`,
+        '2. 输出结构：① 开场话题（从记忆点里挑 2-3 个自然的）② 待跟进（承诺/回礼，逐条给行动建议）③ 相处注意（禁忌/不喜好）④ 1-2 句口语化的切入话术示例',
+        '3. 事实与推断分开：引用记忆的注明出处；你的推测明确标注"推测"',
+        '4. 记忆不足的部分明说"还没有记录"，不编造；整体记忆很少时，建议用户先补充哪些类型的记忆',
+      ].filter(Boolean).join('\n');
+    },
+  },
+  // 首价值流程（空库冷启动，读路径 D）：先价值后积累——AI 先问关键问题再给建议，结束邀请补素材，飞轮第一圈
+  firstRun: {
+    title: '首价值流程',
+    steps: ['pendingOnly'],
+    /** 空库场景引导 prompt（POST /api/first-run 组装） */
+    build({ contactName, scenario, note }) {
+      const t = DISCIPLINE;
+      return [
+        `用户刚把「${contactName}」加进关系记忆工作台，想处理这个场景：${scenario}。`,
+        note ? `用户补充：${note}。` : '',
+        '工作台里还没有这个人的长期记忆，先别急着给成品：',
+        '1. 基于场景向用户提 1-2 个最关键的问题（例如：你们上次联系是什么时候？TA 最近生活里有什么值得注意的变化？），一次问完，等用户回答；',
+        '2. 拿到回答后，再给贴合场景的具体建议（怎么开口/送什么），只引用用户说过的信息，不编造你们之间的往事；推断与事实分开说；',
+        `3. 对话中出现值得记住的关系事实时，用 memory_add 登记为待确认记忆（${t.pendingOnly}），用户会回工作台确认；`,
+        '4. 结束时邀请一次：如果愿意再告诉 AI 一点你们之间的事（随口一句或粘贴一小段聊天），下次会做得更像。',
+      ].filter(Boolean).join('\n');
+    },
+  },
 };
 
 // ── 出口派生：四处提示词全部从这里生成 ──────────────────────────────────
@@ -84,7 +134,7 @@ const TOOLS = ['contact_search', 'contact_add', 'contact_update', 'memory_add', 
 
 /** 工具清单段（播报/自足指令共用）：名字 + 一句话约束 */
 export function toolCatalog() {
-  return '可用工具：contact_search（查找联系人，任何录入前必调）、contact_add（新建联系人，AI 新建一律进工作台待确认队列、由用户确认收录，不必等待直接用返回的编号继续；tags 填身份标签如 老师/同学/客户，节日匹配依赖标签）、contact_update、memory_add（登记一条待确认记忆，一条只含一个事实；从素材提取须带 sourceQuote 原话摘录）、memory_batch_add（一段素材拆多条，每条带 sourceQuote 原话摘录与 saidAt=原话时间戳，闸门校验；长素材分多批提取，每批接着上一批的消息继续）、memory_reject（驳回待确认记忆须给理由——提取查重后清除本批重复条目时用）、memory_update、memory_search（生成祝福/礼物建议前必调，只返回已确认记忆，检索为空要明说）、timeline_get（读取某人时间线）、gift_plan_add（把礼物方案落成计划卡，理由须引用记忆点；先 gift_plan_list 查已有计划，同联系人相同想法会被拒绝——优化已有计划用 gift_plan_update 更新原卡）、gift_plan_list、gift_plan_update、gift_plan_delete、material_save（存档用户粘贴的原始素材）、material_list（列出素材，用户说"整理素材"时先调；有已拆条数但无整理报告的素材是整理未完成，应续跑而非重拆）、material_get（读素材全文后提取；响应里的 today 字段是当天日期，相对时间一律以它为锚推算；extracted 列表是已拆出的记忆，续跑时对照它跳过已覆盖的消息）、material_report（素材整理完提交整理报告，报告显示在工作台素材卡上供用户确认时对照）、organize_question（整理中确需用户拍板时登记反问——先登记再在对话里提问，工作台素材卡会显示"AI 在等你回答"供用户直接作答；用户作答后带 done=true 清除；整理判断以当前库为准，已删除视为不存在，不得为此反问）、pending_summary（查看待确认队列：待确认记忆与 AI 新建的待确认联系人；会话开始先调，有就提醒用户回工作台确认）。';
+  return '可用工具：contact_search（查找联系人，任何录入前必调）、contact_add（新建联系人，AI 新建一律进工作台待确认队列、由用户确认收录，不必等待直接用返回的编号继续；tags 填身份标签如 老师/同学/客户，节日匹配依赖标签）、contact_update、memory_add（登记一条待确认记忆，一条只含一个事实；从素材提取须带 sourceQuote 原话摘录）、memory_batch_add（一段素材拆多条，每条带 sourceQuote 原话摘录与 saidAt=原话时间戳，闸门校验；长素材分多批提取，每批接着上一批的消息继续）、memory_reject（驳回待确认记忆须给理由——提取查重后清除本批重复条目时用）、memory_update、memory_search（生成祝福/礼物建议前必调，只返回已确认记忆，检索为空要明说）、timeline_get（读取某人时间线）、gift_plan_add（把礼物方案落成计划卡，理由须引用记忆点；先 gift_plan_list 查已有计划，同联系人相同想法会被拒绝——优化已有计划用 gift_plan_update 更新原卡）、gift_plan_list、gift_plan_update、gift_plan_delete、material_save（存档用户粘贴的原始素材）、material_list（列出素材，用户说"整理素材"时先调；有已拆条数但无整理报告的素材是整理未完成，应续跑而非重拆）、material_get（读素材全文后提取；响应里的 today 字段是当天日期，相对时间一律以它为锚推算；extracted 列表是已拆出的记忆，续跑时对照它跳过已覆盖的消息）、material_report（素材整理完提交整理报告，报告显示在工作台素材卡上供用户确认时对照）、organize_question（整理中确需用户拍板时登记反问——先登记再在对话里提问，工作台素材卡会以「再告诉我一点」显示问题供用户直接作答；用户作答后带 done=true 清除；整理判断以当前库为准，已删除视为不存在，不得为此反问）、pending_summary（查看待确认队列：待确认记忆与 AI 新建的待确认联系人；会话开始先调，有就提醒用户回工作台确认）。';
 }
 
 /** 插件播报段（lib/index.js 引用）：对话即录入 + 整理流程 + 纪律 */
@@ -93,7 +143,7 @@ export function announcementBody() {
   return [
     `对话即录入：用户在会话里说出关系事实（如「记一下，小李女儿十月办婚礼，他对花生过敏」）时，你必须把每个事实登记为一条待确认记忆。涉及本工作台的全部操作经 REST API 完成，工具入口：POST {TOOLS_URL}，body 为 {"name":"工具名","args":{...}}。${toolCatalog()}${t.confirmHumanOnly}。${t.sessionPendingCheck}。`,
     `素材智能整理流程：用户粘贴长文本/聊天记录（无论在会话里还是工作台「智能整理」框里）→ 先 material_save 存档（可带 contactId 和 occasion 场景标签）→ material_get 读全文 → ${t.sceneFirst}；每个 fact 用 memory_batch_add 拆条登记，每条带 sourceId=素材 ID 与 sourceQuote 原话摘录（未显式给 occasion 时自动继承素材的）；${t.batching}；${t.quote}；${t.dedupe}；${t.multiPerson}；${t.noAskOrganize} → ${t.reportOnOrganize}。${t.dualTime}。三层标注：${t.direction}；${t.lifespan}；${t.occasion}`,
-    `纪律：${t.pendingOnly}；礼物计划是低风险意图，用 gift_plan_add 直接落卡不进确认队列；${t.searchFirst}；${t.verbatim}；${t.behaviorOnly}；${t.recallAvoidRepeat}；${t.giftRules}。数据目录：~/.dsh/dsh-relationship。用户提到「关系记忆 / 联系人 / 记一笔 / 素材 / 送礼」时即指本插件。`,
+    `纪律：${t.pendingOnly}；礼物计划是低风险意图，用 gift_plan_add 直接落卡不进确认队列；${t.searchFirst}；${t.verbatim}；${t.behaviorOnly}；${t.recallAvoidRepeat}；${t.giftRules}；${t.briefingRules}。数据目录：~/.dsh/dsh-relationship。用户提到「关系记忆 / 联系人 / 记一笔 / 素材 / 送礼」时即指本插件。`,
   ].join('\n');
 }
 
@@ -106,7 +156,7 @@ export function presetBody() {
     `素材智能整理：用户粘贴长文本或聊天记录（无论是发在会话里，还是已通过工作台「智能整理」框保存到素材区）时，先 material_save 存档（可带 contactId 与 occasion 场景标签），再 material_get 读全文；${t.sceneFirst}。${t.dedupe}。每条用 memory_batch_add 拆成一条待确认记忆（每条带 sourceId=素材 ID 与 sourceQuote 原话摘录用于溯源）；${t.batching} ${t.quote}。${t.multiPerson}。${t.noAskOrganize}。用户说"整理素材"时先 material_list 找待整理（raw）的素材。整理完用 material_report 提交整理报告。${t.reportOnOrganize}。`,
     `提取规范：${t.verbatim}。${t.dualTime}。三层标注（V4）：① ${t.direction} ② ${t.lifespan} ③ ${t.occasion} 硬规则：${t.behaviorOnly}；${t.conflict}`,
     `相对时间锚点：${t.dateAnchor}`,
-    `应用纪律：${t.recallFirst}。${t.sessionPendingCheck}。用户明确说"确认/没错/就这么记"时，告知记忆已在待确认队列、请回工作台点击确认（${t.confirmHumanOnly}）。`,
+    `应用纪律：${t.recallFirst}。${t.sessionPendingCheck}。用户明确说"确认/没错/就这么记"时，告知记忆已在待确认队列、请回工作台点击确认（${t.confirmHumanOnly}）。用户请求见面简报（"和TA见面聊什么/帮我准备一下见XX"）时：${t.briefingRules}。`,
     `${t.recallAvoidRepeat}`,
     `礼物建议（用户问"送什么/出主意"或点工作台「AI 出主意」时执行）：① 先 memory_search 检索该联系人的喜好/不喜好/禁忌/送出与收礼记录（必要时 timeline_get）；② ${t.giftRules}；③ 检索为空时明说并只给通用保守建议。`,
     `隐私红线：${t.privacy}`,

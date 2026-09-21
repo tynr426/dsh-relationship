@@ -19,6 +19,9 @@
     contacts: [],
     overview: { counts: {}, pending: [], upcoming: [] },
     materials: [],
+    attention: [],
+    recent: [],
+    firstScenario: 'say',
     activeContactId: null,
     timeline: { contact: null, memories: [] },
     typeFilter: 'all',
@@ -212,7 +215,7 @@
     return sessionId;
   }
 
-  /** 直连宿主关系记忆会话发送一条文本（AI 整理 / 反问作答共用）。 */
+  /** 直连宿主关系记忆会话发送一条文本（AI 整理 / 「再告诉我一点」作答共用）。 */
   async function sendToSession(text) {
     const sessionId = await ensureDshSession();
     const requestId = globalThis.crypto?.randomUUID?.() || `rel-prompt-${Date.now()}`;
@@ -246,14 +249,18 @@
 
   async function refresh() {
     try {
-      const [overview, contacts, materials, gifts, relations] = await Promise.all([
+      const [overview, contacts, materials, gifts, relations, attention, recent] = await Promise.all([
         api('/api/overview'), api('/api/contacts'), api('/api/materials'),
         api('/api/gifts/occasions').catch(() => null),
         api('/api/relations').catch(() => ({ relationTypes: [] })),
+        api('/api/attention').catch(() => null),
+        api('/api/memories/recent?limit=5').catch(() => null),
       ]);
       state.overview = overview;
       state.contacts = contacts.contacts;
       state.materials = materials.materials;
+      state.attention = attention ? (attention.items || []) : [];
+      state.recent = recent ? (recent.items || []) : [];
       state.relationTypes = relations.relationTypes || [];
       if (gifts) {
         state.gift.occasions = gifts.occasions || [];
@@ -326,20 +333,24 @@
   function renderHome() {
     const c = state.overview.counts;
     const pendingTotal = (c.pending || 0) + (c.pendingContacts || 0);
-    $('#metric-cards').innerHTML = [
-      { label: '联系人', value: c.contacts || 0 },
-      { label: '长期记忆', value: c.confirmed || 0 },
-      { label: '待确认', value: pendingTotal, alert: pendingTotal > 0 },
-      { label: '已驳回', value: c.rejected || 0 },
-    ].map((m) => `<div class="metric-card${m.alert ? ' alert' : ''}"><b>${m.value}</b><span>${m.label}</span></div>`).join('');
+
+    // 行动型首页：头部副标动态回答「今天有几件事」，系统状态只占一句话
+    const attentionCount = (state.attention || []).length;
+    const subParts = [];
+    if (attentionCount) subParts.push(attentionCount === 1 ? '有 1 个关系值得关注' : `有 ${attentionCount} 个关系值得关注`);
+    if (pendingTotal) subParts.push(pendingTotal === 1 ? '1 条待确认' : `${pendingTotal} 条待确认`);
+    else subParts.push('记忆整理已就绪');
+    $('#home-sub').textContent = subParts.join(' · ');
 
     $('#onboarding').classList.toggle('hidden', (c.contacts || 0) > 0);
+    // 待确认队列动态权重：空态折叠（状态并入头部副标），有待确认才展开——确认闸门仍是最重要行动
+    $('#pending-panel').classList.toggle('hidden', pendingTotal === 0);
 
     const queue = state.overview.pending || [];
     const pendingContacts = state.overview.pendingContacts || [];
     const queueEl = $('#pending-queue');
     if (!queue.length && !pendingContacts.length) {
-      queueEl.innerHTML = `<div class="empty">${(c.contacts || 0) === 0 ? '还没有联系人。新建一个，或在 DSH 会话里对助手说出你想记住的事。' : '没有待确认的记忆，一切就绪。'}</div>`;
+      queueEl.innerHTML = '';
     } else {
       // AI 新建联系人也进拍板队列：确认收录 / 不要（连带删掉 AI 为 TA 挂的待确认记忆）
       const contactCards = pendingContacts.map((ct) => `
@@ -414,10 +425,69 @@
 
     renderMaterialBox();
 
-    const upcoming = state.overview.upcoming || [];
-    $('#upcoming-list').innerHTML = upcoming.length
-      ? upcoming.map((u) => `<div class="upcoming-row"><span><b>${esc(u.name)}</b> <small>生日 ${esc(fmtDate(u.birthday))}</small></span><span class="badge date">${relativeDays(u.inDays)}</span></div>`).join('')
-      : '<div class="empty">30 天内没有生日/纪念日。给联系人补上生日就会出现在这里。</div>';
+    renderRecentRemembered();
+
+    renderAttention();
+  }
+
+  // 最近记住了：已确认记忆的最近几条（确认闸门之后才出现），强化「它真的在帮我记」
+  function renderRecentRemembered() {
+    const box = $('#recent-box');
+    const items = state.recent || [];
+    box.classList.toggle('hidden', items.length === 0);
+    if (!items.length) return;
+    $('#recent-list').innerHTML = items.map((m) => `
+      <div class="recent-row" data-id="${esc(m.contactId)}" role="button" tabindex="0">
+        <div class="recent-main">
+          <b>${esc(m.contactName)}</b>
+          <p>${esc(m.content)}</p>
+        </div>
+        <div class="recent-meta">
+          ${m.date ? `<span class="badge date">${esc(fmtDate(m.date))}</span>` : ''}
+          <span class="badge type">${TYPE_CN[m.type] || esc(m.type)}</span>
+        </div>
+      </div>`).join('');
+  }
+
+  // 值得关注 feed：四类派生（时机/疏远/待跟进/回礼）的卡片流——人 × 为什么 × 已有计划 × 动作。
+  // 行上放派生事实（记忆引用/送礼历史/计划），「怎么避开重复、出什么主意」留给点击后的 AI 会话现场判断。
+  function renderAttention() {
+    const listEl = $('#attention-list');
+    // 空库冷启动：首价值引导卡是 hero，feed 不占位不出空态噪音
+    if (!state.contacts.length) { listEl.innerHTML = ''; return; }
+    const items = state.attention || [];
+    if (!items.length) {
+      listEl.innerHTML = '<div class="empty">最近没有需要特别留意的关系——时机、承诺、回礼都清着。</div>';
+      return;
+    }
+    const KIND_BADGE = {
+      occasion: 'badge occ',
+      fading: 'badge date',
+      promise: 'badge short',
+      reciprocity: 'badge imp3',
+    };
+    listEl.innerHTML = items.map((a) => `
+      <article class="attention-card" data-id="${esc(a.contactId)}" role="button" tabindex="0">
+        <div class="att-top">
+          <span class="badge ${KIND_BADGE[a.kind] || ''}">${esc(a.label)}</span>
+          <span class="att-what">${esc(a.contactName)} · ${esc(a.text)}</span>
+          <span class="att-when">${a.date ? esc(fmtDate(a.date)) : ''}</span>
+        </div>
+        <div class="att-sub">
+          <span>${esc(relationCn(a.relation))}</span>
+          ${a.lastSeen ? `<span>上次互动 ${a.lastSeen.days === 0 ? '今天' : `${a.lastSeen.days} 天前`}</span>` : ''}
+        </div>
+        ${(a.evidence || []).length ? `<div class="att-why">${a.evidence.slice(0, 2).map((e) => {
+          // 安全信息（相处注意）完整醒目，其余截短降噪——细节留给点击后的时间线与 AI 会话
+          const text = e.kind === 'caution' ? e.text : (e.text.length > 48 ? `${e.text.slice(0, 48)}…` : e.text);
+          return `<p class="${e.kind === 'caution' ? 'caution' : ''}">${esc(text)}</p>`;
+        }).join('')}</div>` : ''}
+        ${a.plansTotal ? `<div class="att-plans">已有 ${a.plansTotal} 张计划${a.plans[0] ? `，如「${esc(a.plans[0].idea.length > 22 ? `${a.plans[0].idea.slice(0, 22)}…` : a.plans[0].idea)}」` : ''} · 可让 AI 围绕它们优化，不必另起新卡</div>` : ''}
+        <div class="att-actions">
+          <button class="ghost-btn attention-ai" data-action="attention-ai" data-kind="${esc(a.action)}" data-occasion="${esc(a.occasion || (a.kind === 'reciprocity' ? '回礼' : ''))}" data-date="${esc(a.date || '')}" data-id="${esc(a.contactId)}">${a.action === 'gift' ? 'AI 帮我想送什么' : 'AI 帮我想怎么说'}</button>
+          <button class="ghost-btn" type="button">查看记忆</button>
+        </div>
+      </article>`).join('');
   }
 
   function renderMaterialBox() {
@@ -444,7 +514,7 @@
             <span>${esc((mt.capturedAt || '').slice(0, 10))}</span>
           </div>
           ${mt.question ? `<div class="material-question">
-            <p class="mq-title">${mt.question.status === 'sent' ? '已发送作答' : 'AI 在等你回答'}<button class="mq-dismiss" data-action="dismiss-question" data-id="${esc(mt.id)}">不再等待</button></p>
+            <p class="mq-title">${`再告诉我一点 · ${mt.question.status === 'sent' ? '已发送作答' : '等你回答'}`}<button class="mq-dismiss" data-action="dismiss-question" data-id="${esc(mt.id)}">不再等待</button></p>
             <p class="mq-text">${esc(mt.question.question || '')}</p>
             ${mt.question.status === 'sent' ? '' : `<div class="mq-options">${(mt.question.options || []).map((o, i) => `
               <button class="mq-btn" data-action="answer-question" data-id="${esc(mt.id)}" data-index="${i}">${esc(o.label)}</button>`).join('')}
@@ -511,7 +581,7 @@
         ${productLine}
       </div>
       <div class="occ-actions">
-        <button class="primary-btn" data-action="suggest-open" data-id="${esc(p.contactId)}" data-occasion="${esc(p.occasion || '')}" data-plan="${esc(p.id)}">AI 出主意</button>
+        <button class="primary-btn" data-action="suggest-open" data-id="${esc(p.contactId)}" data-occasion="${esc(p.occasion || '')}" data-plan="${esc(p.id)}">送什么</button>
         ${jdPlanButton(p)}
         <span class="plan-actions">
           ${sugCount ? `<button class="icon-btn danger" data-action="plan-delete-suggestions" data-id="${esc(p.id)}">删这批建议(${sugCount})</button>` : ''}
@@ -545,11 +615,11 @@
           ${others.length ? `<div class="occ-plan muted">其他计划：${others.map((p) => esc(p.idea)).join('；')}</div>` : ''}
         </div>
         <div class="occ-actions">
-          <button class="primary-btn" data-action="suggest-open" data-contact="${esc(o.contactId)}" data-occasion="${esc(o.occasion || '')}" data-date="${esc(o.date || '')}">AI 出主意</button>
+          <button class="primary-btn" data-action="suggest-open" data-contact="${esc(o.contactId)}" data-occasion="${esc(o.occasion || '')}" data-date="${esc(o.date || '')}">送什么</button>
           ${active.length ? '' : `<button class="ghost-btn" data-action="plan-open" data-contact="${esc(o.contactId)}" data-occasion="${esc(o.occasion || '')}" data-date="${esc(o.date || '')}">记个想法</button>`}
         </div>
       </article>`;
-    }).join('') : '<div class="empty">30 天内没有生日和相关节日。已有计划在下方「进行中的计划」，可以直接在计划卡上点「AI 出主意」。</div>';
+    }).join('') : '<div class="empty">30 天内没有生日和相关节日。已有计划在下方「进行中的计划」，可以直接在计划卡上点「送什么」。</div>';
 
     $('#reciprocity-count').textContent = `· ${reciprocity.length}`;
     $('#reciprocity-list').innerHTML = reciprocity.length ? reciprocity.map((r) => `
@@ -614,6 +684,20 @@
       ? (state.memorySearchLoading ? '正在向量检索相关记忆…' : '没有检索到相关记忆。')
       : '还没有已确认的长期记忆。';
 
+    // 见面简报事实卡：纯派生（服务端聚合，搭 timeline 响应），零 AI 零延迟，SSE 自动刷新；全空则不渲染
+    const bf = t.briefing;
+    const bfRows = [];
+    if (bf) {
+      if (bf.lastSeen) bfRows.push(`<div class="briefing-row"><span class="badge type">间隔</span><span>距上次有记录的互动 <b>${bf.lastSeen.days}</b> 天（${esc(fmtDate(bf.lastSeen.lastDate))}）</span></div>`);
+      for (const o of bf.occasions) bfRows.push(`<div class="briefing-row"><span class="badge occ">时机</span><span>${esc(o.label)}${o.inDays === 0 ? ' 就是今天' : ` · 还有 <b>${o.inDays}</b> 天`}</span></div>`);
+      for (const r of bf.reciprocity) bfRows.push(`<div class="briefing-row"><span class="badge date">回礼</span><span>TA 送过「${esc(r.content)}」（${esc(fmtDate(r.date))}）尚未回礼${r.hasActivePlan ? '，已有礼物计划' : ''}</span></div>`);
+      for (const p of bf.promises) bfRows.push(`<div class="briefing-row"><span class="badge type">待跟进</span><span>${esc(p.content)}${p.date ? ` · ${esc(fmtDate(p.date))}` : ''}</span></div>`);
+      for (const x of bf.cautions) bfRows.push(`<div class="briefing-row"><span class="badge imp3">注意</span><span>${esc(x.content)}</span></div>`);
+    }
+    const briefingHtml = bfRows.length
+      ? `<div class="briefing-card"><h4>见面简报</h4>${bfRows.join('')}</div>`
+      : '';
+
     detail.innerHTML = `
       <div class="detail-head">
         <div>
@@ -625,10 +709,13 @@
           </div>
         </div>
         <div class="detail-actions">
+          <button class="primary-btn" data-action="briefing-open" data-id="${esc(c.id)}">怎么说</button>
+          <button class="ghost-btn" data-action="gift-open" data-id="${esc(c.id)}">送什么</button>
           <button class="ghost-btn" data-action="toggle-archive" data-id="${esc(c.id)}">${c.archived ? '取消归档' : '归档'}</button>
           <button class="ghost-btn" data-action="delete-contact" data-id="${esc(c.id)}">删除</button>
         </div>
       </div>
+      ${briefingHtml}
       <div class="memory-search">
         <input id="memory-search-input" type="search" placeholder="关键词向量搜索相关记忆" value="${esc(state.memorySearchQuery)}" autocomplete="off">
         <span>${searchActive ? (state.memorySearchLoading ? '检索中…' : `找到 ${baseMemories.length} 条`) : '输入关键词检索该联系人的已确认记忆'}</span>
@@ -702,6 +789,21 @@
       return;
     }
 
+    // 值得关注卡片 / 最近记住了行：点击切到联系人页打开 TA 的时间线（AI 按钮走 data-action，不进这里）
+    const attRow = e.target.closest('.attention-card, .recent-row');
+    if (attRow && !e.target.closest('[data-action]')) {
+      state.view = 'contacts';
+      state.activeContactId = attRow.dataset.id;
+      state.typeFilter = 'all';
+      state.memorySearchQuery = '';
+      state.memorySearchResults = [];
+      state.memorySearchLoading = false;
+      clearTimeout(memorySearchTimer);
+      memorySearchSeq++;
+      await refresh();
+      return;
+    }
+
     const row = e.target.closest('.contact-row');
     if (row) {
       state.activeContactId = row.dataset.id;
@@ -755,6 +857,58 @@
         await api('/api/memories/confirm', { method: 'POST', body: { ids } });
         toast(`已确认 ${ids.length} 条素材记忆`);
         await refresh();
+      } else if (action === 'first-run') {
+        // 空库首价值引导：场景按钮打开引导弹窗，提交后建联系人并把先问后给的 prompt 交给 AI
+        state.firstScenario = actionBtn.dataset.scenario || 'say';
+        $('#fr-title').textContent = FIRST_SCENARIOS[state.firstScenario] || '首价值引导';
+        openModal('first');
+      } else if (action === 'briefing-open') {
+        // 怎么说：事实卡已原生展示，这里把同一份事实交给 AI 生成话术建议（不落库）。
+        // 嵌入模式直发 DSH 会话；独立模式复制指令。发送后短暂禁用防连点（8 秒后恢复）
+        actionBtn.disabled = true;
+        setTimeout(() => { actionBtn.disabled = false; }, 8000);
+        try {
+          const { prompt } = await api('/api/briefing', { method: 'POST', body: { contactId: id } });
+          if (state.dshEmbedded) {
+            await sendToSession(prompt);
+            toast('已交给 AI 想怎么说，结果在 DSH 会话里看');
+          } else {
+            await navigator.clipboard.writeText(prompt);
+            toast('话术指令已复制，粘贴到 DSH 会话即可');
+          }
+        } catch (e) { toast(e.message || '生成话术失败', true); }
+      } else if (action === 'gift-open') {
+        // 送什么：以该联系人最近已确认记忆为依据组装礼物建议 prompt（auto），嵌入直发/独立复制
+        actionBtn.disabled = true;
+        setTimeout(() => { actionBtn.disabled = false; }, 8000);
+        try {
+          const { prompt } = await api('/api/gift-suggest', { method: 'POST', body: { contactId: id, auto: true } });
+          if (state.dshEmbedded) {
+            await sendToSession(prompt);
+            toast('已交给 AI 想礼物，结果在 DSH 会话里看');
+          } else {
+            await navigator.clipboard.writeText(prompt);
+            toast('礼物建议指令已复制，粘贴到 DSH 会话即可');
+          }
+        } catch (e) { toast(e.message || '生成失败', true); }
+      } else if (action === 'attention-ai') {
+        // 值得关注行的 AI 行动：疏远/待跟进 → 见面话术；时机/回礼 → 礼物建议（auto 自动取最近记忆作依据）。
+        // 嵌入直发 DSH 会话；独立模式复制指令。发送后短暂禁用防连点（8 秒后恢复）
+        const kind = actionBtn.dataset.kind || 'briefing';
+        actionBtn.disabled = true;
+        setTimeout(() => { actionBtn.disabled = false; }, 8000);
+        try {
+          const { prompt } = kind === 'gift'
+            ? await api('/api/gift-suggest', { method: 'POST', body: { contactId: id, occasion: actionBtn.dataset.occasion || '', occasionDate: actionBtn.dataset.date || '', auto: true } })
+            : await api('/api/briefing', { method: 'POST', body: { contactId: id } });
+          if (state.dshEmbedded) {
+            await sendToSession(prompt);
+            toast(kind === 'gift' ? '已交给 AI 想礼物，结果在 DSH 会话里看' : '已交给 AI 想怎么说，结果在 DSH 会话里看');
+          } else {
+            await navigator.clipboard.writeText(prompt);
+            toast('指令已复制，粘贴到 DSH 会话即可');
+          }
+        } catch (e) { toast(e.message || '生成失败', true); }
       } else if (action === 'organize-material') {
         // 一键交给宿主 AI：嵌入模式直连 DSH 会话；独立模式提示走复制指令。
         // 发送后短暂禁用防连点重复发指令（SSE 重渲染换新节点或 8 秒后自动恢复可点）
@@ -792,9 +946,9 @@
         }
       } else if (action === 'dismiss-question') {
         // 用户明确放弃等待：唯一的用户侧清除入口（AI 若还在等，到会话里直接回复它即可）
-        if (!(await confirmDialog('不再等待这条反问？清除后若 AI 还在等，请到 DSH 会话里直接回复。', { danger: true }))) return;
+        if (!(await confirmDialog('不再等待这条「再告诉我一点」？清除后若 AI 还在等，请到 DSH 会话里直接回复。', { danger: true }))) return;
         await api(`/api/materials/${id}/question`, { method: 'DELETE' });
-        toast('已清除反问');
+        toast('已清除');
         await refresh();
       } else if (action === 'delete-material') {
         if (!(await confirmDialog('删除这段素材？已拆出的记忆不受影响。', { danger: true }))) return;
@@ -982,8 +1136,9 @@
     $('#form-plan').classList.toggle('hidden', which !== 'plan');
     $('#form-suggest').classList.toggle('hidden', which !== 'suggest');
     $('#form-relations').classList.toggle('hidden', which !== 'relations');
+    $('#form-first').classList.toggle('hidden', which !== 'first');
     if (which === 'relations') renderRelationTypes();
-    ($(`#${which === 'contact' ? 'nc-name' : which === 'plan' ? 'plan-contact' : which === 'suggest' ? 'suggest-list' : which === 'relations' ? 'rt-key' : 'qm-content'}`))?.focus?.();
+    ($(`#${which === 'contact' ? 'nc-name' : which === 'plan' ? 'plan-contact' : which === 'suggest' ? 'suggest-list' : which === 'relations' ? 'rt-key' : which === 'first' ? 'fr-name' : 'qm-content'}`))?.focus?.();
   }
   function closeModal() {
     cancelJdSession();
@@ -995,6 +1150,7 @@
     $('#form-plan').reset();
     $('#form-suggest').reset();
     $('#form-relations').reset();
+    $('#form-first').reset();
     state.editingPlanId = null;
     state.suggestContactId = null;
     state.suggestPlanId = null;
@@ -1009,6 +1165,31 @@
   $('#rt-cancel').addEventListener('click', closeModal);
   $('#qm-cancel').addEventListener('click', closeModal);
   $('#qmt-cancel').addEventListener('click', closeModal);
+  $('#fr-cancel').addEventListener('click', closeModal);
+  // 空库首价值：场景按钮 → 打开引导弹窗（标题随场景变化）
+  const FIRST_SCENARIOS = {
+    say: '不会开口',
+    gift: '不知道送什么',
+    reconnect: '重新联系',
+  };
+  $('#form-first').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const name = $('#fr-name').value.trim();
+    if (!name) return;
+    const note = $('#fr-note').value.trim();
+    try {
+      const r = await api('/api/first-run', { method: 'POST', body: { name, scenario: state.firstScenario, note } });
+      closeModal();
+      await refresh();
+      if (state.dshEmbedded) {
+        await sendToSession(r.prompt);
+        toast(`已把「${name}」交给 AI——TA 会先问你一两个关键问题，再给建议`);
+      } else {
+        await navigator.clipboard.writeText(r.prompt);
+        toast('指令已复制，粘贴到 DSH 会话，AI 会先问你一两个关键问题');
+      }
+    } catch (e) { toast(e.message || '创建失败', true); }
+  });
   $$('#modal-backdrop [data-role="plan-cancel"]').forEach((btn) => btn.addEventListener('click', closeModal));
   $('#modal-backdrop').addEventListener('click', (e) => { if (e.target === $('#modal-backdrop')) closeModal(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
@@ -1252,7 +1433,7 @@
       const requestId = globalThis.crypto?.randomUUID?.() || `rel-gift-${Date.now()}`;
       await dshRpc('session/prompt', { request: { requestId, sessionId, mode: 'queue', content: [{ type: 'text', text: prompt }], clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone } });
       closeModal();
-      toast(evidenceCount ? '已交给 AI 出主意，方案卡会出现在下面' : 'AI 会给通用建议，建议先为 TA 补些记忆');
+      toast(evidenceCount ? '已交给 AI 想礼物，方案卡会出现在下面' : 'AI 会给通用建议，建议先为 TA 补些记忆');
     } catch (err) { toast(err.message, true); }
   });
 

@@ -519,6 +519,11 @@ export function giftOccasions(days = 30) {
   return occasions;
 }
 
+export function fadingContacts(days = 90) {
+  const { fading } = cli(['fading', '--days', String(days)]);
+  return fading;
+}
+
 // ---------- 素材 ----------
 export function saveMaterial({ kind = 'text', text = '', contactId = '', occasion = '' } = {}) {
   const content = String(text ?? '');
