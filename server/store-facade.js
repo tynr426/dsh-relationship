@@ -10,6 +10,7 @@
 import { existsSync, statSync } from 'node:fs';
 import { relstoreAvailable, relstoreDbPath, run as cli } from './relstore-bridge.js';
 import * as materialReports from './material-reports.js';
+import * as materialContacts from './material-contacts.js';
 import * as organizeQuestions from './organize-questions.js';
 import * as planSuggestions from './plan-suggestions.js';
 
@@ -35,6 +36,25 @@ export const STORE_MODE = mode;
 const impl = await import(mode === 'rust' ? './store-rust.js' : './store.js');
 
 // ---------- 素材整理报告（facade 层，两种模式共用侧车存储） ----------
+/** 保存素材：多人素材（contactIds 数组）的完整列表写侧车，contactId 字段只存第一人（锚点）。
+ *  空数组 = 显式清除登记（回到自动识别）；校验（存在性/上限）由 impl 层抛错。 */
+function saveMaterial(payload = {}) {
+  const mt = impl.saveMaterial(payload);
+  if (Array.isArray(payload.contactIds)) {
+    materialContacts.setMaterialContacts(mt.id, payload.contactIds);
+  }
+  return mt;
+}
+/** 素材涉及人列表：优先侧车多人登记，回退 contactId 单人。 */
+function materialContactIds(mt) {
+  const extra = materialContacts.getMaterialContacts(mt.id);
+  if (extra) return extra;
+  return mt.contactId ? [mt.contactId] : [];
+}
+/** 全量多人登记映射（列表批量化用：一次读侧车文件，避免逐素材 IO）。 */
+function allMaterialContacts() {
+  return materialContacts.allMaterialContacts();
+}
 /** 提交/覆盖素材整理报告（AI 整理完经 material_report 工具调用）。
  *  报告落库即整理完成，同时清掉该素材的待答反问（问题已无意义）。 */
 function saveMaterialReport(id, report) {
@@ -102,6 +122,7 @@ function deletePlan(id) {
 function deleteMaterial(id) {
   const removed = impl.deleteMaterial(id);
   materialReports.removeMaterialReports([String(id)]);
+  materialContacts.removeMaterialContacts([String(id)]);
   organizeQuestions.removeOrganizeQuestions([String(id)]);
   return removed;
 }
@@ -110,12 +131,16 @@ function deleteContact(id) {
   const result = impl.deleteContact(id);
   const gone = materialIds.filter((mid) => !impl.getMaterial(mid));
   materialReports.removeMaterialReports(gone);
+  materialContacts.removeMaterialContacts(gone);
   organizeQuestions.removeOrganizeQuestions(gone);
   return result;
 }
 
 export default {
   ...impl,
+  saveMaterial,
+  materialContactIds,
+  allMaterialContacts,
   saveMaterialReport,
   materialReport,
   allMaterialReports,

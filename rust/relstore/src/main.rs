@@ -678,7 +678,7 @@ enum PlanCmd {
         #[arg(long, default_value_t = false)]
         json: bool,
     },
-    /// 更新计划（只覆盖传入字段）
+    /// 更新计划（--status idea|decided|sent|done；done 不生成记忆，终态不可重开）
     Set {
         id: String,
         #[arg(long)]

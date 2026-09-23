@@ -13,6 +13,40 @@ const facade = (await import('../../server/store-facade.js')).default;
 
 test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
 
+test('AI 计划仅允许 idea/decided，完成记录不阻挡新主意', async () => {
+  const c = store.createContact({ name: 'AI 完成权限测试' });
+  try {
+    const plan = store.createPlan({ contactId: c.id, idea: '周末散步' });
+    for (const status of ['sent', 'done', 'unknown']) {
+      for (const name of ['gift_plan_add', 'gift_plan_update']) {
+        const result = await tools.executeTool(name, { id: plan.id, contactId: c.id, idea: '不应写入', status });
+        assert.equal(result.ok, false);
+        assert.equal(result.status, 400);
+      }
+    }
+    assert.equal(store.listPlans({ contactId: c.id }).length, 1);
+    assert.equal(store.getPlan(plan.id).idea, '周末散步');
+    assert.equal(store.getPlan(plan.id).status, 'idea');
+    assert.equal((await tools.executeTool('gift_plan_update', { id: plan.id, status: 'decided' })).plan.status, 'decided');
+    for (const name of ['gift_plan_add', 'gift_plan_update']) {
+      assert.deepEqual(tools.TOOL_DEFS.find((d) => d.function.name === name).function.parameters.properties.status.enum, ['idea', 'decided']);
+    }
+    store.markPlanDone(plan.id);
+    const next = await tools.executeTool('gift_plan_add', { contactId: c.id, idea: '周末散步', status: 'decided' });
+    assert.equal(next.ok, true);
+    assert.equal(next.plan.status, 'decided');
+    assert.equal(next.plan.source, 'ai');
+    assert.equal((await tools.executeTool('gift_plan_update', { id: plan.id, status: 'idea' })).status, 400);
+    assert.equal((await tools.executeTool('gift_plan_list', { status: 'done' })).plans.some((p) => p.id === plan.id), true);
+    store.updatePlan(next.plan.id, { status: 'sent' });
+    assert.equal((await tools.executeTool('gift_plan_add', { contactId: c.id, idea: '周末散步' })).ok, true);
+    assert.equal(store.listMemories({ contactId: c.id }).length, 0);
+  } finally {
+    for (const p of store.listPlans({ contactId: c.id })) store.deletePlan(p.id);
+    store.deleteContact(c.id);
+  }
+});
+
 test('tool registry exposes the documented tool set', () => {
   const names = tools.TOOL_DEFS.map((d) => d.function.name);
   assert.deepEqual(new Set(names), new Set(Object.keys(tools.TOOL_CN)));

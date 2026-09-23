@@ -13,7 +13,7 @@ export const DISCIPLINE = {
   searchFirst: '任何录入前先 contact_search 定位联系人防建重；命中即复用返回的编号；匹配到同名或近似称呼的疑似同一人时先与用户确认，而不是静默合并；查不到的直接 contact_add 新建——AI 新建的联系人一律进工作台待确认队列，由用户确认收录，不必停下等待，直接用返回的编号继续登记',
   sceneFirst: '先判断这段对话属于什么场景（场景标签+发生日期+参与人，一次判断即可，不二次调用），再从场景中逐条提取；同一场景可拆出多条不同 type/direction 的记忆（如一次教师节对话可同时拆出用户→老师的感谢、老师→用户的回应、双向的共同话题，各占一条）',
   dedupe: '拆条前先 memory_search 检索该联系人在该场景的已有已确认记忆：已被覆盖的事实不重复登记；发现冲突先告知用户；整理完的汇报要说明"哪些是已有记忆已覆盖、本次未重复登记"',
-  multiPerson: '素材涉及多人时逐个 contact_search 定位，查不到的直接 contact_add 新建（自动进工作台待确认队列，不打断整理等人回复），用返回的联系人编号继续拆条；命中同名或近似称呼时先与用户确认是否同一人',
+  multiPerson: '素材涉及多人时逐个 contact_search 定位，查不到的直接 contact_add 新建（自动进工作台待确认队列，不打断整理等人回复），用返回的联系人编号继续拆条；命中同名或近似称呼时先与用户确认是否同一人；素材的 contactName 若为顿号分隔多人，即用户标注的主涉人（如送礼给多人），拆条时优先归属给他们',
   behaviorOnly: '只存行为不存人格——记忆是"观察到什么"，不是"这个人是什么样的人"（存"老师主动提出给孩子过生日"，不存"老师很热心"）；不做人物性格总结；不把一次行为上升为稳定偏好，多次证据才形成稳定特征（归纳放 M3 摘要层，现场归纳不落库）',
   verbatim: '保留用户原话语义，不演绎、不补充；保留原话限定词（可能/感觉/好像/大概/打算），不确定的不得写成确定；推断不当事实写；禁忌与健康信息只按用户原话记录为 taboo（不推断结论），importance=3；婚礼、住院等重大事件 importance=3，其余默认 2',
   quote: '素材提取的每条记忆必须带 sourceQuote 原话摘录：逐字摘自素材原文、只覆盖该条事实所在的单条消息（≤200 字，不含时间戳前缀），同一摘录对同一联系人只登记一条事实（素材里一句话涉及多人时不同联系人可共用）；saidAt 必须取素材里的时间戳——原话所在消息的时间就是话语时间，不得编造或挪用其他消息的时间；内容重复既有记忆时不再登记',
@@ -63,10 +63,10 @@ export const FLOWS = {
     title: '礼物建议',
     steps: ['recallFirst', 'giftRules'],
     /** 礼物建议 prompt（/api/gift-suggest 组装） */
-    build({ contactName, relation, occasion, occasionDate, budget, plan, lines }) {
+    build({ contactName, relation, tags, birthday, occasion, occasionDate, budget, plan, lines }) {
       const t = DISCIPLINE;
       return [
-        `请为「${contactName}」准备礼物建议（relation: ${relation}${occasion ? `，场合：${occasion}` : ''}）。`,
+        `请为「${contactName}」准备礼物建议（relation: ${relation}${tags ? `，标签：${tags}` : ''}${birthday ? `，生日：${birthday}` : ''}${occasion ? `，场合：${occasion}` : ''}）。`,
         budget ? `预算：${budget}。` : '预算：不限。',
         // 日期锚定：AI 推断日期会让新卡繁殖出重复的时机提醒行（工作台按计划日期派生提醒）
         occasionDate || plan
@@ -74,7 +74,8 @@ export const FLOWS = {
           : '建卡纪律：occasionDate 不确定就留空，绝不自行推断日期（工作台按计划日期派生提醒，日期漂移会产生重复提醒）。',
         plan ? `用户已有一个礼物计划：想法「${plan.idea}」${plan.budget ? `，预算 ${plan.budget}` : ''}${plan.productName ? `，已看中商品：${plan.productName}` : ''}。请在此基础上优化，或给出替代方案：优化/替代用 gift_plan_update 更新原卡（计划 ID：${plan.id}），不要为同一想法另建新卡；为该计划出的每个全新方案 gift_plan_add 时都带 basedOnPlanId="${plan.id}"（工作台会把这批建议归到它名下，用户可一键删除这批）。` : '',
         '先 gift_plan_list 查该联系人已有计划：同一场合已有相同想法的卡不重复建；只有与已有计划都不同的全新方案才 gift_plan_add。',
-        lines.length ? '已确认的记忆依据（必须围绕这些，不得编造记忆里没有的偏好）：' : '该联系人还没有可用记忆依据，请明确说明这一点，只给通用保守建议：',
+        // 零记忆但有标签（职业/身份等）时：标签是仅有的背景，可收敛方向但不得当成记忆细节
+        lines.length ? '已确认的记忆依据（必须围绕这些，不得编造记忆里没有的偏好）：' : (tags ? '该联系人还没有可用记忆依据；上面的标签（身份/职业等背景）可用于收敛方向，但要向用户明说没有更细的记忆记录，只给稳妥建议：' : '该联系人还没有可用记忆依据，请明确说明这一点，只给通用保守建议：'),
         ...lines,
         '要求：',
         `1. ${t.giftRules}`,
@@ -109,21 +110,27 @@ export const FLOWS = {
       ].filter(Boolean).join('\n');
     },
   },
-  // 首价值流程（空库冷启动，读路径 D）：先价值后积累——AI 先问关键问题再给建议，结束邀请补素材，飞轮第一圈
   firstRun: {
     title: '首价值流程',
-    steps: ['pendingOnly'],
-    /** 空库场景引导 prompt（POST /api/first-run 组装） */
-    build({ contactName, scenario, note }) {
+    steps: ['recallFirst', 'pendingOnly', 'confirmHumanOnly'],
+    build({ contactId, contactName, scenario, note }) {
       const t = DISCIPLINE;
+      const scenarioLabel = {
+        say: '不知道该怎么开口（要发消息/见面想好说什么）',
+        gift: '不知道送什么（要选礼物）',
+        reconnect: '想重新联系（很久没联系了）',
+      }[scenario];
       return [
-        `用户刚把「${contactName}」加进关系记忆工作台，想处理这个场景：${scenario}。`,
-        note ? `用户补充：${note}。` : '',
-        '工作台里还没有这个人的长期记忆，先别急着给成品：',
-        '1. 基于场景向用户提 1-2 个最关键的问题（例如：你们上次联系是什么时候？TA 最近生活里有什么值得注意的变化？），一次问完，等用户回答；',
-        '2. 拿到回答后，再给贴合场景的具体建议（怎么开口/送什么），只引用用户说过的信息，不编造你们之间的往事；推断与事实分开说；',
-        `3. 对话中出现值得记住的关系事实时，用 memory_add 登记为待确认记忆（${t.pendingOnly}），用户会回工作台确认；`,
-        '4. 结束时邀请一次：如果愿意再告诉 AI 一点你们之间的事（随口一句或粘贴一小段聊天），下次会做得更像。',
+        `用户想与「${contactName}」（contactId=${contactId}）处理这个场景：${scenarioLabel}（${scenario}）。`,
+        note ? `用户原话（本次补充，尚非已确认记忆）：${JSON.stringify(note)}` : '',
+        `1. 先调用 memory_search，参数 ${JSON.stringify({ contactId })}，检索该联系人的已确认记忆，再给建议或追问；只有检索结果为空时才说明暂无已确认记忆，不能预设为空；用户原话仍可作为本次建议的依据。`,
+        '2. 结合用户原话与检索到的已确认记忆，依据足够时直接给一项具体可执行建议，并附自然的表达或行动示例，说明依据，不必先提问。',
+        '3. 仅关键上下文缺失且影响下一步时，最多问 1-2 个必要问题；不要重复询问已有信息，也不要为了收集完整资料而延迟建议。',
+        scenario === 'gift'
+          ? '4. 本次为明确的 gift（送礼）场景，可以讨论送礼，但不默认需要采购；尊重已知禁忌与不喜好，不编造偏好。'
+          : '4. 本次不是 gift 场景，不建议送礼或采购；围绕自然开口或重新联系给下一步。',
+        '5. 分开标注用户原话与已确认记忆；推断与事实分开，不编造往事，不把 AI 生成的建议、示例或计划当作已发生事实，也不得将其登记为记忆。',
+        `6. 用户对话中出现值得记住的关系事实时，先对照检索结果去重，再用 memory_add（contactId=${contactId}）登记；${t.pendingOnly}；${t.confirmHumanOnly}。`,
       ].filter(Boolean).join('\n');
     },
   },

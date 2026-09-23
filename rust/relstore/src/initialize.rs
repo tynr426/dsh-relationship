@@ -119,6 +119,73 @@ impl Initialize {
         }
         Self::ensure_relation_types(conn)?;
         Self::relax_relation_check(conn)?;
+        Self::relax_plan_status_check(conn)?;
+        Ok(())
+    }
+
+    /// plans 旧 CHECK 扩充 done：保留原建表定义、全部字段、索引/触发器和视图。
+    /// 不改历史状态；整个重建使用 Helper::executes 的单连接事务，重复初始化无操作。
+    fn relax_plan_status_check(conn: &Connector) -> Result<()> {
+        // DataRow::get_string 会把单引号加倍转义，不可用于读取并重放 DDL。
+        let schemas = Helper::query(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='plans'",
+            vec![],
+            |r, _: &Option<Vec<deck::Attribute>>| r.get::<_, String>(0).unwrap_or_default(),
+            conn, &None,
+        )?;
+        let Some(original) = schemas.first() else { return Ok(()) };
+        // 兼容空白、大小写及列名引号差异，只修改已知旧约束，其他 SQL 原样保留。
+        let compact = |s: &str| -> String {
+            s.chars().filter(|c| !c.is_ascii_whitespace() && !['"', '`', '[', ']'].contains(c))
+                .collect::<String>().to_ascii_lowercase()
+        };
+        let insertion = original.match_indices("'sent'").find_map(|(at, token)| {
+            let end = at + token.len();
+            (compact(&original[..at]).ends_with("check(statusin('idea','decided',")
+                && compact(&original[end..]).starts_with("))")).then_some(end)
+        });
+        let Some(at) = insertion else { return Ok(()) };
+        let mut create_sql = original.clone();
+        create_sql.insert_str(at, ",'done'");
+        let quote = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+        let columns = Helper::query(
+            "PRAGMA table_info('plans')", vec![],
+            |r, _: &Option<Vec<deck::Attribute>>| r.get::<_, String>(1).unwrap_or_default(), conn, &None,
+        )?.iter().map(|c| quote(c)).collect::<Vec<_>>().join(",");
+        // 一并暂存所有视图，避免间接引用 plans 的视图在 RENAME 时失效或被重写。
+        let views = Helper::query(
+            "SELECT name, sql FROM sqlite_master WHERE type='view'", vec![],
+            |r, _: &Option<Vec<deck::Attribute>>| (r.get::<_, String>(0).unwrap_or_default(), r.get::<_, String>(1).unwrap_or_default()), conn, &None,
+        )?;
+        let objects = Helper::query(
+            "SELECT type, name, sql FROM sqlite_master WHERE sql IS NOT NULL AND \
+             ((type='index' AND tbl_name='plans') OR type='trigger')",
+            vec![],
+            |r, _: &Option<Vec<deck::Attribute>>| (r.get::<_, String>(0).unwrap_or_default(), r.get::<_, String>(1).unwrap_or_default(), r.get::<_, String>(2).unwrap_or_default()),
+            conn, &None,
+        )?;
+        let mut script: Vec<(String, Vec<(String, Value)>)> = Vec::new();
+        // 其他表上的触发器也可能引用 plans，先暂存移除，避免 RENAME 重写其引用。
+        for (kind, name, _) in &objects {
+            if kind == "trigger" {
+                script.push((format!("DROP TRIGGER {}", quote(name)), vec![]));
+            }
+        }
+        for (name, _) in &views {
+            script.push((format!("DROP VIEW {}", quote(name)), vec![]));
+        }
+        script.push(("ALTER TABLE plans RENAME TO plans_rebuild_legacy".to_owned(), vec![]));
+        script.push((create_sql, vec![]));
+        script.push((format!("INSERT INTO plans ({columns}) SELECT {columns} FROM plans_rebuild_legacy"), vec![]));
+        script.push(("DROP TABLE plans_rebuild_legacy".to_owned(), vec![]));
+        for (_, sql) in views {
+            script.push((sql, vec![]));
+        }
+        for (_, _, sql) in objects {
+            script.push((sql, vec![]));
+        }
+        Helper::executes(script, conn)?;
+        err_log!("relstore 增量迁移：plans CHECK 支持 done");
         Ok(())
     }
 

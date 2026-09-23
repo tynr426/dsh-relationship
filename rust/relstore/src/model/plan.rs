@@ -30,7 +30,7 @@ pub struct Plan {
     /// 真实商品：链接
     #[field(rename = "productUrl")]
     pub product_url: String,
-    /// 状态（idea/decided/sent）
+    /// 状态（idea/decided/sent/done）；done 为普通完成，不生成记忆
     pub status: String,
     /// 标已送时间
     #[field(rename = "sentAt")]

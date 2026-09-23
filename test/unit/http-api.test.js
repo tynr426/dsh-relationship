@@ -12,6 +12,72 @@ const base = `http://127.0.0.1:${started.server.address().port}`;
 
 test.after(async () => { await new Promise((resolve) => setTimeout(resolve, 100)); await closeRelBench(started.server); fs.rmSync(dataDir, { recursive: true, force: true }); });
 
+test('POST plan done：仅广播计划变化，无记忆；终态限制、活跃筛选与清建议', { timeout: 20000 }, async () => {
+  const request = async (route, method = 'GET', body) => {
+    const res = await fetch(base + route, { method, headers: { 'content-type': 'application/json' }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+    return { status: res.status, data: await res.json() };
+  };
+  const { data: { contact } } = await request('/api/contacts', 'POST', { name: '普通完成 HTTP' });
+  const today = new Date().toISOString().slice(0, 10);
+  const { data: { plan } } = await request('/api/plans', 'POST', { contactId: contact.id, idea: '一起散步', occasion: 'walk', occasionDate: today });
+  const beforeMemories = (await request('/api/memories')).data;
+  const controller = new AbortController();
+  const stream = await fetch(`${base}/api/events`, { signal: controller.signal });
+  const reader = stream.body.getReader();
+  let done;
+  try {
+    await reader.read(); // hello
+    const result = await request(`/api/plans/${plan.id}/done`, 'POST');
+    assert.equal(result.status, 200);
+    assert.equal('memory' in result.data, false);
+    done = result.data.plan;
+    assert.equal(done.status, 'done');
+    assert.equal(done.memoryId, '');
+    assert.equal(done.sentAt, '');
+    assert.equal('doneAt' in done, false);
+    const { broadcast } = await import('../../server/sse.js');
+    broadcast('test.barrier', {});
+    let events = '';
+    const decoder = new TextDecoder();
+    while (!events.includes('event: test.barrier')) events += decoder.decode((await reader.read()).value, { stream: true });
+    assert.deepEqual([...events.matchAll(/event: ([^\n]+)/g)].map((m) => m[1]), ['plan.changed', 'test.barrier']);
+    assert.ok(events.includes(`"action":"done","planId":"${plan.id}"`));
+  } finally { controller.abort(); await reader.cancel().catch(() => {}); }
+  assert.deepEqual((await request(`/api/plans/${plan.id}/done`, 'POST')).data.plan, done);
+  assert.deepEqual((await request('/api/memories')).data, beforeMemories);
+  assert.equal((await request('/api/plans/missing/done', 'POST')).status, 404);
+  assert.equal((await request(`/api/plans/${plan.id}/sent`, 'POST')).status, 400);
+  for (const status of ['idea', 'decided', 'sent']) {
+    assert.equal((await request(`/api/plans/${plan.id}`, 'PATCH', { status, idea: '不应写入' })).status, 400);
+  }
+  const listed = (await request('/api/plans?status=done')).data.plans.find((p) => p.id === plan.id);
+  assert.equal(listed.idea, '一起散步');
+  assert.ok(!(await request('/api/gifts/occasions')).data.occasions.some((o) => o.planId === plan.id));
+  const feed = (await request('/api/attention')).data;
+  assert.ok(!feed.occasionGroups.flatMap((g) => g.people).flatMap((p) => [...p.plans, ...p.aiIdeas]).some((p) => p.id === plan.id));
+  assert.ok(!feed.occasionGroups.some((g) => g.occasion === 'walk'));
+  for (const name of ['gift_plan_add', 'gift_plan_update']) {
+    for (const status of ['sent', 'done']) {
+      assert.equal((await request('/api/tools', 'POST', { name, args: { id: plan.id, contactId: contact.id, idea: 'AI 伪造完成', status } })).status, 400);
+    }
+  }
+  // 这批建议只删除活跃卡；完成及已送的卡和侧车关联保留。
+  const ids = {};
+  for (const status of ['idea', 'done', 'sent']) {
+    const { data } = await request('/api/tools', 'POST', { name: 'gift_plan_add', args: { contactId: contact.id, idea: `建议 ${status}`, basedOnPlanId: plan.id } });
+    ids[status] = data.plan.id;
+    if (status !== 'idea') assert.equal((await request(`/api/plans/${data.plan.id}/${status}`, 'POST')).status, 200);
+  }
+  assert.equal((await request(`/api/plans/${ids.sent}/done`, 'POST')).status, 400);
+  assert.equal((await request(`/api/plans/${ids.sent}`, 'PATCH', { status: 'idea' })).status, 400);
+  assert.equal((await request(`/api/plans/${plan.id}/suggestions`, 'DELETE')).data.deleted, 1);
+  const remaining = (await request('/api/plans')).data.plans;
+  assert.ok(!remaining.some((p) => p.id === ids.idea));
+  for (const status of ['done', 'sent']) assert.equal(remaining.find((p) => p.id === ids[status]).basedOnPlanId, plan.id);
+  for (const p of remaining.filter((p) => p.contactId === contact.id)) await request(`/api/plans/${p.id}`, 'DELETE');
+  await request(`/api/contacts/${contact.id}`, 'DELETE');
+});
+
 test('info and overview report status', async () => {
   const info = await (await fetch(`${base}/api/info`)).json();
   assert.equal(info.ok, true);
@@ -167,6 +233,21 @@ test('reject and restore roundtrip via REST', async () => {
   assert.equal(again.status, 400);
   const restored = await (await fetch(`${base}/api/memories/${memory.id}/restore`, { method: 'POST' })).json();
   assert.equal(restored.memory.status, 'pending');
+});
+
+test('materials 多人素材：contactIds 数组保存，列表返回顿号名与 id 数组；非法 id 拒绝', async () => {
+  const json = (res) => res.json();
+  const post = (url, body) => fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(json);
+  const c1 = (await post('/api/contacts', { name: '多人素材甲' })).contact;
+  const c2 = (await post('/api/contacts', { name: '多人素材乙' })).contact;
+  const saved = await post('/api/materials', { text: '中秋给甲送了茶叶，给乙送了月饼', contactIds: [c1.id, c2.id] });
+  assert.ok(saved.material.id);
+  const list = (await (await fetch(`${base}/api/materials?status=raw`)).json()).materials;
+  const mt = list.find((x) => x.id === saved.material.id);
+  assert.deepEqual(mt.contactIds, [c1.id, c2.id]);
+  assert.equal(mt.contactName, '多人素材甲、多人素材乙');
+  const bad = await fetch(`${base}/api/materials`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text: '坏素材', contactIds: [c1.id, 'c_none'] }) });
+  assert.equal(bad.status, 404);
 });
 
 test('materials API: paste → list → extract via tool → batch confirm', async () => {
@@ -451,13 +532,14 @@ test('GET /api/attention：值得关注 feed 四类派生合流（时机/疏远/
   assert.equal(r.ok, true);
   const items = r.items;
   const mine = items.filter((x) => x.contactId === c.id);
-  assert.ok(mine.some((x) => x.kind === 'occasion' && x.label === '生日' && x.days <= 90), '时机行（生日在窗口内）');
+  const birthdayGroup = r.occasionGroups.find((g) => g.occasion === 'birthday' && g.people.some((x) => x.contactId === c.id));
+  assert.ok(birthdayGroup && birthdayGroup.days <= 90, '生日独立分组，不被节日挤掉');
   assert.ok(mine.some((x) => x.kind === 'promise' && x.text.includes('老家特产') && x.days >= 100), '承诺行带逾期天数');
   assert.ok(mine.some((x) => x.kind === 'reciprocity' && x.text.includes('茶叶')), '回礼行');
   const fadingRow = items.find((x) => x.contactId === b.id && x.kind === 'fading');
   assert.ok(fadingRow && fadingRow.days >= 120 && fadingRow.text.includes('没有有记录的互动'), '疏远行');
   for (let i = 1; i < items.length; i++) {
-    assert.ok((items[i].days ?? Infinity) >= (items[i - 1].days ?? Infinity), 'feed 按天数升序');
+    assert.ok(items[i].days <= items[i - 1].days, '非节日跟进按记录间隔降序');
   }
   for (const x of mine) assert.ok(x.action === 'gift' || x.action === 'briefing', '每行带 AI 行动类型');
 });
@@ -474,9 +556,9 @@ test('GET /api/attention 行内上下文：上次互动/相处注意/送礼历�
   await post('/api/memories', { contactId: c.id, type: 'gift', content: '送过茶叶礼盒', direction: 'user_to_contact', date: daysAgo(30) });
   await post('/api/plans', { contactId: c.id, idea: '备一盒岩茶', occasion: 'birthday' });
 
-  const items = (await json(await fetch(`${base}/api/attention`))).items;
-  const occasionRow = items.find((x) => x.contactId === c.id && x.kind === 'occasion');
-  assert.ok(occasionRow, '有生日时机行');
+  const { items, occasionGroups } = await json(await fetch(`${base}/api/attention`));
+  const occasionRow = occasionGroups.filter((g) => g.occasion === 'birthday').flatMap((g) => g.people).find((x) => x.contactId === c.id);
+  assert.ok(occasionRow, '生日分组有该联系人的时机行');
   assert.ok(occasionRow.lastSeen && occasionRow.lastSeen.days >= 30, '带上次互动天数');
   assert.ok(occasionRow.evidence.some((e) => e.kind === 'caution' && e.text.includes('花生')), '相处注意进证据');
   assert.ok(occasionRow.evidence.some((e) => e.kind === 'gift' && e.text.includes('茶叶礼盒')), '送礼历史进证据');
@@ -521,6 +603,19 @@ test('POST /api/gift-suggest auto：无预选证据时自动取最近已确认�
   assert.ok(r2.prompt.includes('还没有可用记忆依据'), '无 auto 且无 ids 维持通用保守建议');
 });
 
+test('gift-suggest 标签必进 prompt：零记忆只有标签的联系人也能让 AI 据此收敛', async () => {
+  const json = (res) => res.json();
+  const post = (url, body) => fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(json);
+  const c = (await post('/api/contacts', { name: '标签陈医生', relation: 'client', tags: ['医生', '科室主任'] })).contact;
+
+  const r = await post('/api/gift-suggest', { contactId: c.id, occasion: '中秋', occasionDate: '2026-09-25', auto: true });
+  assert.equal(r.ok, true);
+  assert.equal(r.evidenceCount, 0, '零记忆');
+  assert.ok(r.prompt.includes('标签：医生 / 科室主任'), '标签进 prompt');
+  assert.ok(r.prompt.includes('还没有可用记忆依据'), '明说无记忆，不伪装有依据');
+  assert.ok(r.prompt.includes('收敛方向'), '引导 AI 用标签收敛而非泛泛而谈');
+});
+
 test('gift-suggest occasionDate 锚定：触发日期进 prompt，防 AI 编日期繁殖提醒行', async () => {
   const json = (res) => res.json();
   const post = (url, body) => fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(json);
@@ -533,38 +628,291 @@ test('gift-suggest occasionDate 锚定：触发日期进 prompt，防 AI 编日�
   assert.ok(r2.prompt.includes('不确定就留空'), '无日期时要求留空而非推断');
 });
 
-test('时机行按天去重：同人同日多张不同场合标签的计划只出一条提醒', async () => {
-  const json = (res) => res.json();
-  const post = (url, body) => fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(json);
+test('时机行只合并同人同场合同日，不吞掉另一天的安排', async () => {
+  const post = async (url, body) => (await fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json();
+  const date = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
   const c = (await post('/api/contacts', { name: '去重老沈', relation: 'friend' })).contact;
-  // 两张卡同一天、场合标签不一致（模拟 AI 建卡标签漂移：中秋 vs 中秋节）
-  await post('/api/plans', { contactId: c.id, idea: '手作茶点礼盒', occasion: '中秋', occasionDate: '2026-09-21' });
-  await post('/api/plans', { contactId: c.id, idea: '护嗓润喉礼盒', occasion: '中秋节', occasionDate: '2026-09-21' });
-  const occasions = (await json(await fetch(`${base}/api/gifts/occasions?days=90`))).occasions;
-  const mine = occasions.filter((o) => o.contactId === c.id && o.date === '2026-09-21');
-  assert.equal(mine.length, 1, '同人同日只有一条时机行（计划上下文并入该行）');
+  await post('/api/plans', { contactId: c.id, idea: '第一次拜访带茶点', occasion: '拜访', occasionDate: date(7) });
+  await post('/api/plans', { contactId: c.id, idea: '第一次拜访带鲜花', occasion: 'visit', occasionDate: date(7) });
+  await post('/api/plans', { contactId: c.id, idea: '第二次拜访', occasion: '拜访', occasionDate: date(14) });
+  const { occasions } = await (await fetch(`${base}/api/gifts/occasions?days=90`)).json();
+  const mine = occasions.filter((o) => o.contactId === c.id && o.occasion === 'visit');
+  assert.deepEqual(mine.map((o) => o.date), [date(7), date(14)]);
 });
 
-test('POST /api/first-run：空库首价值——建联系人返回先问后给 prompt，同名复用，400 校验', async () => {
+test('POST /api/first-run：按明确联系人先检索，有依据直接建议，必要时才追问', async (t) => {
+  const raw = (url, body) => fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const post = async (url, body) => {
+    const res = await raw(url, body);
+    assert.equal(res.status, 200);
+    const result = await res.json();
+    assert.equal(result.ok, true);
+    return result;
+  };
+  const get = async (url) => {
+    const res = await fetch(`${base}${url}`);
+    assert.equal(res.status, 200);
+    return res.json();
+  };
+  const checkPrompt = (result, scenario) => {
+    const { prompt, contactId } = result;
+    assert.ok(contactId);
+    assert.ok(prompt.includes(`contactId=${contactId}`), '明确联系人编号');
+    assert.ok(prompt.includes(`（${scenario}）`), '保留场景');
+    const firstStep = prompt.match(/^1\. 先调用 memory_search，参数 (\{[^\n]+\})，检索该联系人的已确认记忆/m);
+    assert.ok(firstStep, '第一步按明确 ID 检索已确认记忆');
+    const args = JSON.parse(firstStep[1]);
+    assert.deepEqual(args, { contactId });
+    assert.ok(prompt.indexOf('memory_search') < prompt.indexOf('直接给一项具体可执行建议'));
+    assert.ok(prompt.indexOf('memory_search') < prompt.indexOf('最多问 1-2 个必要问题'));
+    assert.match(prompt, /只有检索结果为空时才说明暂无已确认记忆/);
+    assert.match(prompt, /用户原话仍可作为本次建议的依据/);
+    assert.match(prompt, /依据足够时直接给一项具体可执行建议/);
+    assert.match(prompt, /自然的表达或行动示例/);
+    assert.match(prompt, /仅关键上下文缺失且影响下一步时，最多问 1-2 个必要问题/);
+    assert.match(prompt, /分开标注用户原话与已确认记忆/);
+    assert.match(prompt, /推断与事实分开/);
+    assert.match(prompt, /不把 AI 生成的建议、示例或计划当作已发生事实，也不得将其登记为记忆/);
+    assert.ok(prompt.includes(`memory_add（contactId=${contactId}）`));
+    assert.match(prompt, /AI 写入记忆一律为待确认（pending）状态/);
+    assert.match(prompt, /确认入库是用户的拍板动作/);
+    assert.match(prompt, /回工作台待确认队列操作/);
+    assert.doesNotMatch(prompt, /用户刚把|工作台里还没有这个人的长期记忆|先别急着给成品|拿到回答后，再给/);
+    if (scenario === 'gift') {
+      assert.match(prompt, /本次为明确的 gift（送礼）场景，可以讨论送礼，但不默认需要采购/);
+    } else {
+      assert.match(prompt, /本次不是 gift 场景，不建议送礼或采购/);
+      assert.doesNotMatch(prompt, /可以讨论送礼/);
+    }
+    return args;
+  };
+
+  await t.test('新建联系人：充分原话可以直接作为依据，不自动存成记忆', async () => {
+    const note = '教师节想给班主任发消息，感谢他去年帮我修改志愿；希望简短自然，不送礼。';
+    const r = await post('/api/first-run', { name: '  首次班主任老李  ', scenario: 'say', note: ` ${note} ` });
+    assert.equal(r.created, true);
+    assert.ok(r.prompt.includes('「首次班主任老李」'));
+    assert.ok(r.prompt.includes(`用户原话（本次补充，尚非已确认记忆）：${JSON.stringify(note)}`));
+    const args = checkPrompt(r, 'say');
+    const contacts = (await get('/api/contacts')).contacts.filter((c) => c.name === '首次班主任老李');
+    assert.equal(contacts.length, 1);
+    assert.equal(contacts[0].id, r.contactId);
+    assert.equal(contacts[0].status, 'confirmed');
+    assert.deepEqual((await post('/api/tools', { name: 'memory_search', args })).memories, []);
+    assert.deepEqual((await get(`/api/memories?contact_id=${r.contactId}`)).memories, []);
+  });
+
+  await t.test('复用已有记忆的人：三种场景均先检索，只取该人已确认记忆', async () => {
+    const c = (await post('/api/contacts', { name: '首价值老周' })).contact;
+    const known = (await post('/api/memories', { contactId: c.id, type: 'interaction', direction: 'both', content: '上次一起散步时约好下次再去公园' })).memory;
+    assert.equal(known.status, 'confirmed');
+    await post('/api/tools', { name: 'memory_add', args: { contactId: c.id, type: 'preference', content: '可能喜欢咖啡' } });
+    const other = (await post('/api/contacts', { name: '首价值另一位' })).contact;
+    await post('/api/memories', { contactId: other.id, type: 'preference', content: '喜欢红茶' });
+    const before = (await get(`/api/memories?contact_id=${c.id}`)).memories;
+    for (const scenario of ['say', 'gift', 'reconnect']) {
+      const r = await post('/api/first-run', { name: '首价值老周', scenario });
+      assert.equal(r.created, false);
+      assert.equal(r.contactId, c.id);
+      assert.doesNotMatch(r.prompt, /用户原话（本次补充/);
+      const args = checkPrompt(r, scenario);
+      const found = await post('/api/tools', { name: 'memory_search', args });
+      assert.deepEqual(found.memories.map((m) => m.id), [known.id]);
+      assert.equal(found.memories[0].content, known.content);
+    }
+    assert.equal((await get('/api/contacts')).contacts.filter((item) => item.name === c.name).length, 1);
+    assert.deepEqual((await get(`/api/memories?contact_id=${c.id}`)).memories, before, '生成 prompt 不写入或确认记忆');
+  });
+
+  await t.test('400 校验：空名、缺失或未知场景不能创建联系人', async () => {
+    const before = (await get('/api/contacts')).contacts;
+    for (const name of [undefined, null, '', '   ']) {
+      const res = await raw('/api/first-run', { name, scenario: 'say' });
+      assert.equal(res.status, 400);
+      assert.match((await res.json()).error, /名字不能为空/);
+    }
+    for (const scenario of [undefined, null, '', 'nope', 'toString', 'constructor', '__proto__']) {
+      const res = await raw('/api/first-run', { name: '无效场景不能建档', scenario });
+      assert.equal(res.status, 400);
+      assert.match((await res.json()).error, /未知场景/);
+    }
+    assert.deepEqual((await get('/api/contacts')).contacts, before);
+  });
+});
+
+test('节日锚点表：全员节日/角色节日/计算型/农历查表生成时机行', async () => {
   const json = (res) => res.json();
   const post = (url, body) => fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(json);
-  const raw = (body) => fetch(`${base}/api/first-run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const anyone = (await post('/api/contacts', { name: '锚点老白', relation: 'friend' })).contact;
+  const teacher = (await post('/api/contacts', { name: '锚点孔老师', relation: 'other', tags: ['班主任'] })).contact;
+  const mom = (await post('/api/contacts', { name: '锚点妈妈', relation: 'family' })).contact;
+  const occasions = (await json(await fetch(`${base}/api/gifts/occasions?days=365`))).occasions;
+  const mine = (id) => occasions.filter((o) => o.contactId === id);
+  assert.ok(mine(anyone.id).some((o) => o.occasion === 'new_year' && o.date.endsWith('-01-01')), '元旦（固定公历）全员行');
+  assert.ok(mine(teacher.id).some((o) => o.occasion === 'teacher_day'), '老师有教师节行');
+  assert.ok(!mine(anyone.id).some((o) => o.occasion === 'teacher_day'), '非老师无教师节行');
+  assert.ok(mine(mom.id).some((o) => o.occasion === 'mother_day' && /-05-\d\d$/.test(o.date)), '母亲节（计算型周日）匹配"妈"称谓');
+  assert.ok(!mine(anyone.id).some((o) => o.occasion === 'mother_day'), '非母亲无母亲节行');
+  // 农历查表只预置 2026/2027；之后年份跑此测试跳过中秋断言
+  if (new Date().getFullYear() <= 2027) {
+    assert.ok(mine(anyone.id).some((o) => o.occasion === 'mid_autumn'), '中秋（农历查表）全员行');
+  }
+});
 
-  const r = await post('/api/first-run', { name: '班主任老李', scenario: 'say', note: '教师节想发消息，五年没联系' });
-  assert.equal(r.ok, true);
-  assert.equal(r.created, true);
-  assert.ok(r.prompt.includes('班主任老李'), 'prompt 含联系人名');
-  assert.ok(r.prompt.includes('先别急着给成品'), '先问后给');
-  assert.ok(r.prompt.includes('五年没联系'), '用户补充进 prompt');
-  assert.ok(r.prompt.includes('1-2 个最关键的问题'), '要求先提问');
-  assert.ok(r.prompt.includes('待确认'), '事实落待确认');
+test('attention 计划分层：你的计划与 AI 主意分开呈现', async () => {
+  const json = (res) => res.json();
+  const post = (url, body) => fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(json);
+  const soon = new Date(Date.now() + 20 * 86_400_000);
+  const bd = `每年-${String(soon.getMonth() + 1).padStart(2, '0')}-${String(soon.getDate()).padStart(2, '0')}`;
+  const c = (await post('/api/contacts', { name: '分层老齐', relation: 'friend', birthday: bd })).contact;
+  const { plan } = await post('/api/plans', { contactId: c.id, idea: '我的手作礼盒', occasion: '生日' });
+  await post('/api/tools', { name: 'gift_plan_add', args: { contactId: c.id, idea: 'AI 的护嗓茶建议', basedOnPlanId: plan.id } });
+  const { occasionGroups } = await json(await fetch(`${base}/api/attention`));
+  const row = occasionGroups.filter((g) => g.occasion === 'birthday').flatMap((g) => g.people).find((x) => x.contactId === c.id);
+  assert.ok(row, '有生日时机行');
+  assert.equal(row.plansTotal, 1, '你的计划单独计数');
+  assert.ok(row.plans[0].idea.includes('手作礼盒'), '用户建卡进你的计划');
+  assert.equal(row.aiIdeaCount, 1, 'AI 主意单独计数');
+  assert.ok(row.aiIdeas[0].idea.includes('护嗓茶'), 'AI 建卡进主意见区');
+  assert.equal(row.aiIdeas[0].basedOnPlanId, plan.id, '保留原计划关联');
+});
 
-  // 同名复用既有联系人，不建重
-  const r2 = await post('/api/first-run', { name: '班主任老李', scenario: 'gift' });
-  assert.equal(r2.created, false);
-  assert.equal(r2.contactId, r.contactId);
+test('节日行与计划行同场合同日归并，保留其他年份的节日', async () => {
+  const post = async (url, body) => (await fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json();
+  const c = (await post('/api/contacts', { name: '归并老纪', relation: 'friend' })).contact;
+  const before = (await (await fetch(`${base}/api/gifts/occasions?days=365`)).json()).occasions;
+  const holiday = before.find((o) => o.contactId === c.id && o.source === 'holiday');
+  assert.ok(holiday, '一年内至少有一个节日');
+  await post('/api/plans', { contactId: c.id, idea: '茶点礼盒', occasion: holiday.label, occasionDate: holiday.date });
+  const after = (await (await fetch(`${base}/api/gifts/occasions?days=365`)).json()).occasions;
+  const rows = after.filter((o) => o.contactId === c.id && o.occasion === holiday.occasion);
+  assert.deepEqual(rows.map((o) => o.date), before.filter((o) => o.contactId === c.id && o.occasion === holiday.occasion).map((o) => o.date));
+  assert.equal(rows.filter((o) => o.date === holiday.date).length, 1);
+  assert.ok(rows.every((o) => o.source === 'holiday'), '同日计划不替代真实节日锚点');
+});
 
-  // 400：空名 / 未知场景
-  assert.equal((await raw({ name: '', scenario: 'say' })).status, 400);
-  assert.equal((await raw({ name: '某人', scenario: 'nope' })).status, 400);
+test('attention 时机行：个人锚点优先，occasion 存归一枚举，同场合历史证据跨语言命中', async () => {
+  const json = (res) => res.json();
+  const post = (url, body) => fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then(json);
+  const daysAgo = (n) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+  const c = (await post('/api/contacts', { name: '归一老卫', relation: 'friend' })).contact;
+  // 计划场合写大写英文枚举、非老师联系人：计划行 occasion 归一、label 翻译为中文
+  await post('/api/plans', { contactId: c.id, idea: '手工灯笼', occasion: 'TEACHER_DAY', occasionDate: '2026-11-01' });
+  // 记忆场合写中文「教师节」：与计划行归一键（teacher_day）同键，历史证据应跨语言命中
+  await post('/api/memories', { contactId: c.id, type: 'gift', content: '去年教师节送过钢笔', direction: 'user_to_contact', occasion: '教师节', date: daysAgo(370) });
+  const { occasionGroups } = await json(await fetch(`${base}/api/attention`));
+  const row = occasionGroups.flatMap((g) => g.people).find((x) => x.contactId === c.id && x.occasion === 'teacher_day');
+  assert.ok(row, '计划是个人锚点，出时机行');
+  assert.equal(row.source, 'plan', '个人锚点（计划）优先于全员节日');
+  assert.equal(row.occasion, 'teacher_day', 'occasion 归一为枚举');
+  assert.equal(row.label, '教师节', 'label 翻译为中文');
+  assert.ok(row.evidence.some((e) => e.kind === 'history' && e.text.includes('钢笔')), '同场合历史证据跨语言命中');
+  for (const group of occasionGroups) {
+    const ids = group.people.map((p) => p.contactId);
+    assert.equal(ids.length, new Set(ids).size, '同一场合同一天，每个联系人只有一行');
+  }
+});
+
+test('upcomingHolidays：两周内全员节日时间轴，角色节日不进，按临近排序', async () => {
+  const json = (res) => res.json();
+  const r = await json(await fetch(`${base}/api/attention?days=90&limit=5`));
+  assert.ok(Array.isArray(r.holidays), '返回时间轴节日');
+  assert.ok(r.holidays.every((h) => h.inDays >= 0 && h.inDays <= 14), '两周窗口');
+  assert.ok(r.holidays.every((h) => !['teacher_day', 'mother_day', 'father_day'].includes(h.occasion)), '角色节日不进时间轴');
+  for (let i = 1; i < r.holidays.length; i++) assert.ok(r.holidays[i].inDays >= r.holidays[i - 1].inDays, '按临近排序');
+});
+
+test('attention opportunities：节日提示与分组互斥，遵守请求时间窗', async () => {
+  for (const days of [1, 90]) {
+    const data = await (await fetch(`${base}/api/attention?days=${days}`)).json();
+    const covered = new Set(data.occasionGroups.map((g) => g.id));
+    assert.ok(data.opportunities.every((h) => !covered.has(`${h.occasion}|${h.date}`)));
+    assert.ok(data.holidays.every((h) => h.inDays <= Math.min(days, 14)));
+  }
+});
+
+test('首页按联系人、场合和日期关联计划，未定/已送/旧年不串本次，AI 建议跟随原计划', async () => {
+  const post = async (url, body) => {
+    const res = await fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    assert.equal(res.status, 200);
+    return res.json();
+  };
+  const date = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const c = (await post('/api/contacts', { name: '场合隔离联系人', birthday: date(9).slice(5) })).contact;
+  const birthday = (await post('/api/plans', { contactId: c.id, idea: '生日手作蛋糕', occasion: '生日', occasionDate: date(9) })).plan;
+  const visit = (await post('/api/plans', { contactId: c.id, idea: '拜访带书', occasion: 'visit', occasionDate: date(9) })).plan;
+  const nextVisit = (await post('/api/plans', { contactId: c.id, idea: '下次拜访带花', occasion: '拜访', occasionDate: date(19) })).plan;
+  await post('/api/plans', { contactId: c.id, idea: '旧年生日计划', occasion: 'birthday', occasionDate: date(-350) });
+  await post('/api/plans', { contactId: c.id, idea: '没有场合的想法' });
+  const sent = (await post('/api/plans', { contactId: c.id, idea: '已经送出的礼物', occasion: 'birthday', occasionDate: date(9) })).plan;
+  await post(`/api/plans/${sent.id}/sent`, {});
+  const ai = (await post('/api/tools', { name: 'gift_plan_add', args: { contactId: c.id, idea: '给蛋糕配茶', basedOnPlanId: birthday.id } })).plan;
+  await post('/api/tools', { name: 'gift_plan_add', args: { contactId: c.id, idea: '未关联的 AI 主意' } });
+  const r = await (await fetch(`${base}/api/attention`)).json();
+  const person = (occasion, day) => r.occasionGroups.find((g) => g.occasion === occasion && g.date === day)?.people.find((p) => p.contactId === c.id);
+  const b = person('birthday', date(9));
+  assert.deepEqual(b.plans.map((p) => p.id), [birthday.id]);
+  assert.deepEqual(b.aiIdeas.map((p) => p.id), [ai.id]);
+  assert.equal(b.aiIdeas[0].basedOnPlanId, birthday.id);
+  assert.equal(b.aiIdeas[0].occasionDate, date(9));
+  assert.deepEqual(person('visit', date(9)).plans.map((p) => p.id), [visit.id]);
+  assert.deepEqual(person('visit', date(19)).plans.map((p) => p.id), [nextVisit.id]);
+  const undated = person('custom', '');
+  assert.equal(undated.plans[0].idea, '没有场合的想法');
+  assert.equal(undated.aiIdeas[0].idea, '未关联的 AI 主意');
+  assert.equal(r.occasionGroups.some((g) => g.people.some((p) => p.plans.some((plan) => plan.idea === '旧年生日计划'))), false);
+  for (const group of r.occasionGroups.filter((g) => !['birthday', 'visit', 'custom'].includes(g.occasion))) {
+    const row = group.people.find((p) => p.contactId === c.id);
+    if (row) assert.equal(row.plansTotal + row.aiIdeaCount, 0, '生日和拜访计划不串节日');
+  }
+});
+
+test('同一时机保留超过二十人，并把有计划的人排在前面', async () => {
+  const post = async (url, body) => (await fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })).json();
+  const d = new Date(); d.setDate(d.getDate() + 8);
+  const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const ids = [];
+  for (let i = 0; i < 24; i++) ids.push((await post('/api/contacts', { name: `分组人数-${i}`, birthday: date.slice(5) })).contact.id);
+  await post('/api/plans', { contactId: ids[23], idea: '最后一人的已定安排', occasion: '生日', occasionDate: date, status: 'decided' });
+  const { occasionGroups } = await (await fetch(`${base}/api/attention`)).json();
+  const group = occasionGroups.find((g) => g.occasion === 'birthday' && g.date === date);
+  assert.ok(ids.every((id) => group.people.some((p) => p.contactId === id)));
+  assert.equal(group.people[0].contactId, ids[23]);
+  assert.equal(group.people.filter((p) => ids.includes(p.contactId)).length, 24);
+});
+
+test('继续计划的 AI 指令锚定原计划，拒绝跨联系人关联与读取', async () => {
+  const post = (url, body) => fetch(`${base}${url}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  const c = (await (await post('/api/contacts', { name: '指令计划主人' })).json()).contact;
+  const other = (await (await post('/api/contacts', { name: '不能串人的对象' })).json()).contact;
+  const plan = (await (await post('/api/plans', { contactId: c.id, idea: '原计划不可另起', occasion: 'birthday', occasionDate: '2027-05-10' })).json()).plan;
+  const r = await (await post('/api/gift-suggest', { contactId: c.id, planId: plan.id, occasion: '中秋', occasionDate: '2027-09-15' })).json();
+  assert.ok(r.prompt.includes('原计划不可另起'));
+  assert.ok(r.prompt.includes('2027-05-10'));
+  assert.ok(r.prompt.includes('场合：生日'));
+  assert.ok(r.prompt.includes(plan.id));
+  assert.equal((await post('/api/gift-suggest', { contactId: other.id, planId: plan.id })).status, 404);
+  assert.equal((await post('/api/tools', { name: 'gift_plan_add', args: { contactId: other.id, idea: '跨人错误关联', basedOnPlanId: plan.id } })).status, 400);
+  const greeting = await (await post('/api/briefing', { contactId: c.id, occasion: '中秋' })).json();
+  assert.ok(greeting.prompt.includes('围绕「中秋」联系'));
+  assert.ok(greeting.prompt.includes('不默认需要送礼'));
+});
+
+test('素材超过三十份仍返回早期反问，不因列表截断隐藏重要状态', async () => {
+  const post = async (path, body) => {
+    const res = await fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    assert.equal(res.status, 200);
+    return res.json();
+  };
+  const material = (await post('/api/materials', { text: '较早保存，仍需补充的素材' })).material;
+  await post('/api/tools', { name: 'organize_question', args: {
+    materialId: material.id, question: '这条内容是否还需整理？', options: [
+      { label: '继续', command: `继续整理素材 ${material.id}` },
+      { label: '跳过', command: `跳过素材 ${material.id}` },
+    ],
+  } });
+  for (let i = 0; i < 31; i++) await post('/api/materials', { text: `后来保存的普通素材 ${i}` });
+  const { materials } = await (await fetch(`${base}/api/materials`)).json();
+  assert.ok(materials.length > 30);
+  assert.equal(materials.find((mt) => mt.id === material.id)?.question?.question, '这条内容是否还需整理？');
 });

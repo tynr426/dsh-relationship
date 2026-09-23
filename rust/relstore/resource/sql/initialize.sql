@@ -107,7 +107,7 @@ CREATE TABLE "plans" (
   "created_at" TEXT(64),
   "updated_at" TEXT(64),
   PRIMARY KEY ("id"),
-  CHECK ("status" IN ('idea','decided','sent')),
+  CHECK ("status" IN ('idea','decided','sent','done')),
   CHECK ("source" IN ('user','ai'))
 );
 

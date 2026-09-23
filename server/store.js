@@ -5,6 +5,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { DATA_DIR, MATERIALS_DIR, CONTACTS_PATH, MEMORIES_PATH, MATERIALS_PATH, PLANS_PATH, RELATION_TYPES_PATH, META_PATH, ensureDirs } from './config.js';
 import { migrateDb, CURRENT_SCHEMA_VERSION } from './migrations.js';
+import { deriveOccasions, upcomingHolidays } from './occasions.js';
 
 export const RELATIONS = ['family', 'friend', 'colleague', 'client', 'partner', 'other'];
 export const MEMORY_TYPES = ['preference', 'dislike', 'taboo', 'event', 'gift', 'promise', 'interaction', 'attribute'];
@@ -554,14 +555,9 @@ function timelineKey(m) {
   return (d.replace('-__', '-01').padEnd(10, '0')) + 'T' + (m.createdAt || '');
 }
 
-// ---------- 礼物计划（送礼工作流：想法 → 已定 → 已送；低风险意图，不进确认队列） ----------
-export const PLAN_STATUSES = ['idea', 'decided', 'sent'];
-const FIXED_HOLIDAYS = [
-  { occasion: 'teacher_day', label: '教师节', md: '09-10', match: (c) => c.tags.some((t) => /老师|教师/.test(t)) || /老师|教师/.test(c.name) },
-  { occasion: 'women_day', label: '妇女节', md: '03-08', match: () => false },
-  { occasion: 'new_year', label: '元旦', md: '01-01', match: () => false },
-  { occasion: 'christmas', label: '圣诞节', md: '12-25', match: () => false },
-];
+// ---------- 计划（想法 → 已定 → 普通完成 / 明确已送；低风险意图，不进确认队列） ----------
+export const PLAN_STATUSES = ['idea', 'decided', 'sent', 'done'];
+export { upcomingHolidays };
 
 function normalizePlanStatus(v) {
   const s = String(v ?? '').trim() || 'idea';
@@ -622,6 +618,11 @@ export function getPlan(id) { return db.plans.find((p) => p.id === id) || null; 
 export function updatePlan(id, patch = {}) {
   const p = getPlan(id);
   if (!p) throw httpError(404, '计划不存在');
+  // 先校验状态，再修改字段，避免失败的 PATCH 留下半次更新。
+  const status = 'status' in patch ? normalizePlanStatus(patch.status) : p.status;
+  if (['sent', 'done'].includes(p.status) && status !== p.status) {
+    throw httpError(400, '已终结的计划不能更改状态');
+  }
   if ('idea' in patch || 'occasion' in patch || 'occasionDate' in patch || 'budget' in patch
     || 'productName' in patch || 'productPrice' in patch || 'productUrl' in patch) {
     const v = validatePlanFields({
@@ -637,7 +638,7 @@ export function updatePlan(id, patch = {}) {
     p.productName = v.productName; p.productPrice = v.productPrice; p.productUrl = v.productUrl;
   }
   if ('status' in patch) {
-    const status = normalizePlanStatus(patch.status);
+    // 兼容直接设置 sent 的旧调用；只有显式 markPlanSent 才创建礼物记忆。
     p.status = status;
     if (status === 'sent' && !p.sentAt) p.sentAt = now();
   }
@@ -655,10 +656,23 @@ export function deletePlan(id) {
   return removed;
 }
 
+/** 普通完成：只终结计划，不推断类型或自动创建记忆；完成时间沿用 updatedAt。 */
+export function markPlanDone(id) {
+  const p = getPlan(id);
+  if (!p) throw httpError(404, '计划不存在');
+  if (p.status === 'sent') throw httpError(400, '已送出的计划不能标记完成');
+  if (p.status === 'done') return p;
+  return updatePlan(id, { status: 'done' });
+}
+
 /** 标记已送：计划收尾 + 自动落一条已确认的 gift 记忆（用户动作即事实，author=user）。 */
 export function markPlanSent(id) {
-  const p = updatePlan(id, { status: 'sent' });
-  if (p.memoryId && getMemory(p.memoryId)) return { plan: p, memory: getMemory(p.memoryId) };
+  const p = getPlan(id);
+  if (!p) throw httpError(404, '计划不存在');
+  if (p.status === 'done') throw httpError(400, '已完成的计划不能标记已送出');
+  // 即使用户删除了那条记忆，也不能因重试重新生成。
+  if (p.memoryId) return { plan: p, memory: getMemory(p.memoryId) };
+  updatePlan(id, { status: 'sent' });
   const today = now().slice(0, 10);
   const primary = p.productName || p.idea;
   const detail = [];
@@ -695,7 +709,7 @@ export function giftReciprocity() {
     const latestTheirs = theirs.sort((a, b) => stamp(b).localeCompare(stamp(a)))[0];
     const latestMine = mine.sort((a, b) => stamp(b).localeCompare(stamp(a)))[0];
     if (latestMine && stamp(latestMine) >= stamp(latestTheirs)) continue;
-    const hasActivePlan = db.plans.some((p) => p.contactId === c.id && p.status !== 'sent');
+    const hasActivePlan = db.plans.some((p) => p.contactId === c.id && !['sent', 'done'].includes(p.status));
     items.push({ contactId: c.id, name: c.name, memoryId: latestTheirs.id, content: latestTheirs.content, date: stamp(latestTheirs), hasActivePlan });
   }
   return items.sort((a, b) => b.date.localeCompare(a.date));
@@ -715,40 +729,7 @@ export function giftLedger() {
 
 /** 送礼时机（30 天窗）：生日 + 计划日期 + 相关固定节日（如教师节只匹配老师联系人）。 */
 export function giftOccasions(days = 30) {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const dayDiff = (d) => Math.round((d - today) / 86_400_000);
-  const items = [];
-  const seen = new Set();
-  const push = (item) => {
-    const key = `${item.contactId}|${item.occasion}|${item.date}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    items.push(item);
-  };
-  for (const c of listContacts({ includeArchived: false })) {
-    // ① 生日（每年）——窗口跟随调用方（首页 overview 默认 30 天不变）
-    const bd = nextBirthdayDays(c.birthday, days);
-    if (bd !== null) push({ contactId: c.id, name: c.name, occasion: 'birthday', label: '生日', date: '', inDays: bd, source: 'birthday' });
-    // ② 相关固定节日
-    for (const h of FIXED_HOLIDAYS) {
-      if (!h.match(c)) continue;
-      for (const year of [today.getFullYear(), today.getFullYear() + 1]) {
-        const diff = dayDiff(new Date(year, Number(h.md.slice(0, 2)) - 1, Number(h.md.slice(3, 5))));
-        if (diff >= 0 && diff <= days) push({ contactId: c.id, name: c.name, occasion: h.occasion, label: h.label, date: `${year}-${h.md}`, inDays: diff, source: 'holiday' });
-      }
-    }
-    // ③ 计划里的具体日期。同人同日已有生日/节日/计划时机行则跳过：
-    // 计划是"应对"，其上下文已并入该行的已有计划展示；同日再出提醒行 = 自我繁殖
-    // （AI 帮想落的新卡场合标签可能与原卡不同——中秋/中秋节，故按天去重而非按标签）
-    for (const p of db.plans) {
-      if (p.contactId !== c.id || !p.occasionDate || p.status === 'sent') continue;
-      const [y, m, d] = p.occasionDate.split('-').map(Number);
-      const diff = dayDiff(new Date(y, m - 1, d));
-      if (diff >= 0 && diff <= days && !items.some((x) => x.contactId === c.id && x.inDays === diff)) push({ contactId: c.id, name: c.name, occasion: p.occasion || 'custom', label: p.occasion || '自定义', date: p.occasionDate, inDays: diff, source: 'plan', planId: p.id, idea: p.idea, status: p.status });
-    }
-  }
-  return items.sort((a, b) => a.inDays - b.inDays).slice(0, 12);
+  return deriveOccasions(listContacts({ includeArchived: false }), listPlans(), days);
 }
 
 /**
@@ -782,11 +763,18 @@ export function fadingContacts(days = 90) {
 }
 
 // ---------- 素材（原始素材与结构化记忆分离，只作溯源存档） ----------
-export function saveMaterial({ kind = 'text', text = '', contactId = '', occasion = '' } = {}) {
+export function saveMaterial({ kind = 'text', text = '', contactId = '', contactIds, occasion = '' } = {}) {
   const content = String(text ?? '');
   if (!content.trim()) throw httpError(400, '素材内容不能为空');
   if (content.length > 200_000) throw httpError(400, '素材过长（上限 20 万字符）');
-  const cid = String(contactId ?? '');
+  // 多人素材：contactId 字段只存第一人（锚点），完整列表由 facade 写侧车（material-contacts.js）
+  let cid = String(contactId ?? '');
+  if (Array.isArray(contactIds)) {
+    const ids = [...new Set(contactIds.map(String).filter(Boolean))];
+    if (ids.length > 10) throw httpError(400, '主要涉及人最多 10 个');
+    if (ids.length && !ids.every((x) => getContact(x))) throw httpError(404, '关联的联系人不存在');
+    cid = ids[0] || '';
+  }
   if (cid && !getContact(cid)) throw httpError(404, '关联的联系人不存在');
   const mt = {
     id: uid('mt'),

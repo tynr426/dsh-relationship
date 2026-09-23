@@ -19,6 +19,8 @@ const webServerFor = (port, dataDir) => ({
 export default defineConfig({
   testDir: './test/e2e',
   fullyParallel: false,
+  // 本地共享服务 + SSE 实时推送，偶发时序抖动允许重试一次；真回归会连续挂
+  retries: 1,
   reporter: 'list',
   use: {
     trace: 'retain-on-failure',

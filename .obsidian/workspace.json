@@ -13,12 +13,12 @@
             "state": {
               "type": "markdown",
               "state": {
-                "file": "docs/2026-09-21-handover.md",
+                "file": "docs/2026-09-20-article-organize-question.md",
                 "mode": "source",
                 "source": false
               },
               "icon": "lucide-file",
-              "title": "2026-09-21-handover"
+              "title": "2026-09-20-article-organize-question"
             }
           }
         ]
@@ -99,7 +99,7 @@
             "state": {
               "type": "backlink",
               "state": {
-                "file": "docs/2026-09-21-handover.md",
+                "file": "docs/2026-09-20-article-organize-question.md",
                 "collapseAll": false,
                 "extraContext": false,
                 "sortOrder": "alphabetical",
@@ -118,7 +118,7 @@
             "state": {
               "type": "outgoing-link",
               "state": {
-                "file": "docs/2026-09-21-handover.md",
+                "file": "docs/2026-09-20-article-organize-question.md",
                 "linksCollapsed": false,
                 "unlinkedCollapsed": true
               },
@@ -161,7 +161,7 @@
             "state": {
               "type": "outline",
               "state": {
-                "file": "docs/2026-09-21-handover.md",
+                "file": "docs/2026-09-20-article-organize-question.md",
                 "followCursor": false,
                 "showSearch": false,
                 "searchQuery": ""
@@ -190,23 +190,39 @@
   },
   "active": "86b4e17b3fd3924f",
   "lastOpenFiles": [
-    "test-results",
-    "test-results/relbench-关系记忆工作台-空库首价值引导：场景-→-建联系人-→-指令就绪/trace.zip",
-    "test-results/relbench-关系记忆工作台-空库首价值引导：场景-→-建联系人-→-指令就绪/error-context.md",
-    "test-results/relbench-关系记忆工作台-空库首价值引导：场景-→-建联系人-→-指令就绪",
-    "docs/2026-09-20-article-collab-architecture.md",
-    "docs/2026-09-21-handover.md",
-    "docs/images/figure-2-collab-architecture.png",
-    "docs/2026-09-20-article-product-intro.md",
-    "test-results/jd-products-窄屏-20-条候选可滚动到底，参考标价超过券后上限仍显示/trace.zip",
-    "test-results/jd-products-窄屏-20-条候选可滚动到底，参考标价超过券后上限仍显示/error-context.md",
-    "test-results/jd-products-窄屏-20-条候选可滚动到底，参考标价超过券后上限仍显示",
-    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.temp-stream-a1ebaf",
     "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de",
     "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.00.rcgu.o",
+    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.09.rcgu.o",
+    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.14.rcgu.o",
+    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.07.rcgu.o",
+    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.01.rcgu.o",
     "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.02.rcgu.o",
-    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.10.rcgu.o",
+    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.04.rcgu.o",
     "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.13.rcgu.o",
+    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.15.rcgu.o",
+    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.03.rcgu.o",
+    "test-results/relbench-关系记忆工作台-计划页按归一场合和具体日期分组，旧计划不串卡，泛节日不平铺-relbench-retry1/error-context.md",
+    "test-results/relbench-关系记忆工作台-计划页按归一场合和具体日期分组，旧计划不串卡，泛节日不平铺-relbench/error-context.md",
+    "test-results/relbench-关系记忆工作台-手动记一笔即确认并可在时间线编辑删除-relbench-retry1-repeat1/error-context.md",
+    "test-results/relbench-关系记忆工作台-手动记一笔即确认并可在时间线编辑删除-relbench-repeat1/error-context.md",
+    "test-results/relbench-关系记忆工作台-手机联系人详情直接可达，记一笔预选当前人，返回后可换人-relbench/error-context.md",
+    "test-results/relbench-关系记忆工作台-手动记一笔即确认并可在时间线编辑删除-relbench-retry1/error-context.md",
+    "test-results/relbench-关系记忆工作台-手动记一笔即确认并可在时间线编辑删除-relbench/error-context.md",
+    "test-results/relbench-关系记忆工作台-智能整理多人素材：多选两人保存，素材卡显示双名-relbench/error-context.md",
+    "test-results/relbench-关系记忆工作台-AI记忆整理：重要状态不折叠，零提取报告算完成，普通素材展开状态保留-relbench-retry1/error-context.md",
+    "test-results/relbench-关系记忆工作台-AI记忆整理：重要状态不折叠，零提取报告算完成，普通素材展开状态保留-relbench/error-context.md",
+    "test-results/relbench-关系记忆工作台-礼赠：新建计划-→-标已送自动入台账-relbench-retry1/error-context.md",
+    "test-results/relbench-关系记忆工作台-礼赠：新建计划-→-标已送自动入台账-relbench/error-context.md",
+    "docs/2026-09-20-article-collab-architecture.md",
+    "docs/2026-09-20-article-ai-memory-gates.md",
+    "docs/2026-09-20-article-electron-sandbox-iframe.md",
+    "docs/2026-09-21-handover.md",
+    "test-results/relbench-关系记忆工作台-零记忆联系人也放行「送什么」：不再禁用，标签进空态提示-relbench/error-context.md",
+    "test-results/relbench-关系记忆工作台-记个想法-回礼计划：从某人的行打开时「送给谁」自动选中该人-relbench/error-context.md",
+    "test-results/relbench-关系记忆工作台-空库首价值引导：场景-→-建联系人-→-指令就绪/error-context.md",
+    "docs/images/figure-2-collab-architecture.png",
+    "docs/2026-09-20-article-product-intro.md",
+    "test-results/jd-products-窄屏-20-条候选可滚动到底，参考标价超过券后上限仍显示/error-context.md",
     "docs/images/figure-6-electron-sandbox-iframe.png",
     "docs/images/figure-5-prompt-as-config.png",
     "docs/images/figure-4-organize-question.png",

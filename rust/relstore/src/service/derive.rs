@@ -69,7 +69,7 @@ pub fn reciprocity() -> tube::Result<Json> {
         let contact_id = item["contactId"].as_str().unwrap_or_default().to_owned();
         let n = count_of(
             &conn,
-            &format!("SELECT count(*) AS n FROM plans WHERE contact_id='{contact_id}' AND status!='sent'"),
+            &format!("SELECT count(*) AS n FROM plans WHERE contact_id='{contact_id}' AND status NOT IN ('sent','done')"),
         )?;
         item["hasActivePlan"] = json!(n > 0);
     }
@@ -177,7 +177,7 @@ pub fn occasions(days: i64) -> tube::Result<Json> {
         }
         // ③ 计划里的具体日期（未送且有日期）
         for p in &plans {
-            if p["contactId"].as_str() != Some(cid.as_str()) || p["status"].as_str() == Some("sent") {
+            if p["contactId"].as_str() != Some(cid.as_str()) || matches!(p["status"].as_str(), Some("sent" | "done")) {
                 continue;
             }
             let od = p["occasionDate"].as_str().unwrap_or_default().to_owned();

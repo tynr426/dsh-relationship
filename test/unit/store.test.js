@@ -335,7 +335,7 @@ test('V5: 礼物计划 CRUD、标已送闭环、回礼派生、台账与时机�
   assert.equal(p.productName, '武夷岩茶大红袍礼盒');
   assert.throws(() => createPlan({ contactId: c.id, idea: '' }), /礼物想法/);
   assert.throws(() => createPlan({ contactId: c.id, idea: 'ok', occasionDate: '明年' }), /YYYY-MM-DD/);
-  assert.throws(() => createPlan({ contactId: c.id, idea: 'ok', status: 'done' }), /status/);
+  assert.throws(() => createPlan({ contactId: c.id, idea: 'ok', status: 'unknown' }), /status/);
   assert.throws(() => createPlan({ contactId: 'c_missing', idea: 'ok' }), /联系人不存在/);
   assert.throws(() => createPlan({ contactId: c.id, idea: 'ok', productUrl: 'taobao.com/x' }), /http/);
   assert.equal(listPlans({ contactId: c.id }).length, 1);
@@ -366,7 +366,9 @@ test('V5: 礼物计划 CRUD、标已送闭环、回礼派生、台账与时机�
   const mine = recip.find((r) => r.contactId === c.id);
   assert.ok(mine, '有未回应的收礼');
   assert.equal(mine.memoryId, received.id);
-  updatePlan(p.id, { status: 'idea' }); // 恢复一个未送计划
+  assert.throws(() => updatePlan(p.id, { status: 'idea' }), { status: 400 });
+  assert.equal(giftReciprocity().find((r) => r.contactId === c.id).hasActivePlan, false);
+  createPlan({ contactId: c.id, idea: '另一个回礼计划' });
   assert.equal(giftReciprocity().find((r) => r.contactId === c.id).hasActivePlan, true);
   // 我回礼之后 → 消失
   const back = createMemory({ contactId: c.id, type: 'gift', content: '回赠点心', direction: 'user_to_contact', date: '2099-10-15', author: 'user' });
@@ -402,6 +404,65 @@ test('V5: 礼物计划 CRUD、标已送闭环、回礼派生、台账与时机�
   assert.equal(m5.plans[0].occasion, 'teacher_day');
   assert.equal(m5.plans[0].status, 'idea');
   assert.equal(m5.plans[0].source, 'user');
+});
+
+test('普通完成幂等、无记忆，sent/done 终态不能重开或互转（JSON）', async (t) => {
+  const c = store.createContact({ name: '散步计划测试' });
+  const before = store.listMemories().length;
+  const NativeDate = Date;
+  let clock = '2026-09-20T12:00:00Z';
+  t.mock.method(globalThis, 'Date', class extends NativeDate {
+    constructor(...args) { super(...(args.length ? args : [clock])); }
+  });
+  assert.ok(store.PLAN_STATUSES.includes('done'));
+  for (const status of ['idea', 'decided']) {
+    clock = '2026-09-20T12:00:00Z';
+    const p = store.createPlan({ contactId: c.id, idea: '一起散步', status, source: 'ai' });
+    clock = '2026-09-21T12:00:00Z';
+    const done = { ...store.markPlanDone(p.id) };
+    assert.equal(done.status, 'done');
+    assert.equal(done.updatedAt, '2026-09-21T12:00:00.000Z');
+    assert.equal(done.sentAt, '');
+    assert.equal(done.memoryId, '');
+    assert.equal(done.source, 'ai');
+    assert.equal('doneAt' in done, false);
+    assert.equal('kind' in done, false);
+    clock = '2026-09-22T12:00:00Z';
+    assert.deepEqual(store.markPlanDone(p.id), done, '重试不刷新 updatedAt');
+    assert.throws(() => store.markPlanSent(p.id), { status: 400 });
+    for (const target of ['idea', 'decided', 'sent']) {
+      assert.throws(() => store.updatePlan(p.id, { status: target, idea: '不应写入' }), { status: 400 });
+      assert.deepEqual(store.getPlan(p.id), done, '非法状态不能部分写入');
+    }
+  }
+  const createdDone = store.createPlan({ contactId: c.id, idea: '直接创建完成计划', status: 'done' });
+  assert.equal(store.markPlanDone(createdDone.id).status, 'done');
+  assert.equal(store.listMemories().length, before);
+  assert.throws(() => store.markPlanDone('missing'), { status: 404 });
+  // 兼容直接 sent：不推断历史类型，显式送出才生成 gift。
+  for (const viaUpdate of [false, true]) {
+    const p = store.createPlan({ contactId: c.id, idea: '茶叶', status: viaUpdate ? 'idea' : 'sent' });
+    if (viaUpdate) store.updatePlan(p.id, { status: 'sent' });
+    assert.equal(p.memoryId, '');
+    const { plan, memory } = store.markPlanSent(p.id);
+    assert.equal(memory.type, 'gift');
+    assert.equal(memory.status, 'confirmed');
+    assert.equal(memory.author, 'user');
+    for (const status of ['idea', 'decided', 'done']) assert.throws(() => store.updatePlan(p.id, { status }), { status: 400 });
+    assert.throws(() => store.markPlanDone(p.id), { status: 400 });
+    assert.equal(store.markPlanSent(p.id).memory.id, memory.id);
+    assert.equal(store.updatePlan(p.id, { status: 'sent', budget: '200' }).memoryId, plan.memoryId);
+    store.deleteMemory(memory.id);
+    assert.equal(store.markPlanSent(p.id).memory, null, '删除记忆后重试不重建');
+  }
+  assert.equal(store.listMemories().length, before);
+  store.createMemory({ contactId: c.id, type: 'gift', content: '收到点心', direction: 'contact_to_user', author: 'user' });
+  assert.equal(store.giftReciprocity().find((r) => r.contactId === c.id).hasActivePlan, false);
+  store.flush();
+  store.loadStore();
+  assert.equal(store.getPlan(createdDone.id).status, 'done', 'JSON 重载保留终态');
+  const { migrateDb } = await import('../../server/migrations.js');
+  assert.equal(migrateDb({ schemaVersion: 4, plans: [{ ...createdDone }] }).plans[0].status, 'done');
 });
 
 test('V6: 关系类型注册表 CRUD + 内置保护 + 占用检查 + 动态校验', () => {

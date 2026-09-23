@@ -36,6 +36,17 @@ test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
   assert.equal(stat.mode & 0o777, 0o600, '库文件应为 0600');
 });
 
+(hasBinary ? test : test.skip)('多人素材 contactIds 经 rust 往返：字段存第一人锚点，完整列表走侧车', () => {
+  const c1 = store.createContact({ name: '多人甲', relation: 'friend' });
+  const c2 = store.createContact({ name: '多人乙', relation: 'friend' });
+  const mt = store.saveMaterial({ text: '中秋给多人甲送了岩茶，给多人乙送了月饼', contactIds: [c1.id, c2.id] });
+  assert.equal(mt.contactId, c1.id, 'contactId 字段=第一人锚点（rust CLI 校验存在性）');
+  const back = store.getMaterial(mt.id);
+  assert.equal(back.contactId, c1.id, '锚点经真实二进制往返不丢');
+  assert.deepEqual(store.materialContactIds(back), [c1.id, c2.id], '侧车保留完整多人列表');
+  assert.throws(() => store.saveMaterial({ text: '坏素材', contactIds: [c1.id, 'c_none'] }), /联系人不存在/);
+});
+
 (hasBinary ? test : test.skip)('联系人增改查与校验', () => {
   const c = store.createContact({ name: '段老师', relation: 'colleague', tags: ['大学同学', '高数老师'], birthday: '每年-09-12' });
   assert.ok(c.id.startsWith('c_'));
@@ -131,6 +142,141 @@ test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
   assert.equal(failed[0].error, '记忆不存在');
 });
 
+(hasBinary ? test : test.skip)('done 真实 Rust 契约：无记忆、终态不可重开、CLI 与 AI 闸门一致', async () => {
+  const c = store.createContact({ name: 'Rust 普通完成' });
+  const before = store.listMemories().length;
+  const cli = (...args) => JSON.parse(execFileSync(bin, [...args, '--json', '--db', process.env.RELSTORE_DB], { encoding: 'utf8' }).trim());
+  assert.ok(store.PLAN_STATUSES.includes('done'));
+  for (const status of ['idea', 'decided']) {
+    const p = store.createPlan({ contactId: c.id, idea: '一起散步', source: 'ai', status });
+    const done = store.markPlanDone(p.id);
+    assert.equal(done.status, 'done');
+    assert.equal(done.sentAt, '');
+    assert.equal(done.memoryId, '');
+    assert.equal(done.source, 'ai');
+    assert.equal('doneAt' in done, false);
+    assert.equal('kind' in done, false);
+    assert.ok(done.updatedAt);
+    assert.deepEqual(store.markPlanDone(p.id), done);
+    assert.deepEqual(cli('plan', 'set', p.id, '--status', 'done').plan, done);
+    assert.deepEqual(store.listPlans({ status: 'done' }).find((x) => x.id === p.id), done);
+    assert.throws(() => store.markPlanSent(p.id), { status: 400 });
+    for (const target of ['idea', 'decided', 'sent']) assert.throws(() => store.updatePlan(p.id, { status: target, idea: '不应写入' }), { status: 400 });
+    for (const args of [['plan', 'sent', p.id], ...['idea', 'decided', 'sent'].map((target) => ['plan', 'set', p.id, '--status', target, '--idea', '不应写入'])]) {
+      const result = spawnSync(bin, [...args, '--json', '--db', process.env.RELSTORE_DB], { encoding: 'utf8' });
+      assert.notEqual(result.status, 0);
+      assert.match(result.stderr, /已完成|已终结/);
+    }
+    assert.deepEqual(store.getPlan(p.id), done);
+  }
+  const direct = store.createPlan({ contactId: c.id, idea: '创建完成', status: 'done' });
+  assert.equal(direct.status, 'done');
+  assert.equal(store.listMemories().length, before);
+  assert.throws(() => store.markPlanDone('missing'), { status: 404 });
+  assert.throws(() => store.createPlan({ contactId: c.id, idea: '非法状态', status: 'unknown' }), { status: 400 });
+  for (const viaUpdate of [false, true]) {
+    const p = store.createPlan({ contactId: c.id, idea: '茶叶', status: viaUpdate ? 'idea' : 'sent' });
+    if (viaUpdate) store.updatePlan(p.id, { status: 'sent' });
+    assert.equal(store.getPlan(p.id).memoryId, '');
+    const { plan, memory } = store.markPlanSent(p.id);
+    assert.equal(memory.type, 'gift');
+    assert.equal(memory.status, 'confirmed');
+    assert.equal(memory.author, 'user');
+    assert.throws(() => store.markPlanDone(p.id), { status: 400 });
+    for (const status of ['idea', 'decided', 'done']) {
+      assert.throws(() => store.updatePlan(p.id, { status }), { status: 400 });
+      const result = spawnSync(bin, ['plan', 'set', p.id, '--status', status, '--json', '--db', process.env.RELSTORE_DB], { encoding: 'utf8' });
+      assert.notEqual(result.status, 0);
+    }
+    assert.deepEqual(store.markPlanSent(p.id).plan, plan);
+    assert.equal(store.markPlanSent(p.id).memory.id, memory.id);
+    store.deleteMemory(memory.id);
+    assert.equal(store.markPlanSent(p.id).memory, null);
+  }
+  assert.equal(store.listMemories().length, before);
+  store.createMemory({ contactId: c.id, type: 'gift', content: '收到点心', direction: 'contact_to_user', author: 'user' });
+  assert.equal(store.giftReciprocity().find((r) => r.contactId === c.id).hasActivePlan, false);
+  const tools = await import('../../server/tools.js');
+  for (const name of ['gift_plan_add', 'gift_plan_update']) {
+    for (const status of ['sent', 'done']) {
+      const result = await tools.executeTool(name, { id: direct.id, contactId: c.id, idea: '伪造完成', status });
+      assert.equal(result.status, 400);
+    }
+  }
+  const next = await tools.executeTool('gift_plan_add', { contactId: c.id, idea: '一起散步' });
+  assert.equal(next.ok, true, 'done 不阻挡同想法的新主意');
+  assert.equal(store.giftReciprocity().find((r) => r.contactId === c.id).hasActivePlan, true);
+});
+
+(hasBinary ? test : test.skip)('旧 SQLite plans CHECK 迁移：全字段、索引、视图保留，重复初始化不丢数据', () => {
+  const schema = fs.readFileSync(new URL('../../rust/relstore/resource/sql/initialize.sql', import.meta.url), 'utf8');
+  for (const [variant, check] of [
+    ['quoted', `CHECK ("status" IN ('idea','decided','sent'))`],
+    ['spaced', `CHECK ( status IN ( 'idea', 'decided', 'sent' ) )`],
+  ]) {
+    const db = path.join(dataDir, `legacy-${variant}.db`);
+    const sqlite = (sql) => JSON.parse(execFileSync('sqlite3', ['-json', db, sql], { encoding: 'utf8' }).trim() || '[]');
+    const oldSchema = schema.replace(`CHECK ("status" IN ('idea','decided','sent','done'))`, check);
+    assert.notEqual(oldSchema, schema);
+    execFileSync('sqlite3', [db], { input: oldSchema + `
+      ALTER TABLE plans ADD COLUMN extra_payload TEXT DEFAULT '';
+      INSERT INTO contacts (id,name,tags) VALUES ('c_old','旧联系人','["保留标签"]');
+      INSERT INTO materials (id,text,contact_id) VALUES ('mt_old','旧素材','c_old');
+      INSERT INTO memories (id,contact_id,mem_type,content,source_id,source_quote,author,status)
+        VALUES ('m_old','c_old','gift','历史送礼','mt_old','保留摘录','user','confirmed');
+      INSERT INTO plans (id,contact_id,occasion,occasion_date,idea,budget,product_name,product_price,product_url,status,sent_at,memory_id,source,created_at,updated_at,extra_payload)
+        VALUES ('gp_old','c_old','birthday','2026-09-22','历史计划','300','礼盒','268','https://example.test/item','sent','2026-09-22T12:00:00Z','m_old','ai','2026-09-01','2026-09-22','扩展字段不能丢');
+      INSERT INTO plans (id,contact_id,idea,status) VALUES ('gp_active','c_old','普通散步','decided');
+      CREATE INDEX plans_extra ON plans(extra_payload) WHERE status='sent';
+      CREATE VIEW v_plan_archive AS SELECT * FROM plans;
+      CREATE VIEW v_plan_chain AS SELECT id,status FROM v_plan_archive;
+      CREATE TRIGGER view_keep_extra INSTEAD OF UPDATE OF extra_payload ON v_plan_archive BEGIN UPDATE plans SET extra_payload=new.extra_payload WHERE id=new.id; END;
+      CREATE TRIGGER plans_keep_extra AFTER UPDATE OF idea ON plans BEGIN UPDATE plans SET extra_payload='trigger works' WHERE id=new.id; END;
+      CREATE TRIGGER contacts_keep_plans AFTER UPDATE OF notes ON contacts BEGIN UPDATE plans SET extra_payload='cross-table trigger works' WHERE contact_id=new.id; END;
+    `, encoding: 'utf8' });
+    const rows = () => Object.fromEntries(['contacts', 'materials', 'memories', 'plans', 'relation_types'].map((table) => [table, sqlite(`SELECT * FROM ${table} ORDER BY 1`)]));
+    const objects = () => sqlite(`SELECT type,name,sql FROM sqlite_master WHERE type IN ('index','view','trigger') ORDER BY type,name`);
+    const before = rows();
+    const beforeObjects = objects();
+    const cli = (...args) => JSON.parse(execFileSync(bin, [...args, '--json', '--db', db], { encoding: 'utf8' }).trim());
+    // 模拟重建中途失败：已删视图/触发器必须随事务回滚，而非留下半迁移状态。
+    sqlite('CREATE TABLE plans_rebuild_legacy (id TEXT)');
+    const failed = spawnSync(bin, ['plan', 'list', '--json', '--db', db], { encoding: 'utf8' });
+    assert.notEqual(failed.status, 0);
+    assert.deepEqual(rows(), before);
+    assert.deepEqual(objects(), beforeObjects);
+    sqlite('DROP TABLE plans_rebuild_legacy');
+    const result = cli('plan', 'list'); // 首次成功初始化触发旧约束迁移
+    assert.equal(result.plans.length, 2);
+    assert.equal(result.plans.find((p) => p.id === 'gp_old').memoryId, 'm_old');
+    assert.deepEqual(rows(), before);
+    assert.deepEqual(objects(), beforeObjects);
+    assert.match(sqlite(`SELECT sql FROM sqlite_master WHERE name='plans'`)[0].sql, /'done'/);
+    const version = sqlite('PRAGMA schema_version');
+    for (let i = 0; i < 3; i++) cli('contact', 'list');
+    assert.deepEqual(rows(), before);
+    assert.deepEqual(objects(), beforeObjects);
+    assert.deepEqual(sqlite('PRAGMA schema_version'), version, '重复初始化不重建表');
+    assert.equal(cli('plan', 'set', 'gp_active', '--date', new Date().toISOString().slice(0, 10), '--status', 'done').plan.status, 'done');
+    assert.ok(!cli('occasion', '--days', '1').occasions.some((o) => o.planId === 'gp_active'), '原生 CLI 时机同样排除 done');
+    const completed = rows();
+    assert.deepEqual(completed.memories, before.memories);
+    assert.deepEqual(completed.plans.find((p) => p.id === 'gp_old'), before.plans.find((p) => p.id === 'gp_old'));
+    assert.equal(sqlite(`SELECT status FROM v_plan_chain WHERE id='gp_active'`)[0].status, 'done');
+    assert.equal(sqlite('PRAGMA integrity_check')[0].integrity_check, 'ok');
+    for (let i = 0; i < 2; i++) cli('plan', 'list');
+    assert.deepEqual(rows(), completed, 'done 在重复初始化后仍完整保留');
+    assert.deepEqual(cli('plan', 'sent', 'gp_old').memory.id, 'm_old', '历史 AI 来源已送记录不猜类型、不重复生成');
+    assert.deepEqual(rows().memories, before.memories);
+    cli('plan', 'set', 'gp_active', '--idea', '修正文案');
+    assert.equal(sqlite(`SELECT extra_payload FROM plans WHERE id='gp_active'`)[0].extra_payload, 'trigger works');
+    sqlite(`UPDATE contacts SET notes='测试跨表触发器' WHERE id='c_old'`);
+    assert.equal(sqlite(`SELECT extra_payload FROM plans WHERE id='gp_active'`)[0].extra_payload, 'cross-table trigger works');
+    sqlite(`UPDATE v_plan_archive SET extra_payload='view trigger works' WHERE id='gp_active'`);
+    assert.equal(sqlite(`SELECT extra_payload FROM plans WHERE id='gp_active'`)[0].extra_payload, 'view trigger works');
+  }
+});
+
 (hasBinary ? test : test.skip)('计划全生命周期与礼赠派生', () => {
   const c = store.createContact({ name: '段段' });
   const p = store.createPlan({ contactId: c.id, idea: '绘本礼盒', occasion: '生日', occasionDate: '2026-10-20', budget: '300-500' });
@@ -150,9 +296,9 @@ test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
   // 回礼：段段有 contact_to_user gift 时才出现在待回应，这里只验证接口形状
   const rec = store.giftReciprocity();
   assert.ok(Array.isArray(rec));
-  // ③ 计划日期项在 occasion 命令里验证（见 CLI 契约）；Node 侧 giftOccasions 直通
   const occ = store.giftOccasions(365);
   assert.ok(Array.isArray(occ));
+  assert.ok(!occ.some((o) => o.planId === p.id));
 
   assert.throws(() => store.createPlan({ contactId: c.id, idea: 'x', productUrl: 'ftp://a' }), /商品链接/);
   assert.equal(store.deletePlan(p.id).id, p.id);
@@ -213,6 +359,17 @@ test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
     store.deleteMemory(m1.id);
     store.deleteMemory(m2.id);
   }
+});
+
+(hasBinary ? test : test.skip)('回礼提示包含最近已确认收礼的原文和记忆 ID', () => {
+  const c = store.createContact({ name: '回礼内容契约' });
+  store.createMemory({ contactId: c.id, type: 'gift', content: '早些收到茶叶', date: '2026-01-01', direction: 'contact_to_user', author: 'user' });
+  const gift = store.createMemory({ contactId: c.id, type: 'gift', content: '后来收到围巾', date: '2026-02-01', direction: 'contact_to_user', author: 'user' });
+  store.createMemory({ contactId: c.id, type: 'gift', content: '待确认的不算', date: '2026-03-01', direction: 'contact_to_user', author: 'ai' });
+  const row = store.giftReciprocity().find((r) => r.contactId === c.id);
+  assert.equal(row.content, '后来收到围巾');
+  assert.equal(row.memoryId, gift.id);
+  assert.equal(row.date, gift.date);
 });
 
 (hasBinary ? test : test.skip)('overview/counts/timeline 形状', () => {
@@ -307,4 +464,55 @@ test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
   const strict = store.fadingContacts(150);
   assert.ok(strict.some((f) => f.contactId === c.id));
   assert.ok(!strict.some((f) => f.contactId === recent.id));
+});
+
+(hasBinary ? test : test.skip)('rust 时机按联系人、场合、日期合并，无 CLI 截断或每人配额', (t) => {
+  const NativeDate = Date;
+  const stamp = new NativeDate('2026-09-21T15:30:00').getTime();
+  t.mock.method(globalThis, 'Date', class extends NativeDate {
+    constructor(...args) { super(...(args.length ? args : [stamp])); }
+    static now() { return stamp; }
+  });
+  const contacts = Array.from({ length: 24 }, (_, i) => store.createContact({ name: `时机测试${i}`, birthday: '每年-09-22' }));
+  const [c] = contacts;
+  const archived = store.createContact({ name: '时机已归档', birthday: '每年-09-22' });
+  store.updateContact(archived.id, { archived: true });
+  const pending = store.createContact({ name: '时机待确认', birthday: '每年-09-22', status: 'pending' });
+  for (const hidden of [archived, pending]) {
+    store.createPlan({ contactId: hidden.id, idea: '不应显示', occasion: 'visit', occasionDate: '2026-09-23' });
+  }
+  store.createPlan({ contactId: c.id, idea: '手作茶点', occasion: '中秋', occasionDate: '2026-09-25' });
+  store.createPlan({ contactId: c.id, idea: '护嗓茶', occasion: '中秋节', occasionDate: '2026-09-25' });
+  store.createPlan({ contactId: c.id, idea: '灯笼', occasion: 'mid_autumn', occasionDate: '2026-09-28' });
+  store.createPlan({ contactId: c.id, idea: '生日礼物', occasion: '生日', occasionDate: '2026-09-22' });
+  for (let i = 0; i < 8; i++) {
+    store.createPlan({ contactId: c.id, idea: `拜访礼物${i}`, occasion: 'visit', occasionDate: `2026-09-${21 + i}` });
+  }
+  const sent = store.createPlan({ contactId: c.id, idea: '已送', occasion: 'thank_you', occasionDate: '2026-09-23', status: 'sent' });
+  const done = store.createPlan({ contactId: c.id, idea: '已完成散步', occasion: 'walk', occasionDate: '2026-09-23', status: 'done' });
+  const outside = store.createPlan({ contactId: c.id, idea: '超窗', occasion: 'visit', occasionDate: '2026-10-22' });
+
+  const occasions = store.giftOccasions(30);
+  const ids = new Set(contacts.map((x) => x.id));
+  const birthdays = occasions.filter((o) => ids.has(o.contactId) && o.source === 'birthday');
+  assert.equal(birthdays.length, 24);
+  assert.ok(birthdays.every((o) => o.date === '2026-09-22' && o.inDays === 1));
+  assert.ok(!occasions.some((o) => o.contactId === archived.id || o.contactId === pending.id));
+  const mine = occasions.filter((o) => o.contactId === c.id);
+  assert.deepEqual(mine.filter((o) => o.occasion === 'mid_autumn').map((o) => [o.date, o.source]), [
+    ['2026-09-25', 'holiday'], ['2026-09-28', 'plan'],
+  ]);
+  assert.equal(mine.filter((o) => o.occasion === 'birthday').length, 1);
+  assert.equal(mine.filter((o) => o.occasion === 'visit').length, 8);
+  assert.ok(!mine.some((o) => o.planId === sent.id || o.planId === done.id || o.planId === outside.id));
+});
+
+(hasBinary ? test : test.skip)('rust 链路 upcomingHolidays：两周内全员节日时间轴（facade 可达，与 JSON 同源）', () => {
+  assert.equal(typeof store.upcomingHolidays, 'function', 'facade 暴露 upcomingHolidays');
+  const hs = store.upcomingHolidays(14);
+  assert.ok(Array.isArray(hs), '返回数组');
+  assert.ok(hs.every((h) => h.inDays >= 0 && h.inDays <= 14), '两周窗口');
+  assert.ok(hs.every((h) => !['teacher_day', 'mother_day', 'father_day'].includes(h.occasion)), '角色节日不进时间轴');
+  assert.ok(hs.every((h) => h.label && /^\d{4}-\d{2}-\d{2}$/.test(h.date)), '带中文标签与完整日期');
+  for (let i = 1; i < hs.length; i++) assert.ok(hs[i].inDays >= hs[i - 1].inDays, '按临近排序');
 });

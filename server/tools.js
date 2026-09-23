@@ -72,20 +72,21 @@ export const TOOL_DEFS = [
       lifespan: { type: 'string', enum: ['long', 'short'], description: '记忆寿命过滤' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'timeline_get', description: '读取某联系人的完整时间线（基础信息 + 已确认记忆）', parameters: { type: 'object', required: ['contactId'], properties: {
       contactId: { type: 'string' } }, additionalProperties: false } } },
-  { type: 'function', function: { name: 'gift_plan_add', description: '为联系人创建礼物计划卡（想法/已定/已送）。礼物建议必须基于已确认记忆（喜好/禁忌/送过记录），方案理由引用记忆点，禁忌品类明确排除；先 gift_plan_list 查已有计划——同联系人相同想法会被拒绝（409），优化已有计划用 gift_plan_update 更新原卡，不另建新卡', parameters: { type: 'object', required: ['contactId', 'idea'], properties: {
+  { type: 'function', function: { name: 'gift_plan_add', description: '为联系人创建礼物计划卡（仅想法/已定，完成或已送须用户确认）。礼物建议必须基于已确认记忆（喜好/禁忌/送过记录），方案理由引用记忆点，禁忌品类明确排除；先 gift_plan_list 查已有计划——同联系人相同想法会被拒绝（409），优化已有计划用 gift_plan_update 更新原卡，不另建新卡', parameters: { type: 'object', required: ['contactId', 'idea'], properties: {
       contactId: { type: 'string' }, idea: { type: 'string', description: '礼物方案名与一句话理由（≤200 字）' },
+      status: { type: 'string', enum: ['idea', 'decided'] },
       occasion: { type: 'string', description: '场景标签，如 teacher_day/birthday' },
       occasionDate: { type: 'string', description: '这一次的具体日期 YYYY-MM-DD，可留空' },
       budget: { type: 'string', description: '预算，可留空' },
       basedOnPlanId: { type: 'string', description: '围绕某个已有计划出主意时必填：该计划的 ID（出主意 prompt 会给出）——工作台会把这批新方案归到它名下，用户可一键删除这批建议；独立方案留空' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'gift_plan_list', description: '列出礼物计划（默认全部）', parameters: { type: 'object', required: [], properties: {
-      contactId: { type: 'string' }, status: { type: 'string', enum: ['idea', 'decided', 'sent'] } }, additionalProperties: false } } },
-  { type: 'function', function: { name: 'gift_plan_update', description: '更新礼物计划（方案/预算/状态）', parameters: { type: 'object', required: ['id'], properties: {
-      id: { type: 'string' }, idea: { type: 'string' }, budget: { type: 'string' }, status: { type: 'string', enum: ['idea', 'decided', 'sent'] } }, additionalProperties: false } } },
+      contactId: { type: 'string' }, status: { type: 'string', enum: ['idea', 'decided', 'sent', 'done'] } }, additionalProperties: false } } },
+  { type: 'function', function: { name: 'gift_plan_update', description: '更新礼物计划（方案/预算/状态仅 idea 或 decided；完成或送出须用户确认）', parameters: { type: 'object', required: ['id'], properties: {
+      id: { type: 'string' }, idea: { type: 'string' }, budget: { type: 'string' }, status: { type: 'string', enum: ['idea', 'decided'] } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'gift_plan_delete', description: '删除礼物计划', parameters: { type: 'object', required: ['id'], properties: {
       id: { type: 'string' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'material_save', description: '把用户主动提供的原始素材（粘贴的聊天记录、转发文本、口述长段）存档溯源，随后用 memory_batch_add 逐条提取', parameters: { type: 'object', required: ['text'], properties: {
-      text: { type: 'string' }, contactId: { type: 'string', description: '素材主要涉及的联系人，可留空' }, occasion: { type: 'string', description: '素材所属场景，如 teacher_day/birthday；提取的记忆会继承' } }, additionalProperties: false } } },
+      text: { type: 'string' }, contactId: { type: 'string', description: '素材主要涉及的联系人，可留空' }, contactIds: { type: 'array', items: { type: 'string' }, description: '素材涉及多人时传多个联系人编号（如送礼给多人），优先于 contactId' }, occasion: { type: 'string', description: '素材所属场景，如 teacher_day/birthday；提取的记忆会继承' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'material_list', description: '列出素材（默认待整理 raw），用户说"整理素材"时先调用；有已拆条数但无整理报告的素材是整理未完成，应续跑而非重拆', parameters: { type: 'object', required: [], properties: {
       status: { type: 'string', enum: ['raw', 'processed'], description: 'raw=待整理，processed=已拆出记忆' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'material_get', description: '读取素材全文（提取前调用），返回 text 与已提取的记忆（extracted 列表，续跑时对照它跳过已覆盖的消息）', parameters: { type: 'object', required: ['id'], properties: {
@@ -390,20 +391,27 @@ async function run(name, args) {
     }
 
     case 'gift_plan_add': {
-      // 查重闸门：同联系人已有相同想法（忽略空白差异）的未送出计划直接拒绝——
+      if ('status' in args && !['idea', 'decided'].includes(args.status)) {
+        throw store.httpError(400, 'AI 计划只能设置 idea / decided，完成或送出须由用户确认');
+      }
+      // 查重闸门：同联系人已有相同想法（忽略空白差异）的未终结计划直接拒绝——
       // AI 出主意可能重复建卡（曾一次生成 4 张同场合卡），提示词之外兜底
       const norm = (s) => String(s ?? '').replace(/\s+/g, '');
       const idea = norm(args.idea);
       const dup = store.listPlans({ contactId: String(args.contactId ?? '') })
-        .find((p) => p.status !== 'sent' && norm(p.idea) === idea);
+        .find((p) => !['sent', 'done'].includes(p.status) && norm(p.idea) === idea);
       if (dup) {
         return { ok: false, error: `该联系人已有相同想法的计划卡 ${dup.id}（${dup.idea}）：不要重复建卡——要完善它就用 gift_plan_update 更新这张卡`, status: 409 };
       }
       // 围绕已有计划出主意时带 basedOnPlanId：工作台把这类建议归到原计划名下，可一键删除这批
       const { basedOnPlanId, ...rest } = args;
       const baseId = basedOnPlanId ? String(basedOnPlanId).trim() : '';
-      if (baseId && !store.listPlans({}).some((p) => p.id === baseId)) {
+      const basePlan = baseId ? store.listPlans({}).find((p) => p.id === baseId) : null;
+      if (baseId && !basePlan) {
         return { ok: false, error: `basedOnPlanId 对应的计划不存在：${baseId}（围绕已有计划出主意时才填，独立方案留空）`, status: 404 };
+      }
+      if (basePlan && basePlan.contactId !== String(args.contactId ?? '')) {
+        return { ok: false, error: '建议与原计划必须属于同一联系人', status: 400 };
       }
       const plan = store.createPlan({ ...rest, source: 'ai' });
       if (baseId) store.linkPlanSuggestion(plan.id, baseId);
@@ -415,6 +423,9 @@ async function run(name, args) {
       return { ok: true, plans: list.map((p) => ({ ...p, contactName: store.getContact(p.contactId)?.name || '' })) };
     }
     case 'gift_plan_update': {
+      if ('status' in args && !['idea', 'decided'].includes(args.status)) {
+        throw store.httpError(400, 'AI 计划只能设置 idea / decided，完成或送出须由用户确认');
+      }
       const plan = store.updatePlan(String(args.id ?? ''), args);
       broadcast('plan.changed', { action: 'updated', planId: plan.id });
       return { ok: true, plan };
@@ -426,7 +437,7 @@ async function run(name, args) {
     }
 
     case 'material_save': {
-      const mt = store.saveMaterial({ text: args.text, contactId: args.contactId ? String(args.contactId) : '', occasion: args.occasion });
+      const mt = store.saveMaterial({ text: args.text, contactId: args.contactId ? String(args.contactId) : '', contactIds: Array.isArray(args.contactIds) ? args.contactIds : undefined, occasion: args.occasion });
       broadcast('material.changed', { action: 'created', materialId: mt.id });
       return { ok: true, material: { id: mt.id, excerpt: mt.excerpt, contactId: mt.contactId, occasion: mt.occasion }, 提示: '素材已存档。请用 memory_batch_add 把其中每个事实拆成一条待确认记忆（sourceId 填本素材 ID；每条附 sourceQuote 原话摘录，逐字出自素材原文；saidAt 取素材时间戳；交互/礼物类标注 direction；临时事务 lifespan=short；能判断场景时填 occasion）；涉及的人先 contact_search 确认' };
     }
@@ -439,8 +450,14 @@ async function run(name, args) {
       }
       const names = new Map(store.listContacts({ includeArchived: true, includePending: true }).map((c) => [c.id, c.name]));
       const reports = store.allMaterialReports();
+      const extraContacts = store.allMaterialContacts();
+      const idsOf = (mt) => {
+        const v = Array.isArray(extraContacts[mt.id]) ? extraContacts[mt.id] : null;
+        if (v && v.length) return v;
+        return mt.contactId ? [mt.contactId] : [];
+      };
       const list = store.listMaterials({ status: args.status || undefined }).slice(0, 30)
-        .map((mt) => ({ id: mt.id, status: store.materialStatus(mt), contactId: mt.contactId, contactName: names.get(mt.contactId) || '', occasion: mt.occasion || '', excerpt: mt.excerpt, capturedAt: mt.capturedAt, extractedCount: mt.extractedMemoryIds?.length ?? sourceCount.get(mt.id) ?? 0, hasReport: Boolean(reports[mt.id]) }));
+        .map((mt) => ({ id: mt.id, status: store.materialStatus(mt), contactId: mt.contactId, contactIds: idsOf(mt), contactName: idsOf(mt).map((x) => names.get(x) || '').filter(Boolean).join('、'), occasion: mt.occasion || '', excerpt: mt.excerpt, capturedAt: mt.capturedAt, extractedCount: mt.extractedMemoryIds?.length ?? sourceCount.get(mt.id) ?? 0, hasReport: Boolean(reports[mt.id]) }));
       return { ok: true, materials: list };
     }
 
@@ -451,7 +468,8 @@ async function run(name, args) {
       const now = new Date();
       const week = ['日', '一', '二', '三', '四', '五', '六'][now.getDay()];
       const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}（星期${week}）`;
-      return { ok: true, today, material: { ...mt, status: store.materialStatus(mt), contactName: mt.contactId ? store.getContact(mt.contactId)?.name || '' : '', ...(store.materialReport(mt.id) || {}), extracted: store.materialMemories(mt).map(memoryOut) } };
+      const contactIds = store.materialContactIds(mt);
+      return { ok: true, today, material: { ...mt, status: store.materialStatus(mt), contactIds, contactName: contactIds.map((x) => store.getContact(x)?.name || '').filter(Boolean).join('、'), ...(store.materialReport(mt.id) || {}), extracted: store.materialMemories(mt).map(memoryOut) } };
     }
 
     case 'material_report': {

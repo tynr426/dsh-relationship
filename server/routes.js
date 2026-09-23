@@ -8,6 +8,7 @@ import { executeTool, TOOL_CN } from './tools.js';
 import { FLOWS } from './prompts.js';
 import { runAsync } from './relstore-bridge.js';
 import { searchCachedMemoryVectors } from './memory-vectors.js';
+import { occasionKey, occasionLabel, deriveOccasions } from './occasions.js';
 
 const PUBLIC = path.join(ROOT, 'public');
 const MIME = {
@@ -288,7 +289,7 @@ async function api(req, res, url, body) {
       const requireActivePlan = () => {
         const plan = store.getPlan(parts[2]);
         if (!plan) throw store.httpError(404, '计划不存在');
-        if (plan.status === 'sent') throw store.httpError(400, '已送出的计划不能选品');
+        if (['sent', 'done'].includes(plan.status)) throw store.httpError(400, '已终结的计划不能选品');
       };
       requireActivePlan();
       if (!body || typeof body !== 'object' || Array.isArray(body)) throw store.httpError(400, '请求内容无效');
@@ -355,13 +356,21 @@ async function api(req, res, url, body) {
       }
     } catch (e) { failFrom(res, e); return true; }
   }
-  // 一键删除「围绕某计划出主意」产生的这批建议（原计划保留；已送的台账卡不动）
+  // 一键删除「围绕某计划出主意」产生的这批建议（原计划保留；已终结的卡不动）
   if (parts[1] === 'plans' && parts[2] && parts[3] === 'suggestions' && m('DELETE')) {
     try {
-      const doomed = store.plansBasedOn(parts[2]).filter((p) => p.status !== 'sent');
+      const doomed = store.plansBasedOn(parts[2]).filter((p) => !['sent', 'done'].includes(p.status));
       for (const p of doomed) store.deletePlan(p.id);
       broadcast('plan.changed', { action: 'deleted', planId: parts[2] });
       ok(res, { deleted: doomed.length });
+    } catch (e) { failFrom(res, e); }
+    return true;
+  }
+  if (parts[1] === 'plans' && parts[2] && parts[3] === 'done' && !parts[4] && m('POST')) {
+    try {
+      const plan = store.markPlanDone(parts[2]);
+      broadcast('plan.changed', { action: 'done', planId: plan.id });
+      ok(res, { plan });
     } catch (e) { failFrom(res, e); }
     return true;
   }
@@ -394,103 +403,117 @@ async function api(req, res, url, body) {
     ok(res, { fading, thresholdDays: days });
     return true;
   }
-  // 值得关注 feed：四类派生（时机/疏远/待跟进承诺/回礼待回应）合成一条按紧急度排序的行动流。
-  // 纯派生零 AI；每类先取各自最紧急的 KIND_CAP 条，再全局按天数升序（当天/逾期最久的排前）截 limit。
   if (p === '/api/attention' && m('GET')) {
     const days = Math.min(365, Math.max(1, Number(url.searchParams.get('days')) || 90));
-    const limit = Math.min(50, Math.max(1, Number(url.searchParams.get('limit')) || 20));
-    const KIND_CAP = 8;
     const contacts = new Map(store.listContacts({ includeArchived: false }).map((c) => [c.id, c]));
+    const allPlans = store.listPlans();
+    const planById = new Map(allPlans.map((p) => [p.id, p]));
+    const bases = store.allPlanBases();
+    const plans = allPlans.filter((p) => !['sent', 'done'].includes(p.status) && contacts.has(p.contactId)).map((p) => {
+      let occasion = p.occasion || '';
+      let occasionDate = p.occasionDate || '';
+      let parentId = bases[p.id];
+      const visited = new Set([p.id]);
+      while (parentId && !visited.has(parentId)) {
+        const parent = planById.get(parentId);
+        if (!parent || parent.contactId !== p.contactId) break;
+        visited.add(parentId);
+        occasion ||= parent.occasion || '';
+        occasionDate ||= parent.occasionDate || '';
+        parentId = bases[parentId];
+      }
+      return { ...p, occasion: occasionKey(occasion), occasionDate, basedOnPlanId: bases[p.id] || '' };
+    });
+    const occRows = deriveOccasions([...contacts.values()], plans, days);
+    const plansForRow = new Map();
+    for (const plan of plans) {
+      let row = occRows.find((o) => o.contactId === plan.contactId && o.occasion === (plan.occasion || 'custom')
+        && (plan.occasionDate ? o.date === plan.occasionDate : o.source === 'birthday' || o.source === 'holiday'));
+      if (!row && !plan.occasionDate) {
+        row = occRows.find((o) => o.contactId === plan.contactId && o.occasion === (plan.occasion || 'custom') && !o.date);
+        if (!row) {
+          row = { contactId: plan.contactId, occasion: plan.occasion || 'custom', label: occasionLabel(plan.occasion) || '待定安排', date: '', inDays: null, source: 'plan' };
+          occRows.push(row);
+        }
+      }
+      if (!row) continue;
+      if (!plansForRow.has(row)) plansForRow.set(row, []);
+      plansForRow.get(row).push(plan);
+    }
+    const lastSeenBy = new Map(store.fadingContacts(1).map((f) => [f.contactId, f]));
+    const memoriesBy = new Map();
+    const confirmed = store.listMemories({ status: 'confirmed' }).filter((m) => !m.supersededBy && contacts.has(m.contactId))
+      .sort((a, b) => (b.date || b.createdAt || '').localeCompare(a.date || a.createdAt || ''));
+    for (const memory of confirmed) {
+      if (!memoriesBy.has(memory.contactId)) memoriesBy.set(memory.contactId, []);
+      memoriesBy.get(memory.contactId).push(memory);
+    }
+    const groups = new Map();
+    for (const row of occRows) {
+      const c = contacts.get(row.contactId);
+      if (!c) continue;
+      const key = `${row.occasion}|${row.date}`;
+      if (!groups.has(key)) groups.set(key, { id: key, occasion: row.occasion, label: occasionLabel(row.label), date: row.date, days: row.inDays, people: [] });
+      const ps = plansForRow.get(row) || [];
+      const mine = ps.filter((p) => p.source !== 'ai' || p.status === 'decided')
+        .sort((a, b) => Number(b.status === 'decided') - Number(a.status === 'decided'));
+      const aiIdeas = ps.filter((p) => p.source === 'ai' && p.status === 'idea');
+      const memories = memoriesBy.get(c.id) || [];
+      const evidence = [];
+      const cautions = memories.filter((m) => m.type === 'taboo' || m.type === 'dislike');
+      if (cautions.length) evidence.push({ kind: 'caution', text: `相处注意：${cautions.map((m) => m.content).join('；')}` });
+      const past = memories.find((m) => occasionKey(m.occasion) === row.occasion);
+      if (past) evidence.push({ kind: 'history', text: `${past.date ? `${past.date}：` : ''}${past.content}` });
+      const given = memories.find((m) => m.type === 'gift' && ['user_to_contact', 'both'].includes(m.direction));
+      if (given && given.id !== past?.id) evidence.push({ kind: 'gift', text: `上次送过：${given.content}${given.date ? `（${given.date}）` : ''}` });
+      const f = lastSeenBy.get(c.id);
+      groups.get(key).people.push({
+        kind: 'occasion', contactId: c.id, contactName: c.name, relation: c.relation,
+        source: row.source, occasion: row.occasion, label: occasionLabel(row.label), date: row.date, days: row.inDays,
+        plans: mine, plansTotal: mine.length, aiIdeas, aiIdeaCount: aiIdeas.length,
+        action: ps.length ? 'gift' : 'briefing', evidence,
+        lastSeen: f ? { date: f.lastDate, days: f.days } : null,
+        reason: mine.length ? (mine.some((p) => p.occasionDate) ? '已有本次安排' : '已有想法，日期待定')
+          : aiIdeas.length ? 'AI 有主意待你选择' : past ? '这个场合有过往来记录' : '临近时机，可选是否联系',
+      });
+    }
+    const occasionGroups = [...groups.values()].sort((a, b) => (a.days ?? Infinity) - (b.days ?? Infinity));
+    for (const group of occasionGroups) {
+      group.people.sort((a, b) => Number(b.plans.some((p) => p.status === 'decided')) - Number(a.plans.some((p) => p.status === 'decided'))
+        || Number(b.plansTotal > 0) - Number(a.plansTotal > 0)
+        || Number(b.aiIdeaCount > 0) - Number(a.aiIdeaCount > 0)
+        || Number(b.evidence.some((e) => e.kind === 'history')) - Number(a.evidence.some((e) => e.kind === 'history'))
+        || a.contactName.localeCompare(b.contactName, 'zh-CN'));
+      group.plansTotal = group.people.reduce((n, person) => n + person.plansTotal, 0);
+      group.aiIdeaCount = group.people.reduce((n, person) => n + person.aiIdeaCount, 0);
+    }
     const daysSince = (d) => {
       const t = Date.parse(String(d || '').slice(0, 10));
-      return Number.isNaN(t) ? null : Math.max(0, Math.floor((Date.now() - t) / 86_400_000));
+      return Number.isNaN(t) ? 0 : Math.max(0, Math.floor((Date.now() - t) / 86_400_000));
     };
     const items = [];
-    // ① 时机：生日/节日/计划日期（store 已按 inDays 升序、总量封顶）
-    for (const o of store.giftOccasions(days).slice(0, KIND_CAP)) {
-      const c = contacts.get(o.contactId);
-      if (!c) continue;
-      items.push({
-        kind: 'occasion', action: 'gift', contactId: o.contactId, contactName: c.name, relation: c.relation,
-        label: o.label, occasion: o.label, date: o.date, days: o.inDays,
-        text: `${o.label}${o.inDays === 0 ? '就是今天' : `还有 ${o.inDays} 天`}`,
-      });
-    }
-    // ② 疏远：store 按天数降序，取最疏远的前 KIND_CAP
-    for (const f of store.fadingContacts(90).slice(0, KIND_CAP)) {
+    for (const f of lastSeenBy.values()) {
       const c = contacts.get(f.contactId);
-      if (!c) continue;
-      items.push({
-        kind: 'fading', action: 'briefing', contactId: f.contactId, contactName: c.name, relation: c.relation,
-        label: '疏远', date: f.lastDate, days: f.days,
-        text: `${f.days} 天没有有记录的互动`,
-      });
+      if (!c || f.days < 90) continue;
+      items.push({ kind: 'fading', action: 'briefing', contactId: c.id, contactName: c.name, relation: c.relation,
+        label: '久未联系', date: f.lastDate, days: f.days, text: `${f.days} 天没有有记录的互动` });
     }
-    // ③ 待跟进承诺：已确认未取代的 promise 全量，按逾期天数降序取前 KIND_CAP
-    const promises = store.listMemories({ type: 'promise', status: 'confirmed' })
-      .filter((m) => !m.supersededBy && contacts.has(m.contactId))
-      .map((m) => ({ m, d: daysSince(m.date) ?? daysSince((m.createdAt || '').slice(0, 10)) ?? 0 }))
-      .sort((a, b) => b.d - a.d).slice(0, KIND_CAP);
-    for (const { m, d } of promises) {
-      const c = contacts.get(m.contactId);
-      items.push({
-        kind: 'promise', action: 'briefing', contactId: m.contactId, contactName: c.name, relation: c.relation,
-        label: '待跟进', date: m.date || (m.createdAt || '').slice(0, 10), days: d,
-        text: `答应过的事还没跟进：${m.content}`,
-      });
+    for (const memory of confirmed.filter((m) => m.type === 'promise')) {
+      const c = contacts.get(memory.contactId);
+      const date = memory.date || (memory.createdAt || '').slice(0, 10);
+      items.push({ kind: 'promise', action: 'briefing', contactId: c.id, contactName: c.name, relation: c.relation,
+        label: '待跟进', date, days: daysSince(date), text: `曾答应：${memory.content}（暂无跟进记录）` });
     }
-    // ④ 回礼待回应：按收礼时间降序取前 KIND_CAP
-    const recip = store.giftReciprocity().filter((r) => contacts.has(r.contactId))
-      .map((r) => ({ r, d: daysSince(r.date) ?? 0 })).sort((a, b) => b.d - a.d).slice(0, KIND_CAP);
-    for (const { r, d } of recip) {
+    for (const r of store.giftReciprocity()) {
       const c = contacts.get(r.contactId);
-      items.push({
-        kind: 'reciprocity', action: 'gift', contactId: r.contactId, contactName: c.name, relation: c.relation,
-        label: '回礼', date: r.date, days: d, hasActivePlan: r.hasActivePlan,
-        text: `TA 送过「${r.content}」还没回礼${r.hasActivePlan ? '（已有礼物计划）' : ''}`,
-      });
+      if (!c) continue;
+      items.push({ kind: 'reciprocity', action: 'gift', contactId: c.id, contactName: c.name, relation: c.relation,
+        label: '回礼', occasion: '答谢', date: r.date, days: daysSince(r.date), text: `TA 送过「${r.content}」，暂无回礼记录` });
     }
-    // 行内上下文：为什么是这个人（相处注意/同场合历史/送礼历史/已有计划/上次互动）。
-    // 纯派生零 AI：行上只放真实记忆引用，「怎么避开重复、出什么主意」留给点击后的 AI 会话现场判断。
-    const lastSeenBy = new Map(store.fadingContacts(1).map((f) => [f.contactId, f]));
-    const givenBy = new Map(); // 每人最近一次送出（giftLedger.given 已按日期降序）
-    for (const g of store.giftLedger().given) if (!givenBy.has(g.contactId)) givenBy.set(g.contactId, g);
-    const plansBy = new Map(); // 每人进行中的计划（未送出）
-    for (const p of store.listPlans()) {
-      if (p.status === 'sent') continue;
-      if (!plansBy.has(p.contactId)) plansBy.set(p.contactId, []);
-      plansBy.get(p.contactId).push({ id: p.id, idea: p.idea, status: p.status, occasion: p.occasion || '' });
-    }
-    const byDateDesc = (a, b) => (b.date || b.createdAt || '').localeCompare(a.date || a.createdAt || '');
-    for (const item of items) {
-      const f = lastSeenBy.get(item.contactId);
-      item.lastSeen = f ? { date: f.lastDate, days: f.days } : null;
-      const confirmed = store.listMemories({ contactId: item.contactId, status: 'confirmed' }).filter((m) => !m.supersededBy);
-      const evidence = [];
-      const cautions = confirmed.filter((m) => m.type === 'taboo' || m.type === 'dislike');
-      if (cautions.length) evidence.push({ kind: 'caution', text: `相处注意：${cautions.map((m) => m.content).join('；')}` });
-      if (item.kind === 'occasion') {
-        const sameOccasion = confirmed.filter((m) => item.occasion && m.occasion === String(item.occasion).toLowerCase());
-        const past = sameOccasion.find((m) => m.direction === 'user_to_contact' || m.direction === 'both') || sameOccasion[0];
-        if (past) evidence.push({ kind: 'history', text: `${past.date ? `${past.date}：` : ''}${past.content}` });
-      }
-      if (item.kind === 'fading') {
-        const last = [...confirmed].sort(byDateDesc)[0];
-        if (last) evidence.push({ kind: 'last', text: `上次互动${last.date ? `（${last.date}）` : ''}：${last.content}` });
-      }
-      if (item.kind === 'occasion' || item.kind === 'reciprocity') {
-        const given = givenBy.get(item.contactId);
-        if (given) evidence.push({ kind: 'gift', text: `上次送过：${given.content}${given.date ? `（${given.date}）` : ''}` });
-      }
-      item.evidence = evidence;
-      if (item.action === 'gift') {
-        const ps = plansBy.get(item.contactId) || [];
-        item.plans = ps.slice(0, 3);
-        item.plansTotal = ps.length;
-      }
-    }
-    items.sort((a, b) => (a.days ?? Infinity) - (b.days ?? Infinity));
-    ok(res, { items: items.slice(0, limit), days });
+    items.sort((a, b) => b.days - a.days);
+    const holidays = store.upcomingHolidays(Math.min(days, 14));
+    const covered = new Set(occasionGroups.map((g) => g.id));
+    ok(res, { items, occasionGroups, days, holidays, opportunities: holidays.filter((h) => !covered.has(`${h.occasion}|${h.date}`)) });
     return true;
   }
   // 最近记住了：已确认记忆按确认时间倒序取前 N 条（确认闸门之后才进这里，pending 不出现）。
@@ -538,13 +561,16 @@ async function api(req, res, url, body) {
         return `- [${label}${dir}] ${m.content}`;
       });
       const budget = String(body.budget ?? '').trim();
-      const occasion = String(body.occasion ?? '').trim();
-      // 触发时机的日期（首页关注行传入）：AI 建卡必须沿用，防止日期漂移繁殖出重复提醒行
-      const occasionDate = String(body.occasionDate ?? '').trim();
       const plan = body.planId ? store.listPlans().find((p) => p.id === String(body.planId)) : null;
-      // prompt 由提示词注册表组装（纪律唯一出处）
+      if (body.planId && (!plan || plan.contactId !== c.id)) throw store.httpError(404, '该联系人的计划不存在');
+      const occasion = occasionLabel(plan?.occasion || String(body.occasion ?? '').trim());
+      const occasionDate = plan?.occasionDate || String(body.occasionDate ?? '').trim();
+      // prompt 由提示词注册表组装（纪律唯一出处）；标签/生日必带——
+      // 零记忆的联系人（只有职业/身份标签）也要让 AI 有背景可依据
       const prompt = FLOWS.giftSuggest.build({
-        contactName: c.name, relation: c.relation, occasion, occasionDate, budget, plan, lines,
+        contactName: c.name, relation: c.relation,
+        tags: (c.tags || []).join(' / '), birthday: c.birthday || '',
+        occasion, occasionDate, budget, plan, lines,
       });
       ok(res, { prompt, evidenceCount: evidences.length });
     } catch (e) { failFrom(res, e); }
@@ -559,7 +585,8 @@ async function api(req, res, url, body) {
       const label = (m) => ({ preference: '喜好', dislike: '不喜好', taboo: '禁忌', gift: '送过/收过', event: '事件', interaction: '往来', attribute: '基础', promise: '承诺' }[m.type] || m.type);
       const dirOf = (m) => (m.direction === 'contact_to_user' ? '（TA对我）' : m.direction === 'user_to_contact' ? '（我对TA）' : '');
       const line = (m) => `- [${label(m)}${dirOf(m)}] ${m.content}${m.date ? `（${m.date}）` : ''}`;
-      const prompt = FLOWS.meetupBriefing.build({
+      const focus = String(body.occasion ?? '').trim().slice(0, 80);
+      const prompt = (focus ? `这次想围绕「${focus}」联系对方，请给自然的问候或开场话题，不默认需要送礼。\n` : '') + FLOWS.meetupBriefing.build({
         contactName: c.name, relation: c.relation,
         tags: (c.tags || []).join(' / '), birthday: c.birthday || '',
         lastSeen: f.lastSeen,
@@ -570,23 +597,17 @@ async function api(req, res, url, body) {
     } catch (e) { failFrom(res, e); }
     return true;
   }
-  // 空库首价值：名字+场景建联系人（用户主动建 → confirmed；同名复用不建重），返回先问后给的引导 prompt
   if (p === '/api/first-run' && m('POST')) {
     try {
       const name = String(body.name ?? '').trim().slice(0, 40);
       if (!name) throw store.httpError(400, '名字不能为空');
-      const SCENARIOS = {
-        say: '不知道该怎么开口（要发消息/见面想好说什么）',
-        gift: '不知道送什么（要选礼物）',
-        reconnect: '想重新联系（很久没联系了）',
-      };
       const scenario = String(body.scenario ?? '');
-      if (!SCENARIOS[scenario]) throw store.httpError(400, '未知场景');
+      if (!['say', 'gift', 'reconnect'].includes(scenario)) throw store.httpError(400, '未知场景');
       const note = String(body.note ?? '').trim().slice(0, 300);
       // 先查后建：用户忘了已建过时直接复用既有联系人
       const existing = store.listContacts({ includeArchived: false }).find((c) => c.name === name);
       const c = existing || store.createContact({ name });
-      const prompt = FLOWS.firstRun.build({ contactName: c.name, scenario: SCENARIOS[scenario], note });
+      const prompt = FLOWS.firstRun.build({ contactId: c.id, contactName: c.name, scenario, note });
       ok(res, { prompt, contactId: c.id, created: !existing });
     } catch (e) { failFrom(res, e); }
     return true;
@@ -595,7 +616,7 @@ async function api(req, res, url, body) {
   // ---------- 素材 ----------
   if (p === '/api/materials' && m('GET')) {
     const status = url.searchParams.get('status') || undefined;
-    const mts = store.listMaterials({ status }).slice(0, 30);
+    const mts = store.listMaterials({ status });
     // 批量化：一次取全量记忆/联系人，按 sourceId/contactId 分组映射——
     // 不再逐素材各调 materialMemories/getContact（原实现 30 素材 ≈ 60+ 次 spawn）
     const allMemories = store.listMemories({});
@@ -608,11 +629,19 @@ async function api(req, res, url, body) {
     const contactName = new Map(store.listContacts({ includeArchived: true, includePending: true }).map((c) => [c.id, c.name]));
     const reports = store.allMaterialReports();
     const questions = store.allOrganizeQuestions();
+    const extraContacts = store.allMaterialContacts();
+    const idsOf = (mt) => {
+      const v = Array.isArray(extraContacts[mt.id]) ? extraContacts[mt.id] : null;
+      if (v && v.length) return v;
+      return mt.contactId ? [mt.contactId] : [];
+    };
     const materials = mts.map((mt) => ({
       id: mt.id,
       status: store.materialStatus(mt),
       contactId: mt.contactId,
-      contactName: contactName.get(mt.contactId) || '',
+      // 多人素材：涉及人列表优先侧车登记（material-contacts.js），顿号名展示
+      contactIds: idsOf(mt),
+      contactName: idsOf(mt).map((x) => contactName.get(x) || '').filter(Boolean).join('、'),
       occasion: mt.occasion || '',
       excerpt: mt.excerpt,
       capturedAt: mt.capturedAt,
@@ -655,7 +684,7 @@ async function api(req, res, url, body) {
   }
   if (p === '/api/materials' && m('POST')) {
     try {
-      const mt = store.saveMaterial({ text: body.text, contactId: body.contactId ? String(body.contactId) : '', occasion: body.occasion });
+      const mt = store.saveMaterial({ text: body.text, contactId: body.contactId ? String(body.contactId) : '', contactIds: Array.isArray(body.contactIds) ? body.contactIds : undefined, occasion: body.occasion });
       broadcast('material.changed', { action: 'created', materialId: mt.id });
       ok(res, { material: { id: mt.id, excerpt: mt.excerpt, contactId: mt.contactId, occasion: mt.occasion } });
     } catch (e) { failFrom(res, e); }

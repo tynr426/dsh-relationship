@@ -106,8 +106,11 @@ test('计划/输入校验在外网调用前完成，已送计划不可搜或选'
   for (const action of ['search', 'select']) {
     assert.equal((await request(`/api/plans/missing/jd/${action}`, { keyword: '杯', itemId: '123' })).status, 404);
   }
-  store.updatePlan(plan.id, { status: 'sent' });
-  for (const action of ['search', 'select']) assert.equal((await request(`/api/plans/${plan.id}/jd/${action}`, { keyword: '杯', itemId: '123' })).status, 400);
+  for (const status of ['sent', 'done']) {
+    const terminal = newPlan();
+    store.updatePlan(terminal.id, { status });
+    for (const action of ['search', 'select']) assert.equal((await request(`/api/plans/${terminal.id}/jd/${action}`, { keyword: '杯', itemId: '123' })).status, 400);
+  }
   assert.deepEqual(calls(), []);
 });
 
@@ -141,8 +144,8 @@ test('select 只信任 Rust 商品字段，关联原 AI 计划并广播，保留
   } finally { controller.abort(); await reader.cancel().catch(() => {}); }
 });
 
-test('JD 异步调用不阻塞 API，等待期间已送/删除的计划不再关联', async () => {
-  for (const action of ['sent', 'delete']) {
+test('JD 异步调用不阻塞 API，等待期间已送/完成/删除的计划不再关联', async () => {
+  for (const action of ['sent', 'done', 'delete']) {
     const plan = newPlan();
     fixture({ reply: { ok: true, product }, delay: 300 });
     const invoked = nextCall();
@@ -151,9 +154,9 @@ test('JD 异步调用不阻塞 API，等待期间已送/删除的计划不再关
     await invoked;
     assert.equal((await request('/api/info', undefined, 'GET')).status, 200);
     assert.equal(finished, false);
-    if (action === 'sent') store.updatePlan(plan.id, { status: 'sent' }); else store.deletePlan(plan.id);
+    if (action === 'delete') store.deletePlan(plan.id); else store.updatePlan(plan.id, { status: action });
     const result = await pending;
-    assert.equal(result.status, action === 'sent' ? 400 : 404);
+    assert.equal(result.status, action === 'delete' ? 404 : 400);
     assert.equal(store.getPlan(plan.id)?.productUrl || '', '');
   }
 });

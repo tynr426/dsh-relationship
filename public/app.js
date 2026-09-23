@@ -20,6 +20,10 @@
     overview: { counts: {}, pending: [], upcoming: [] },
     materials: [],
     attention: [],
+    occasionGroups: [],
+    disclosures: new Map(),
+    holidays: [],
+    opportunities: [],
     recent: [],
     firstScenario: 'say',
     activeContactId: null,
@@ -37,9 +41,13 @@
     plans: [],
     gift: { occasions: [], reciprocity: [], given: [], received: [] },
     editingPlanId: null,
+    editingContactId: null,
     suggestContactId: null,
     suggestPlanId: null,
     relationTypes: [],
+    // 「AI 正在想」等待键（如 brief:c1 / gift:c1 / att:gift:c1）：存 state 而非 DOM，
+    // SSE 重渲染换新节点也不丢等待态；askHostAi 收尾时清除
+    aiWaiting: new Set(),
   };
 
   const DSH_SESSION_KEY = 'rel.dshSessionId';
@@ -54,7 +62,8 @@
   function initial(name) { return (String(name || '?').trim()[0] || '?').toUpperCase(); }
   const DIRECTION_CN = { user_to_contact: '我→TA', contact_to_user: 'TA→我', both: '双向' };
   function directionLabel(d) { return DIRECTION_CN[d] || ''; }
-  const PLAN_STATUS_CN = { idea: '想法', decided: '已定', sent: '已送' };
+  const PLAN_STATUS_CN = { idea: '想法', decided: '已定', sent: '已送出礼物', done: '已完成' };
+  const activePlan = (p) => !['sent', 'done'].includes(p.status);
   function relativeDays(n) {
     if (n === 0) return '今天';
     if (n === 1) return '明天';
@@ -75,11 +84,36 @@
   // 下经常拿不回来（弹窗能弹、点击结果不回传，confirm() 返回 falsy 导致删除静默失效），
   // 一律改用 DOM 对话框。
   let dialogResolver = null;
+  let dialogTrigger = null;
+  let modalTrigger = null;
+  function topModal() {
+    return $('#rel-dialog') || $('#modal-backdrop:not(.hidden)');
+  }
+  function focusableIn(root) {
+    return $$('button, input, select, textarea, a[href], summary, [tabindex]', root)
+      .filter((el) => !el.disabled && el.tabIndex >= 0 && el.getClientRects().length && !el.closest('[inert]'));
+  }
+  function syncModalBackground() {
+    const dialog = $('#rel-dialog');
+    const open = Boolean(topModal());
+    $('#topbar').inert = open;
+    $('#app-shell').inert = open;
+    $('#modal-backdrop').inert = Boolean(dialog);
+  }
+  function restoreFocus(trigger) {
+    const root = topModal();
+    const target = trigger?.isConnected && trigger.getClientRects().length && !trigger.closest('[inert]')
+      ? trigger : (root ? focusableIn(root)[0] : $('.nav-item.active'));
+    target?.focus({ preventScroll: true });
+  }
   function closeDialog(value) {
     const bd = $('#rel-dialog');
     if (!bd) return;
     bd.remove();
     const r = dialogResolver; dialogResolver = null;
+    syncModalBackground();
+    restoreFocus(dialogTrigger);
+    dialogTrigger = null;
     if (r) r(value);
   }
   // confirmDialog(msg) → Promise<boolean>；promptDialog(msg, placeholder) → Promise<string|null>
@@ -87,6 +121,7 @@
     return new Promise((resolve) => {
       closeDialog(null); // 顺带清掉残留对话框
       dialogResolver = resolve;
+      dialogTrigger = document.activeElement;
       const bd = document.createElement('div');
       bd.id = 'rel-dialog';
       bd.className = 'modal-backdrop';
@@ -100,16 +135,18 @@
           </div>
         </div></div>`;
       document.body.appendChild(bd);
+      syncModalBackground();
       $('#rel-dialog-cancel').onclick = () => closeDialog(false);
       $('#rel-dialog-ok').onclick = () => closeDialog(true);
       bd.addEventListener('mousedown', (e) => { if (e.target === bd) closeDialog(false); });
-      $('#rel-dialog-ok').focus();
+      $(danger ? '#rel-dialog-cancel' : '#rel-dialog-ok').focus();
     });
   }
   function promptDialog(msg, placeholder = '') {
     return new Promise((resolve) => {
       closeDialog(null);
       dialogResolver = resolve;
+      dialogTrigger = document.activeElement;
       const bd = document.createElement('div');
       bd.id = 'rel-dialog';
       bd.className = 'modal-backdrop';
@@ -124,6 +161,7 @@
           </div>
         </div></div>`;
       document.body.appendChild(bd);
+      syncModalBackground();
       const input = $('#rel-dialog-input');
       $('#rel-dialog-cancel').onclick = () => closeDialog(null);
       $('#rel-dialog-ok').onclick = () => closeDialog(input.value.trim() || null);
@@ -142,7 +180,11 @@
       body: opts.body ? JSON.stringify(opts.body) : undefined,
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok || data.ok === false) throw new Error(data.error || `请求失败（${res.status}）`);
+    if (!res.ok || data.ok === false) {
+      const err = new Error(data.error || `请求失败（${res.status}）`);
+      err.status = res.status;
+      throw err;
+    }
     return data;
   }
 
@@ -240,6 +282,91 @@
     toast('已交给 AI 整理，完成后回工作台确认', false);
   }
 
+  /** 从 DSH 会话事件的内容块数组提取纯文本（同 dsh-qa contentText）。 */
+  function contentText(content) {
+    return (Array.isArray(content) ? content : []).filter((b) => b?.type === 'text').map((b) => b.text || '').join('\n').trim();
+  }
+
+  /** 通过 WebSocket 获取 DSH 会话快照（session/follow，同 dsh-qa），用于读 AI 回复。 */
+  function dshFollowSnapshot(sessionId, maxMessages = 30) {
+    const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const streamId = globalThis.crypto?.randomUUID?.() || `rel-follow-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    return new Promise((resolve, reject) => {
+      const socket = new WebSocket(`${scheme}//${location.host}/api/remote.mux`);
+      let settled = false;
+      const finish = (fn, value) => {
+        if (settled) return;
+        settled = true;
+        try { socket.close(); } catch { /* ignore */ }
+        fn(value);
+      };
+      const timer = setTimeout(() => finish(reject, new Error('DSH 会话快照超时')), 10000);
+      socket.addEventListener('open', () => socket.send(JSON.stringify({
+        type: 'open', streamId, endpoint: 'session/follow',
+        payload: { args: { request: { address: { kind: 'session', sessionId }, maxMessages } } },
+      })));
+      socket.addEventListener('message', (event) => {
+        let frame;
+        try { frame = JSON.parse(event.data); } catch { return; }
+        if (frame.streamId !== streamId) return;
+        if (frame.type === 'item' && frame.value?.type === 'snapshot') {
+          clearTimeout(timer); finish(resolve, frame.value); return;
+        }
+        if (frame.type === 'error') { clearTimeout(timer); finish(reject, new Error(frame.error?.message || 'DSH 会话快照失败')); }
+      });
+      socket.addEventListener('error', () => { clearTimeout(timer); finish(reject, new Error('DSH 会话 WebSocket 连接失败')); });
+      socket.addEventListener('close', () => { if (!settled) { clearTimeout(timer); finish(reject, new Error('DSH 会话 WebSocket 已关闭')); } });
+    });
+  }
+
+  /**
+   * 嵌入模式：把 prompt 交给宿主 AI 并轮询会话快照，等新 AI 回复就地弹层展示——
+   * 解决「发完指令要手动切去 DSH 会话看结果」的动线断裂。
+   * 等待态走 state.aiWaiting（SSE 重渲染不丢）；成功弹层并 refresh（AI 建的卡落到工作台），
+   * 超时回退提示去会话看。
+   */
+  async function askHostAi(prompt, { title, waitingKey } = {}) {
+    if (waitingKey) {
+      if (state.aiWaiting.has(waitingKey)) { toast('AI 正在想，稍候…'); return; }
+      state.aiWaiting.add(waitingKey);
+      render();
+    }
+    try {
+      const sessionId = await ensureDshSession();
+      // 基线：发出前会话里最大的事件序号，之后只认 seq 更大的 AI 回复（不误收历史消息）
+      let baseSeq = 0;
+      try {
+        const base = await dshFollowSnapshot(sessionId, 1);
+        baseSeq = Math.max(0, ...(base.records || []).map((r) => r?.event?.seq ?? 0));
+      } catch { /* 基线快照失败也能继续：退化为「会话里出现新 AI 回复即展示」 */ }
+      await sendToSession(prompt);
+      const deadline = Date.now() + 90000;
+      for (;;) {
+        if (Date.now() > deadline) { toast('AI 还在生成，稍后到 DSH 会话里看结果'); return; }
+        await new Promise((r) => setTimeout(r, 2500));
+        try {
+          const snap = await dshFollowSnapshot(sessionId, 12);
+          const fresh = (snap.records || [])
+            .filter((r) => r?.event?.type === 'assistant/message' && (r.event.seq ?? 0) > baseSeq)
+            .map((r) => contentText(r.event.data?.message?.content))
+            .filter(Boolean);
+          if (fresh.length) { showAiResult(title, fresh.join('\n\n')); return; }
+        } catch { /* 轮询中单次快照失败忽略，等下一轮 */ }
+      }
+    } finally {
+      if (waitingKey) state.aiWaiting.delete(waitingKey);
+      render();
+      refresh().catch(() => {});
+    }
+  }
+
+  /** 弹层展示 AI 回复正文（textContent 防注入，换行样式由 CSS pre-wrap 保留）。 */
+  function showAiResult(title, text) {
+    $('#airesult-title').textContent = title || 'AI 建议';
+    $('#airesult-body').textContent = text || '（AI 没有给出文字回复，可到 DSH 会话查看）';
+    openModal('airesult');
+  }
+
   // ---------- 数据刷新 ----------
   let refreshTimer = null;
   function scheduleRefresh() {
@@ -259,7 +386,10 @@
       state.overview = overview;
       state.contacts = contacts.contacts;
       state.materials = materials.materials;
-      state.attention = attention ? (attention.items || []) : [];
+      state.attention = attention === null ? null : (attention.items || []);
+      state.occasionGroups = attention?.occasionGroups || [];
+      state.holidays = attention === null ? [] : (attention.holidays || []);
+      state.opportunities = attention === null ? [] : (attention.opportunities || []);
       state.recent = recent ? (recent.items || []) : [];
       state.relationTypes = relations.relationTypes || [];
       if (gifts) {
@@ -280,15 +410,26 @@
         if (!stillThere) state.activeContactId = null;
       }
       if (state.activeContactId) {
+        const contactId = state.activeContactId;
         try {
-          state.timeline = await api(`/api/contacts/${state.activeContactId}/timeline`);
-          if (state.memorySearchQuery.trim()) {
-            const r = await api(`/api/contacts/${state.activeContactId}/memory-search?q=${encodeURIComponent(state.memorySearchQuery.trim())}`);
-            state.memorySearchResults = r.memories || [];
-            state.memorySearchLoading = false;
+          const timeline = await api(`/api/contacts/${contactId}/timeline`);
+          if (state.activeContactId === contactId) state.timeline = timeline;
+          const query = state.memorySearchQuery.trim();
+          if (query && state.activeContactId === contactId) {
+            const seq = memorySearchSeq;
+            const r = await api(`/api/contacts/${contactId}/memory-search?q=${encodeURIComponent(query)}`);
+            if (state.activeContactId === contactId && memorySearchSeq === seq && state.memorySearchQuery.trim() === query) {
+              state.memorySearchResults = r.memories || [];
+              state.memorySearchLoading = false;
+            }
           }
         }
-        catch { state.timeline = { contact: null, memories: [] }; state.activeContactId = null; }
+        catch (e) {
+          if (state.activeContactId === contactId) {
+            state.timeline = { contact: null, memories: [] };
+            if (e && e.status === 404) state.activeContactId = null;
+          }
+        }
       } else {
         state.timeline = { contact: null, memories: [] };
         state.memorySearchQuery = '';
@@ -309,11 +450,56 @@
   }
 
   // ---------- 渲染 ----------
+  function disclosureAttrs(key, defaultOpen = false) {
+    const open = state.disclosures.get(key) ?? defaultOpen;
+    return `data-disclosure="${esc(key)}"${open ? ' open' : ''}`;
+  }
+
   function render() {
+    $$('details[data-disclosure]').forEach((el) => state.disclosures.set(el.dataset.disclosure, el.open));
+    // 保存全部在编字段，而非仅焦点所在的文本框；弹窗不参与重建。
+    const active = document.activeElement;
+    const focusedDisclosure = active?.matches('summary') ? active.parentElement.dataset.disclosure : null;
+    const contactFocus = active?.closest('#view-contacts') ? {
+      id: active.id, action: active.dataset.action, contactId: active.dataset.id,
+      row: active.matches('.contact-row'),
+    } : null;
+    const drafts = $$('.pending-card, .memory-row')
+      .filter((el) => el.dataset.id === state.editingPendingId || el.dataset.id === state.editingMemoryId)
+      .map((el) => ({
+        id: el.dataset.id,
+        fields: $$('textarea[data-role], input[data-role], select[data-role]', el).map((field) => ({
+          role: field.dataset.role, value: field.value, focused: field === active,
+          s0: field.selectionStart, s1: field.selectionEnd,
+        })),
+      }));
     renderNav();
     if (state.view === 'home') renderHome();
     else if (state.view === 'gifts') renderGifts();
     else renderContacts();
+    for (const draft of drafts) {
+      const card = $$('.pending-card, .memory-row').find((el) => el.dataset.id === draft.id);
+      if (!card) continue;
+      for (const saved of draft.fields) {
+        const again = $(`[data-role="${saved.role}"]`, card);
+        if (!again) continue;
+        again.value = saved.value;
+        if (saved.focused) {
+          again.focus({ preventScroll: true });
+          try { again.setSelectionRange(saved.s0, saved.s1); } catch { /* select 无光标 */ }
+        }
+      }
+    }
+    if (contactFocus && !active.isConnected && state.view === 'contacts') {
+      const target = contactFocus.id ? document.getElementById(contactFocus.id)
+        : $$('#view-contacts button').find((el) => el.dataset.id === contactFocus.contactId
+          && (contactFocus.row ? el.matches('.contact-row') : el.dataset.action === contactFocus.action));
+      target?.focus({ preventScroll: true });
+    }
+    if (focusedDisclosure) {
+      const details = $$('details[data-disclosure]').find((el) => el.dataset.disclosure === focusedDisclosure);
+      if (details) $('summary', details)?.focus({ preventScroll: true });
+    }
     markStatus(true);
   }
 
@@ -334,15 +520,20 @@
     const c = state.overview.counts;
     const pendingTotal = (c.pending || 0) + (c.pendingContacts || 0);
 
-    // 行动型首页：头部副标动态回答「今天有几件事」，系统状态只占一句话
     const attentionCount = (state.attention || []).length;
+    const groupCount = state.occasionGroups.length;
+    const materialStates = state.materials.map(materialState);
+    const rawCount = materialStates.filter((m) => m.raw).length;
+    const incompleteCount = materialStates.filter((m) => m.incomplete).length;
     const subParts = [];
-    if (attentionCount) subParts.push(attentionCount === 1 ? '有 1 个关系值得关注' : `有 ${attentionCount} 个关系值得关注`);
-    if (pendingTotal) subParts.push(pendingTotal === 1 ? '1 条待确认' : `${pendingTotal} 条待确认`);
-    else subParts.push('记忆整理已就绪');
-    $('#home-sub').textContent = subParts.join(' · ');
+    if (pendingTotal) subParts.push(`${pendingTotal} 条待确认`);
+    if (attentionCount) subParts.push(`${attentionCount} 件记录可回顾`);
+    if (groupCount) subParts.push(`${groupCount} 组安排与时机`);
+    if (rawCount) subParts.push(`${rawCount} 份素材待整理`);
+    if (incompleteCount) subParts.push(`${incompleteCount} 份整理未完成`);
+    $('#home-sub').textContent = subParts.join(' · ') || '从一个人、一件小事开始';
 
-    $('#onboarding').classList.toggle('hidden', (c.contacts || 0) > 0);
+    $('#onboarding').classList.toggle('hidden', (c.confirmed || 0) > 0 || state.materials.length > 0 || pendingTotal > 0);
     // 待确认队列动态权重：空态折叠（状态并入头部副标），有待确认才展开——确认闸门仍是最重要行动
     $('#pending-panel').classList.toggle('hidden', pendingTotal === 0);
 
@@ -449,45 +640,193 @@
       </div>`).join('');
   }
 
-  // 值得关注 feed：四类派生（时机/疏远/待跟进/回礼）的卡片流——人 × 为什么 × 已有计划 × 动作。
-  // 行上放派生事实（记忆引用/送礼历史/计划），「怎么避开重复、出什么主意」留给点击后的 AI 会话现场判断。
+  function findPlan(id) {
+    if (!id) return undefined;
+    for (const group of state.occasionGroups) {
+      for (const person of group.people) {
+        const plan = [...(person.plans || []), ...(person.aiIdeas || [])].find((p) => p.id === id);
+        if (plan) return plan;
+      }
+    }
+    return state.plans.find((p) => p.id === id);
+  }
+
+  function attentionAiButton(a, kind, label, occasion = '', date = '') {
+    const key = `att:${kind}:${a.contactId}:${occasion}:${date}`;
+    const waiting = state.aiWaiting.has(key);
+    return `<button type="button" class="primary-btn attention-ai" data-action="attention-ai" data-kind="${kind}" data-label="${esc(label)}" data-waiting-key="${esc(key)}" data-id="${esc(a.contactId)}" data-occasion="${esc(occasion)}" data-date="${esc(date)}"${waiting ? ' disabled' : ''}>${waiting ? 'AI 正在想…' : label}</button>`;
+  }
+
+  function attentionPlanStatus(p) {
+    if (p.status === 'decided' && !p.occasionDate) return '想法已定 · 日期未定';
+    return PLAN_STATUS_CN[p.status] || '想法';
+  }
+
+  function attentionPlan(p, contactId, ai = false) {
+    return `<div class="att-plan" data-plan="${esc(p.id)}">
+      <div class="att-plan-meta">
+        <span class="badge type">${esc(attentionPlanStatus(p))}</span>
+        ${ai ? '<span class="badge">AI 主意 · 未采纳</span>' : (p.source === 'ai' ? '<span class="badge">来自 AI</span>' : '')}
+        <span>${p.occasionDate ? esc(fmtDate(p.occasionDate)) : '日期未定'}</span>${planBaseBadge(p)}
+      </div>
+      <p class="att-plan-idea">${esc(p.idea)}</p>
+      ${p.budget ? `<p class="att-sub">预算 ${esc(p.budget)}</p>` : ''}
+      ${planProductLine(p)}
+      <div class="att-actions">
+        <button type="button" class="ghost-btn" data-action="plan-edit" data-id="${esc(p.id)}" data-plan="${esc(p.id)}" data-occasion="${esc(p.occasion || '')}">编辑计划</button>
+        <button type="button" class="ghost-btn" data-action="suggest-open" data-id="${esc(contactId)}" data-plan="${esc(p.id)}" data-occasion="${esc(p.occasion || '')}" data-date="${esc(p.occasionDate || '')}">送礼主意（可选）</button>
+      </div>
+    </div>`;
+  }
+
+  /** 场景化按钮文案：同一次 AI 简报，按时机/关系说人话——用户一看就知道能帮到哪一步 */
+  function briefingLabel(a) {
+    const occ = String(a.occasion || '');
+    if (['teacher_day', 'mother_day', 'father_day', 'birthday'].includes(occ)) return '帮我写祝福';
+    if (a.relation === 'client' || a.relation === 'partner') return '想怎么联系';
+    return '想个问候';
+  }
+
+  function attentionPerson(a, group) {
+    const plans = a.plans || [];
+    const ideas = a.aiIdeas || [];
+    const firstPlan = plans.find((p) => p.status === 'decided') || plans[0];
+    const evidence = a.evidence || [];
+    const cautions = evidence.filter((e) => ['caution', 'taboo', 'dislike'].includes(e.kind));
+    const history = evidence.filter((e) => !cautions.includes(e));
+    const key = `occasion-person:${group.id}:${a.contactId}`;
+    const hasDetails = plans.length || ideas.length || history.length || a.lastSeen;
+    const primary = firstPlan
+      ? `<button type="button" class="primary-btn" data-action="plan-edit" data-id="${esc(firstPlan.id)}" data-plan="${esc(firstPlan.id)}" data-occasion="${esc(firstPlan.occasion || '')}" data-date="${esc(firstPlan.occasionDate || '')}">继续计划</button>`
+      : ideas.length
+        ? `<button type="button" class="primary-btn" data-action="attention-ideas" aria-expanded="${state.disclosures.get(key) || false}">查看AI主意</button>`
+        : attentionAiButton(a, 'briefing', briefingLabel(a), a.occasion || '', a.date || '');
+    return `<article class="attention-card" data-id="${esc(a.contactId)}">
+      <div class="att-top"><b class="att-what">${esc(a.contactName)}</b><span class="badge">${relationCn(a.relation)}</span>${a.lastSeen && Number.isFinite(a.lastSeen.days) ? `<span class="badge date">上次互动 ${a.lastSeen.days} 天前</span>` : ''}</div>
+      <p class="att-reason">${esc(!firstPlan && !ideas.length && a.source === 'birthday' ? '你记下的生日临近，可选是否联系' : a.reason)}</p>
+      ${!firstPlan && !ideas.length && history.some((e) => e.kind === 'history') ? `<p class="att-sub">${esc(history.find((e) => e.kind === 'history').text)}</p>` : ''}
+      ${!a.date ? '<p class="att-sub">日期未定，不代表本次已有安排</p>' : ''}
+      ${firstPlan ? `<p class="att-plan-summary"><b>我的计划${firstPlan.status === 'decided' ? ` · ${esc(attentionPlanStatus(firstPlan))}` : ''}</b><span>${esc(firstPlan.idea)}</span></p>` : ''}
+      ${ideas.length ? `<p class="att-plan-summary"><b>AI 主意 · 未采纳</b><span>${esc(ideas[0].idea)}</span></p>` : ''}
+      ${cautions.length ? `<div class="att-why">${cautions.map((e) => `<p class="caution">${esc(e.text)}</p>`).join('')}</div>` : ''}
+      <div class="att-actions">
+        ${primary}
+        <button type="button" class="ghost-btn" data-action="plan-open" data-contact="${esc(a.contactId)}" data-occasion="${esc(a.occasion || '')}" data-date="${esc(a.date || '')}">记个计划</button>
+        <button type="button" class="ghost-btn" data-action="view-contact" data-id="${esc(a.contactId)}">查看关系</button>
+      </div>
+      ${hasDetails ? `<details class="home-disclosure att-details" ${disclosureAttrs(key)}>
+        <summary>计划与关系依据${plans.length || ideas.length ? ` · ${plans.length} 个计划 / ${ideas.length} 个 AI 主意` : ''}</summary>
+        <div class="att-detail-body">
+          ${plans.length ? `<h4>我的计划</h4>${plans.map((p) => attentionPlan(p, a.contactId)).join('')}` : ''}
+          ${ideas.length ? `<h4>AI 主意（未采纳）</h4>${ideas.map((p) => attentionPlan(p, a.contactId, true)).join('')}` : ''}
+          ${history.length ? `<div class="att-why">${history.map((e) => `<p>${esc(e.text)}</p>`).join('')}</div>` : ''}
+          ${a.lastSeen ? `<p class="att-sub">上次有记录的互动：${esc(fmtDate(a.lastSeen.date))}${Number.isFinite(a.lastSeen.days) ? ` · ${a.lastSeen.days} 天前` : ''}</p>` : ''}
+        </div>
+      </details>` : ''}
+    </article>`;
+  }
+
+  function hasOccasionReason(person) {
+    return person.source === 'birthday' || person.plans.length > 0 || person.aiIdeas.length > 0
+      || person.evidence.some((e) => e.kind === 'history');
+  }
+
+  function attentionGroup(group) {
+    const people = group.people || [];
+    const relevant = people.filter(hasOccasionReason);
+    const ordered = relevant.length ? [...relevant, ...people.filter((p) => !hasOccasionReason(p))] : people;
+    const visibleCount = Math.min(3, relevant.length || people.length);
+    const renderPerson = (a) => attentionPerson(a, group);
+    // 组头派生摘要（零 AI）：用已有事实告诉用户「轻重已分过」，而不是让 5 张同款卡各自为政
+    const recentN = people.filter((p) => p.lastSeen && Number.isFinite(p.lastSeen.days) && p.lastSeen.days <= 30).length;
+    const plannedN = people.filter((p) => (p.plans?.length || 0) + (p.aiIdeas?.length || 0) > 0).length;
+    const summaryParts = [`${people.length} 人`];
+    if (plannedN) summaryParts.push(`${plannedN} 人已有安排或主意`);
+    if (recentN) summaryParts.push(`${recentN} 人近 30 天有互动`);
+    if (relevant.length < people.length) summaryParts.push(`${people.length - relevant.length} 人只是临近时机`);
+    return `<section class="occasion-group" data-group="${esc(group.id)}">
+      <div class="occasion-group-head">
+        <h2>${esc(group.label)} · ${group.date && Number.isFinite(group.days) ? esc(relativeDays(group.days)) : '日期未定'}${group.date ? ` <time datetime="${esc(group.date)}">${esc(fmtDate(group.date))}</time>` : ''}</h2>
+        <span>${summaryParts.join(' · ')}</span>
+      </div>
+      <div class="occasion-people">${ordered.slice(0, visibleCount).map(renderPerson).join('')}</div>
+      ${people.length > visibleCount ? `<details class="home-disclosure people-more" ${disclosureAttrs(`occasion-people:${group.id}`)}>
+        <summary>其余 ${people.length - visibleCount} 人 · 展开选择是否联系</summary>
+        <div class="occasion-people">${ordered.slice(visibleCount).map(renderPerson).join('')}</div>
+      </details>` : ''}
+    </section>`;
+  }
+
+  function attentionFollowup(a) {
+    const label = { fading: '找个话题', promise: '想怎么跟进', reciprocity: '想个回礼' }[a.kind];
+    return `<article class="attention-card followup-card" data-id="${esc(a.contactId)}">
+      <div class="att-top"><b class="att-what">${esc(a.contactName)}</b><span class="badge">${relationCn(a.relation)}</span><span class="badge date">${esc(a.label)}</span></div>
+      <p class="att-reason">${esc(a.text)}</p>
+      ${a.date ? `<p class="att-sub">记录日期 ${esc(fmtDate(a.date))}</p>` : ''}
+      <div class="att-actions">
+        ${attentionAiButton(a, a.kind === 'reciprocity' ? 'gift' : 'briefing', label || '想怎么跟进', a.kind === 'reciprocity' ? 'thank_you' : (a.occasion || ''))}
+        <button type="button" class="ghost-btn" data-action="remember-open" data-id="${esc(a.contactId)}">记下进展</button>
+        <button type="button" class="ghost-btn" data-action="view-contact" data-id="${esc(a.contactId)}">查看关系</button>
+      </div>
+    </article>`;
+  }
+
   function renderAttention() {
     const listEl = $('#attention-list');
-    // 空库冷启动：首价值引导卡是 hero，feed 不占位不出空态噪音
-    if (!state.contacts.length) { listEl.innerHTML = ''; return; }
-    const items = state.attention || [];
-    if (!items.length) {
-      listEl.innerHTML = '<div class="empty">最近没有需要特别留意的关系——时机、承诺、回礼都清着。</div>';
+    const oppEl = $('#opportunity-list');
+    oppEl.innerHTML = '';
+    if (state.attention === null) {
+      listEl.innerHTML = '<div class="empty">值得关注加载失败，稍后刷新重试。</div>';
       return;
     }
-    const KIND_BADGE = {
-      occasion: 'badge occ',
-      fading: 'badge date',
-      promise: 'badge short',
-      reciprocity: 'badge imp3',
-    };
-    listEl.innerHTML = items.map((a) => `
-      <article class="attention-card" data-id="${esc(a.contactId)}" role="button" tabindex="0">
-        <div class="att-top">
-          <span class="badge ${KIND_BADGE[a.kind] || ''}">${esc(a.label)}</span>
-          <span class="att-what">${esc(a.contactName)} · ${esc(a.text)}</span>
-          <span class="att-when">${a.date ? esc(fmtDate(a.date)) : ''}</span>
-        </div>
-        <div class="att-sub">
-          <span>${esc(relationCn(a.relation))}</span>
-          ${a.lastSeen ? `<span>上次互动 ${a.lastSeen.days === 0 ? '今天' : `${a.lastSeen.days} 天前`}</span>` : ''}
-        </div>
-        ${(a.evidence || []).length ? `<div class="att-why">${a.evidence.slice(0, 2).map((e) => {
-          // 安全信息（相处注意）完整醒目，其余截短降噪——细节留给点击后的时间线与 AI 会话
-          const text = e.kind === 'caution' ? e.text : (e.text.length > 48 ? `${e.text.slice(0, 48)}…` : e.text);
-          return `<p class="${e.kind === 'caution' ? 'caution' : ''}">${esc(text)}</p>`;
-        }).join('')}</div>` : ''}
-        ${a.plansTotal ? `<div class="att-plans">已有 ${a.plansTotal} 张计划${a.plans[0] ? `，如「${esc(a.plans[0].idea.length > 22 ? `${a.plans[0].idea.slice(0, 22)}…` : a.plans[0].idea)}」` : ''} · 可让 AI 围绕它们优化，不必另起新卡</div>` : ''}
-        <div class="att-actions">
-          <button class="ghost-btn attention-ai" data-action="attention-ai" data-kind="${esc(a.action)}" data-occasion="${esc(a.occasion || (a.kind === 'reciprocity' ? '回礼' : ''))}" data-date="${esc(a.date || '')}" data-id="${esc(a.contactId)}">${a.action === 'gift' ? 'AI 帮我想送什么' : 'AI 帮我想怎么说'}</button>
-          <button class="ghost-btn" type="button">查看记忆</button>
-        </div>
-      </article>`).join('');
+    if (!state.contacts.length) { listEl.innerHTML = ''; return; }
+    const groups = state.occasionGroups.filter((g) => g.people.some(hasOccasionReason));
+    const calendar = state.occasionGroups.filter((g) => !g.people.some(hasOccasionReason));
+    const items = state.attention.filter((a) => a.kind !== 'fading');
+    const fading = state.attention.filter((a) => a.kind === 'fading');
+    const opportunities = state.opportunities || [];
+    if (calendar.length || opportunities.length) {
+      oppEl.innerHTML = `<details class="home-disclosure calendar-more" ${disclosureAttrs('calendar-more')}>
+        <summary>节日与其他时机 · ${calendar.length + opportunities.length} 组（按需查看）</summary>
+        <p class="material-hint">暂时没有对应安排或同场合记录，不代表你需要联系每个人，也不默认需要送礼。</p>
+        <div class="occasion-groups">${calendar.map(attentionGroup).join('')}</div>
+        ${opportunities.map((h) => `<div class="opp-row" role="note">
+          <span>${h.inDays === 0 ? `${esc(h.label)}就是今天` : `${esc(h.label)}还有 ${h.inDays} 天`}，有想联系的人吗？</span>
+          <button type="button" class="ghost-btn" data-action="first-run" data-scenario="say">想个问候</button>
+        </div>`).join('')}
+      </details>`;
+    }
+    listEl.innerHTML = (items.length ? `<section class="followup-section">
+          <div class="occasion-group-head"><h2>有记录的待跟进</h2><span>${items.length} 件事项</span></div>
+          <p class="material-hint">来自承诺和收礼记录；没有后续记录，不等于你还没做。已联系或办妥，可以记下进展。</p>
+          <div class="occasion-people">${items.slice(0, 3).map(attentionFollowup).join('')}</div>
+          ${items.length > 3 ? `<details class="home-disclosure" ${disclosureAttrs('followups-more')}>
+            <summary>其余 ${items.length - 3} 件跟进事项</summary>
+            <div class="occasion-people">${items.slice(3).map(attentionFollowup).join('')}</div>
+          </details>` : ''}
+        </section>` : '')
+      + (groups.length ? `<section class="priority-occasions" aria-label="你的安排与重要日期">
+          <div class="occasion-group-head"><h2>你的安排与重要日期</h2><span>${groups.length} 组</span></div>
+          <p class="material-hint">已有计划、待选主意、你记下的生日和同场合记录优先；组内有依据的人先展示。</p>
+          <div class="occasion-groups">${groups.slice(0, 3).map(attentionGroup).join('')}</div>
+          ${groups.length > 3 ? `<details class="home-disclosure occasions-more" ${disclosureAttrs('occasions-more')}>
+            <summary>更多安排与重要日期 · ${groups.length - 3} 组</summary>
+            <div class="occasion-groups">${groups.slice(3).map(attentionGroup).join('')}</div>
+          </details>` : ''}
+        </section>` : '')
+      + (!groups.length && !items.length ? '<div class="empty">暂时没有有记录的待跟进或安排，不必为了节日勉强联系。想起一件事时，随手记下来。</div>' : '')
+      + (fading.length ? `<details class="home-disclosure fading-more" ${disclosureAttrs('fading-more')}>
+          <summary>久未更新的往来 · ${fading.length} 人（按需回顾）</summary>
+          <p class="material-hint">只按本地互动记录间隔提示，不判断关系是否疏远。</p>
+          <div class="occasion-people">${fading.map(attentionFollowup).join('')}</div>
+        </details>` : '');
+  }
+
+  function materialState(mt) {
+    const pendingCount = (mt.extracted || []).filter((m) => m.status === 'pending').length;
+    const complete = Boolean(mt.report);
+    const incomplete = mt.status === 'processed' && !complete;
+    return { pendingCount, complete, incomplete, raw: mt.status === 'raw' && !complete, important: Boolean(mt.question || pendingCount || incomplete) };
   }
 
   function renderMaterialBox() {
@@ -495,19 +834,22 @@
     const list = state.materials || [];
     box.classList.toggle('hidden', list.length === 0);
     if (!list.length) return;
-    $('#material-count').textContent = `· ${list.length}`;
-    $('#material-list').innerHTML = list.map((mt) => {
-      const pendingCount = (mt.extracted || []).filter((m) => m.status === 'pending').length;
-      // 整理未完成：已拆出条目但没有整理报告（中断/分批未完）——保留「继续整理」入口，
-      // 否则用户在工作台永远无法续跑（AI 整理按钮只认 raw 会把 processed 卡锁死）
-      const incomplete = mt.status === 'processed' && !mt.report;
-      const statusBadge = mt.status === 'processed'
-        ? `<span class="badge type">已拆出 ${mt.extracted.length} 条${pendingCount ? `，待确认 ${pendingCount} 条` : ''}${incomplete ? '，整理未完成' : ''}</span>`
-        : '<span class="badge">待 AI 整理</span>';
+    const stats = list.map(materialState);
+    const counts = [`共 ${list.length} 份`];
+    for (const [key, label] of [['raw', '待整理'], ['incomplete', '整理未完成'], ['complete', '已整理']]) {
+      const count = stats.filter((m) => m[key]).length;
+      if (count) counts.push(`${count} 份${label}`);
+    }
+    $('#material-count').textContent = `· ${counts.join(' · ')}`;
+    const renderCard = (mt) => {
+      const { pendingCount, complete, incomplete, raw } = materialState(mt);
+      const extractedCount = (mt.extracted || []).length;
+      const status = complete ? '已整理' : incomplete ? '整理未完成' : '待 AI 整理';
+      const statusBadge = `<span class="badge${complete || incomplete ? ' type' : ''}">${status}${extractedCount ? ` · 已拆出 ${extractedCount} 条` : ''}${pendingCount ? ` · 待确认 ${pendingCount} 条` : ''}</span>`;
       return `
       <article class="material-card" data-id="${esc(mt.id)}">
         <div class="material-main">
-          <p class="material-excerpt">${esc(mt.excerpt)}${mt.excerpt.length >= 120 ? '…' : ''}</p>
+          <p class="material-excerpt">${esc(mt.excerpt.slice(0, 64))}${mt.excerpt.length > 64 ? '…' : ''}</p>
           <div class="material-meta">
             ${statusBadge}
             ${mt.contactName ? `<span class="badge">${esc(mt.contactName)}</span>` : ''}
@@ -525,25 +867,33 @@
                 ? '作答指令已复制，粘贴到 DSH 会话即可；AI 收到作答后会自动清除'
                 : (state.dshEmbedded ? '点击即发送作答，AI 会继续整理' : '点击复制作答指令，粘贴到 DSH 会话')}</p>
           </div>` : ''}
-          ${mt.report ? `<details class="material-report"${pendingCount ? ' open' : ''}>
+          ${mt.report ? `<details class="material-report" ${disclosureAttrs(`material-report:${mt.id}`, pendingCount > 0)}>
             <summary>AI 整理报告${mt.reportedAt ? ` · ${esc((mt.reportedAt || '').slice(0, 10))}` : ''}</summary>
             <pre>${esc(mt.report)}</pre>
           </details>` : ''}
         </div>
         <div class="material-actions">
           ${pendingCount ? `<button class="primary-btn" data-action="confirm-material" data-id="${esc(mt.id)}">确认这 ${pendingCount} 条</button>` : ''}
-          ${mt.status === 'raw' || incomplete ? `<button class="primary-btn" data-action="organize-material" data-id="${esc(mt.id)}">${mt.status === 'raw' ? 'AI 整理' : '继续整理'}</button>` : ''}
+          ${raw || incomplete ? `<button class="primary-btn" data-action="organize-material" data-id="${esc(mt.id)}">${raw ? 'AI 整理' : '继续整理'}</button>` : ''}
           ${mt.status === 'raw' ? `<button class="ghost-btn" data-action="copy-material" data-id="${esc(mt.id)}">复制整理指令</button>` : ''}
           <button class="ghost-btn" data-action="delete-material" data-id="${esc(mt.id)}">删除</button>
         </div>
       </article>`;
-    }).join('');
+    };
+    const important = list.filter((mt) => materialState(mt).important);
+    const ordinary = list.filter((mt) => !materialState(mt).important);
+    $('#material-list').innerHTML = important.map(renderCard).join('') + (ordinary.length
+      ? `<details class="home-disclosure materials-more" ${disclosureAttrs('materials-more')}>
+          <summary>普通素材 · ${ordinary.length} 份</summary>
+          <div class="material-list">${ordinary.map(renderCard).join('')}</div>
+        </details>`
+      : '');
   }
 
   /** 建议卡「围绕某计划」徽标文案：原计划被删后降级为「已删计划」。 */
   function planBaseBadge(p) {
     if (!p.basedOnPlanId) return '';
-    const base = state.plans.find((x) => x.id === p.basedOnPlanId);
+    const base = findPlan(p.basedOnPlanId);
     const label = base ? base.idea.slice(0, 12) : '已删计划';
     return ` <span class="badge">围绕「${esc(label)}」</span>`;
   }
@@ -566,67 +916,77 @@
   }
 
   function jdPlanButton(p) {
-    return p.status === 'sent' ? '' : `<button type="button" class="ghost-btn" data-action="jd-open" data-id="${esc(p.id)}">京东找同款</button>`;
+    return activePlan(p) ? `<button type="button" class="ghost-btn" data-action="jd-open" data-id="${esc(p.id)}">京东找同款</button>` : '';
   }
 
   function planCard(p) {
-    const productLine = planProductLine(p);
-    // 围绕本计划出主意产生的未送出建议数（一键删除这批的入口）
-    const sugCount = state.plans.filter((x) => x.basedOnPlanId === p.id && x.status !== 'sent').length;
-    return `
-    <article class="occ-card">
+    const sugCount = state.plans.filter((x) => x.basedOnPlanId === p.id && activePlan(x)).length;
+    return `<article class="occ-card" data-plan="${esc(p.id)}">
       <div class="occ-main">
-        <p class="occ-title"><b>${esc(p.contactName)}</b>${p.occasion ? ` · ${esc(p.occasion)}` : ''}${p.occasionDate ? ` · ${esc(fmtDate(p.occasionDate))}` : ''} <span class="badge type">${PLAN_STATUS_CN[p.status]}</span>${p.source === 'ai' ? ' <span class="badge">AI 建议</span>' : ''}${planBaseBadge(p)}</p>
+        <p class="occ-title"><b>${esc(p.contactName)}</b>${p.occasion ? ` · ${esc(p.occasion)}` : ''}${p.occasionDate ? ` · ${esc(fmtDate(p.occasionDate))}` : ' · 日期未定'} <span class="badge type">${PLAN_STATUS_CN[p.status]}</span>${p.source === 'ai' ? ' <span class="badge">AI 建议</span>' : ''}${planBaseBadge(p)}</p>
         <div class="occ-plan">${esc(p.idea)}${p.budget ? ` <span class="muted">（预算 ${esc(p.budget)}）</span>` : ''}</div>
-        ${productLine}
+        ${planProductLine(p)}
+        ${activePlan(p) ? `<details class="home-disclosure gift-tools" ${disclosureAttrs(`gift-tools:${p.id}`)}>
+          <summary>送礼时再用</summary>
+          <div class="plan-actions">
+            <button type="button" class="ghost-btn" data-action="suggest-open" data-id="${esc(p.contactId)}" data-occasion="${esc(p.occasion || '')}" data-plan="${esc(p.id)}">送什么</button>
+            ${jdPlanButton(p)}
+            <button type="button" class="ghost-btn" data-action="plan-sent" data-id="${esc(p.id)}">已送出礼物</button>
+          </div>
+        </details>` : ''}
       </div>
       <div class="occ-actions">
-        <button class="primary-btn" data-action="suggest-open" data-id="${esc(p.contactId)}" data-occasion="${esc(p.occasion || '')}" data-plan="${esc(p.id)}">送什么</button>
-        ${jdPlanButton(p)}
-        <span class="plan-actions">
-          ${sugCount ? `<button class="icon-btn danger" data-action="plan-delete-suggestions" data-id="${esc(p.id)}">删这批建议(${sugCount})</button>` : ''}
-          <button class="icon-btn" data-action="plan-edit" data-id="${esc(p.id)}">编辑</button>
-          <button class="icon-btn" data-action="plan-sent" data-id="${esc(p.id)}">已送</button>
-          <button class="icon-btn danger" data-action="plan-delete" data-id="${esc(p.id)}">删除</button>
-        </span>
+        ${activePlan(p) ? `<button type="button" class="primary-btn" data-action="plan-edit" data-id="${esc(p.id)}">编辑</button>
+          <button type="button" class="ghost-btn" data-action="plan-done" data-id="${esc(p.id)}">已完成</button>` : ''}
+        ${sugCount ? `<button type="button" class="icon-btn danger" data-action="plan-delete-suggestions" data-id="${esc(p.id)}">删这批建议(${sugCount})</button>` : ''}
+        <button type="button" class="icon-btn danger" data-action="plan-delete" data-id="${esc(p.id)}">删除</button>
       </div>
     </article>`;
   }
 
   function renderGifts() {
-    const { occasions, reciprocity, given, received } = state.gift;
-    const plansOf = (contactId, occasion) => state.plans.filter((p) => p.contactId === contactId && (!occasion || p.occasion === occasion) && p.status !== 'sent');
-    const planLine = (p) => `<div class="occ-plan"><span class="badge type">${PLAN_STATUS_CN[p.status]}</span> ${esc(p.idea)}${p.source === 'ai' ? ' <span class="badge">AI 建议</span>' : ''}${planBaseBadge(p)}
-       ${planProductLine(p)}
-       <span class="plan-actions">${jdPlanButton(p)}<button class="icon-btn" data-action="plan-edit" data-id="${esc(p.id)}">编辑</button><button class="icon-btn" data-action="plan-sent" data-id="${esc(p.id)}">已送</button><button class="icon-btn danger" data-action="plan-delete" data-id="${esc(p.id)}">删除</button></span></div>`;
-
-    $('#occasions-count').textContent = `· ${occasions.length}`;
-    $('#occasions-list').innerHTML = occasions.length ? occasions.map((o) => {
-      const active = plansOf(o.contactId, o.occasion);
-      const planLineHtml = active.length
-        ? active.map(planLine).join('')
-        : '<div class="occ-plan empty-plan">还没打算</div>';
-      const others = state.plans.filter((p) => p.contactId === o.contactId && p.status !== 'sent' && (!o.occasion || p.occasion !== o.occasion));
-      return `
-      <article class="occ-card" data-contact="${esc(o.contactId)}" data-occasion="${esc(o.occasion || '')}" data-date="${esc(o.date || '')}">
-        <div class="occ-main">
-          <p class="occ-title"><b>${esc(o.name)}</b> · ${esc(o.label)}${o.date ? ` · ${esc(fmtDate(o.date))}` : ''} <span class="badge date">${o.inDays === 0 ? '就是今天' : `还有 ${o.inDays} 天`}</span></p>
-          ${planLineHtml}
-          ${others.length ? `<div class="occ-plan muted">其他计划：${others.map((p) => esc(p.idea)).join('；')}</div>` : ''}
-        </div>
-        <div class="occ-actions">
-          <button class="primary-btn" data-action="suggest-open" data-contact="${esc(o.contactId)}" data-occasion="${esc(o.occasion || '')}" data-date="${esc(o.date || '')}">送什么</button>
-          ${active.length ? '' : `<button class="ghost-btn" data-action="plan-open" data-contact="${esc(o.contactId)}" data-occasion="${esc(o.occasion || '')}" data-date="${esc(o.date || '')}">记个想法</button>`}
+    const { reciprocity, given, received } = state.gift;
+    const groups = state.occasionGroups.filter((g) => g.date && g.days >= 0 && g.days <= 30);
+    const priority = groups.filter((g) => g.people.some(hasOccasionReason));
+    const calendar = groups.filter((g) => !g.people.some(hasOccasionReason));
+    const covered = new Set();
+    const renderPerson = (p) => {
+      const plans = [...p.plans, ...p.aiIdeas].filter((plan) => activePlan(plan) && (!p.date || plan.occasionDate === p.date));
+      plans.forEach((plan) => covered.add(plan.id));
+      return `<article class="gift-person" data-contact="${esc(p.contactId)}" data-occasion="${esc(p.occasion)}" data-date="${esc(p.date)}">
+        <p class="occ-title"><b>${esc(p.contactName)}</b> · ${esc(p.reason)}</p>
+        ${plans.map((plan) => planCard({ ...plan, contactName: p.contactName })).join('')}
+        ${!plans.length ? '<p class="material-hint">没有对应安排，可选是否联系，不默认需要送礼。</p>' : ''}
+        <div class="att-actions">
+          ${!plans.length ? attentionAiButton(p, 'briefing', briefingLabel(p), p.occasion, p.date) : ''}
+          <button type="button" class="ghost-btn" data-action="plan-open" data-contact="${esc(p.contactId)}" data-occasion="${esc(p.occasion)}" data-date="${esc(p.date)}">记个计划</button>
         </div>
       </article>`;
-    }).join('') : '<div class="empty">30 天内没有生日和相关节日。已有计划在下方「进行中的计划」，可以直接在计划卡上点「送什么」。</div>';
+    };
+    const renderGroup = (g) => {
+      const relevant = g.people.filter(hasOccasionReason);
+      const people = [...relevant, ...g.people.filter((p) => !hasOccasionReason(p))];
+      const count = Math.min(3, relevant.length || people.length);
+      return `<section class="occasion-group" data-group="${esc(g.id)}">
+        <div class="occasion-group-head"><h3>${esc(g.label)} · ${esc(relativeDays(g.days))} <time>${esc(g.date)}</time></h3><span>${people.length} 人</span></div>
+        ${people.slice(0, count).map(renderPerson).join('')}
+        ${people.length > count ? `<details class="home-disclosure" ${disclosureAttrs(`gift-people:${g.id}`)}><summary>其余 ${people.length - count} 人 · 按需查看</summary>${people.slice(count).map(renderPerson).join('')}</details>` : ''}
+      </section>`;
+    };
+    $('#occasions-count').textContent = `· ${groups.length} 组`;
+    $('#occasions-list').innerHTML = state.attention === null
+      ? '<div class="empty">近期安排加载失败，稍后刷新重试；计划仍可在下方查看。</div>'
+      : `${priority.slice(0, 3).map(renderGroup).join('')}
+        ${priority.length > 3 ? `<details class="home-disclosure" ${disclosureAttrs('gift-groups-more')}><summary>更多安排与重要日期 · ${priority.length - 3} 组</summary>${priority.slice(3).map(renderGroup).join('')}</details>` : ''}
+        ${calendar.length ? `<details class="home-disclosure calendar-more" ${disclosureAttrs('gift-calendar-more')}><summary>节日与其他时机 · ${calendar.length} 组（按需查看）</summary>${calendar.map(renderGroup).join('')}</details>` : ''}
+        ${!priority.length ? '<div class="empty">30 天内暂无有依据的安排。不必为了节日勉强联系。</div>' : ''}`;
 
     $('#reciprocity-count').textContent = `· ${reciprocity.length}`;
     $('#reciprocity-list').innerHTML = reciprocity.length ? reciprocity.map((r) => `
       <article class="occ-card reciprocity">
         <div class="occ-main">
           <p class="occ-title"><b>${esc(r.name)}</b> 在 ${esc(fmtDate(r.date))} 送了：${esc(r.content)} <span class="badge dir">TA→我</span></p>
-          ${r.hasActivePlan ? '<div class="occ-plan muted">已有回礼计划 ✓</div>' : '<div class="occ-plan empty-plan">还没回礼</div>'}
+          ${r.hasActivePlan ? '<div class="occ-plan muted">已有相关计划</div>' : '<div class="occ-plan empty-plan">暂无后续送礼记录，不代表你还未回应</div>'}
         </div>
         <div class="occ-actions">
           ${r.hasActivePlan ? '' : `<button class="ghost-btn" data-action="plan-open" data-contact="${esc(r.contactId)}" data-occasion="thank_you">记回礼计划</button>`}
@@ -641,12 +1001,13 @@
     $('#ledger-given').innerHTML = given.length ? given.map((m) => ledgerRow(m)).join('') : '<div class="empty">还没有送出记录。计划标「已送」后自动入账。</div>';
     $('#ledger-received').innerHTML = received.length ? received.map((m) => ledgerRow(m, 'TA→我')).join('') : '<div class="empty">还没有收礼记录。</div>';
 
-    // 进行中的计划：未被时机窗口覆盖的未送计划也要有安身处
-    const covered = new Set();
-    for (const o of occasions) for (const p of plansOf(o.contactId, o.occasion)) covered.add(p.id);
-    const rest = state.plans.filter((p) => p.status !== 'sent' && !covered.has(p.id));
+    const rest = state.plans.filter((p) => activePlan(p) && !covered.has(p.id));
     $('#plans-section').classList.toggle('hidden', !rest.length);
-    $('#plans-list').innerHTML = rest.map(planCard).join('');
+    $('#plans-list').innerHTML = rest.map((p) => planCard({ ...p, ...findPlan(p.id) })).join('');
+    const completed = state.plans.filter((p) => !activePlan(p));
+    $('#completed-plans').classList.toggle('hidden', !completed.length);
+    $('#completed-plans-count').textContent = String(completed.length);
+    $('#completed-plans-list').innerHTML = completed.map(planCard).join('');
   }
 
   function renderContacts() {
@@ -664,6 +1025,7 @@
 
     const detail = $('#contact-detail');
     const t = state.timeline;
+    $('.contacts-layout').classList.toggle('has-detail', Boolean(t.contact));
     if (!t.contact) {
       detail.classList.add('hidden');
       detail.innerHTML = '';
@@ -671,6 +1033,9 @@
     }
     detail.classList.remove('hidden');
     const c = t.contact;
+    const searchInput = detail.dataset.contactId === c.id ? $('#memory-search-input', detail) : null;
+    const searchFocused = searchInput && document.activeElement === searchInput;
+    detail.dataset.contactId = c.id;
     const searchActive = Boolean(state.memorySearchQuery.trim());
     const baseMemories = searchActive ? state.memorySearchResults : t.memories;
     const types = new Set(baseMemories.map((m) => m.type));
@@ -690,7 +1055,7 @@
     if (bf) {
       if (bf.lastSeen) bfRows.push(`<div class="briefing-row"><span class="badge type">间隔</span><span>距上次有记录的互动 <b>${bf.lastSeen.days}</b> 天（${esc(fmtDate(bf.lastSeen.lastDate))}）</span></div>`);
       for (const o of bf.occasions) bfRows.push(`<div class="briefing-row"><span class="badge occ">时机</span><span>${esc(o.label)}${o.inDays === 0 ? ' 就是今天' : ` · 还有 <b>${o.inDays}</b> 天`}</span></div>`);
-      for (const r of bf.reciprocity) bfRows.push(`<div class="briefing-row"><span class="badge date">回礼</span><span>TA 送过「${esc(r.content)}」（${esc(fmtDate(r.date))}）尚未回礼${r.hasActivePlan ? '，已有礼物计划' : ''}</span></div>`);
+      for (const r of bf.reciprocity) bfRows.push(`<div class="briefing-row"><span class="badge date">回礼</span><span>TA 送过「${esc(r.content)}」（${esc(fmtDate(r.date))}），暂无后续送礼记录${r.hasActivePlan ? '，已有相关计划' : ''}</span></div>`);
       for (const p of bf.promises) bfRows.push(`<div class="briefing-row"><span class="badge type">待跟进</span><span>${esc(p.content)}${p.date ? ` · ${esc(fmtDate(p.date))}` : ''}</span></div>`);
       for (const x of bf.cautions) bfRows.push(`<div class="briefing-row"><span class="badge imp3">注意</span><span>${esc(x.content)}</span></div>`);
     }
@@ -699,6 +1064,7 @@
       : '';
 
     detail.innerHTML = `
+      <button type="button" class="ghost-btn contact-back" data-action="contacts-back">返回联系人列表</button>
       <div class="detail-head">
         <div>
           <h2>${esc(c.name)}</h2>
@@ -709,8 +1075,9 @@
           </div>
         </div>
         <div class="detail-actions">
-          <button class="primary-btn" data-action="briefing-open" data-id="${esc(c.id)}">怎么说</button>
-          <button class="ghost-btn" data-action="gift-open" data-id="${esc(c.id)}">送什么</button>
+          <button class="primary-btn" data-action="briefing-open" data-id="${esc(c.id)}"${state.aiWaiting.has(`brief:${c.id}`) ? ' disabled' : ''}>${state.aiWaiting.has(`brief:${c.id}`) ? 'AI 正在想…' : '怎么说'}</button>
+          <button class="ghost-btn" data-action="gift-open" data-id="${esc(c.id)}"${state.aiWaiting.has(`gift:${c.id}`) ? ' disabled' : ''}>${state.aiWaiting.has(`gift:${c.id}`) ? 'AI 正在想…' : '送什么'}</button>
+          <button class="ghost-btn" data-action="edit-contact" data-id="${esc(c.id)}">编辑</button>
           <button class="ghost-btn" data-action="toggle-archive" data-id="${esc(c.id)}">${c.archived ? '取消归档' : '归档'}</button>
           <button class="ghost-btn" data-action="delete-contact" data-id="${esc(c.id)}">删除</button>
         </div>
@@ -751,9 +1118,28 @@
           </span>
         </div>`).join('')}
       </div>` : ''}`;
+    if (searchInput) {
+      $('#memory-search-input', detail).replaceWith(searchInput);
+      searchInput.value = state.memorySearchQuery;
+      if (searchFocused) searchInput.focus({ preventScroll: true });
+    }
   }
 
   // ---------- 事件 ----------
+  document.addEventListener('toggle', (e) => {
+    const el = e.target;
+    if (!el.matches?.('details[data-disclosure]') || !el.isConnected) return;
+    state.disclosures.set(el.dataset.disclosure, el.open);
+    if (el.matches('.att-details')) {
+      const button = $('[data-action="attention-ideas"]', el.closest('.attention-card'));
+      button?.setAttribute('aria-expanded', String(el.open));
+    }
+  }, true);
+  document.addEventListener('keydown', (e) => {
+    if (!e.target.matches('.recent-row') || !['Enter', ' '].includes(e.key)) return;
+    e.preventDefault();
+    e.target.click();
+  });
   document.addEventListener('compositionstart', () => { memorySearchComposing = true; });
   document.addEventListener('compositionend', (e) => {
     memorySearchComposing = false;
@@ -786,12 +1172,14 @@
     if (nav) {
       state.view = nav.dataset.view;
       render();
+      // 视图相关数据按当前视图拉取（如礼赠页 reciprocity/ledger 只在 gifts 视图取）
+      scheduleRefresh();
       return;
     }
 
-    // 值得关注卡片 / 最近记住了行：点击切到联系人页打开 TA 的时间线（AI 按钮走 data-action，不进这里）
-    const attRow = e.target.closest('.attention-card, .recent-row');
-    if (attRow && !e.target.closest('[data-action]')) {
+    // 人卡只通过显式按钮跳转，details 和计划操作不会误触导航。
+    const attRow = e.target.closest('.recent-row, [data-action="view-contact"]');
+    if (attRow) {
       state.view = 'contacts';
       state.activeContactId = attRow.dataset.id;
       state.typeFilter = 'all';
@@ -801,6 +1189,10 @@
       clearTimeout(memorySearchTimer);
       memorySearchSeq++;
       await refresh();
+      if (window.matchMedia('(max-width: 900px)').matches) {
+        $('#contact-detail').scrollIntoView({ block: 'start' });
+        $('.contact-back')?.focus({ preventScroll: true });
+      }
       return;
     }
 
@@ -814,6 +1206,10 @@
       clearTimeout(memorySearchTimer);
       memorySearchSeq++;
       await refresh();
+      if (window.matchMedia('(max-width: 900px)').matches) {
+        $('#contact-detail').scrollIntoView({ block: 'start' });
+        $('.contact-back')?.focus({ preventScroll: true });
+      }
       return;
     }
 
@@ -830,7 +1226,18 @@
     const id = actionBtn.dataset.id;
 
     try {
-      if (action === 'confirm') {
+      if (action === 'contacts-back') {
+        const previous = state.activeContactId;
+        state.activeContactId = null;
+        state.timeline = { contact: null, memories: [] };
+        state.memorySearchQuery = '';
+        state.memorySearchResults = [];
+        state.memorySearchLoading = false;
+        clearTimeout(memorySearchTimer);
+        memorySearchSeq++;
+        render();
+        $$('.contact-row').find((el) => el.dataset.id === previous)?.focus();
+      } else if (action === 'confirm') {
         await api('/api/memories/confirm', { method: 'POST', body: { ids: [id] } });
         toast('已确认进入长期记忆');
         await refresh();
@@ -857,21 +1264,20 @@
         await api('/api/memories/confirm', { method: 'POST', body: { ids } });
         toast(`已确认 ${ids.length} 条素材记忆`);
         await refresh();
+      } else if (action === 'remember-open') {
+        openRemember(id);
       } else if (action === 'first-run') {
-        // 空库首价值引导：场景按钮打开引导弹窗，提交后建联系人并把先问后给的 prompt 交给 AI
         state.firstScenario = actionBtn.dataset.scenario || 'say';
-        $('#fr-title').textContent = FIRST_SCENARIOS[state.firstScenario] || '首价值引导';
+        $('#fr-title').textContent = FIRST_SCENARIOS[state.firstScenario];
+        $('#fr-go').textContent = state.dshEmbedded ? '获取建议' : '复制建议指令';
         openModal('first');
       } else if (action === 'briefing-open') {
         // 怎么说：事实卡已原生展示，这里把同一份事实交给 AI 生成话术建议（不落库）。
-        // 嵌入模式直发 DSH 会话；独立模式复制指令。发送后短暂禁用防连点（8 秒后恢复）
-        actionBtn.disabled = true;
-        setTimeout(() => { actionBtn.disabled = false; }, 8000);
+        // 嵌入模式直发 DSH 会话并等 AI 回复就地弹层；独立模式复制指令。
         try {
           const { prompt } = await api('/api/briefing', { method: 'POST', body: { contactId: id } });
           if (state.dshEmbedded) {
-            await sendToSession(prompt);
-            toast('已交给 AI 想怎么说，结果在 DSH 会话里看');
+            await askHostAi(prompt, { title: '怎么开口 · AI 建议', waitingKey: `brief:${id}` });
           } else {
             await navigator.clipboard.writeText(prompt);
             toast('话术指令已复制，粘贴到 DSH 会话即可');
@@ -879,31 +1285,40 @@
         } catch (e) { toast(e.message || '生成话术失败', true); }
       } else if (action === 'gift-open') {
         // 送什么：以该联系人最近已确认记忆为依据组装礼物建议 prompt（auto），嵌入直发/独立复制
-        actionBtn.disabled = true;
-        setTimeout(() => { actionBtn.disabled = false; }, 8000);
         try {
           const { prompt } = await api('/api/gift-suggest', { method: 'POST', body: { contactId: id, auto: true } });
           if (state.dshEmbedded) {
-            await sendToSession(prompt);
-            toast('已交给 AI 想礼物，结果在 DSH 会话里看');
+            await askHostAi(prompt, { title: '送什么 · AI 建议', waitingKey: `gift:${id}` });
           } else {
             await navigator.clipboard.writeText(prompt);
             toast('礼物建议指令已复制，粘贴到 DSH 会话即可');
           }
         } catch (e) { toast(e.message || '生成失败', true); }
+      } else if (action === 'attention-ideas') {
+        const details = $('.att-details', actionBtn.closest('.attention-card'));
+        if (details) {
+          details.open = true;
+          state.disclosures.set(details.dataset.disclosure, true);
+          actionBtn.setAttribute('aria-expanded', 'true');
+          $('summary', details).focus({ preventScroll: true });
+        }
       } else if (action === 'attention-ai') {
-        // 值得关注行的 AI 行动：疏远/待跟进 → 见面话术；时机/回礼 → 礼物建议（auto 自动取最近记忆作依据）。
-        // 嵌入直发 DSH 会话；独立模式复制指令。发送后短暂禁用防连点（8 秒后恢复）
         const kind = actionBtn.dataset.kind || 'briefing';
-        actionBtn.disabled = true;
-        setTimeout(() => { actionBtn.disabled = false; }, 8000);
+        const planId = actionBtn.dataset.plan;
+        const plan = findPlan(planId);
+        if (planId && (!plan || plan.contactId !== id)) { toast('计划已变化，请刷新后重试', true); return; }
+        const body = {
+          contactId: id,
+          occasion: plan ? (plan.occasion || '') : (actionBtn.dataset.occasion || ''),
+          occasionDate: plan ? (plan.occasionDate || '') : (actionBtn.dataset.date || ''),
+          planId: plan?.id,
+        };
         try {
-          const { prompt } = kind === 'gift'
-            ? await api('/api/gift-suggest', { method: 'POST', body: { contactId: id, occasion: actionBtn.dataset.occasion || '', occasionDate: actionBtn.dataset.date || '', auto: true } })
-            : await api('/api/briefing', { method: 'POST', body: { contactId: id } });
+          const { prompt } = await api(kind === 'gift' ? '/api/gift-suggest' : '/api/briefing', {
+            method: 'POST', body: kind === 'gift' ? { ...body, auto: true } : body,
+          });
           if (state.dshEmbedded) {
-            await sendToSession(prompt);
-            toast(kind === 'gift' ? '已交给 AI 想礼物，结果在 DSH 会话里看' : '已交给 AI 想怎么说，结果在 DSH 会话里看');
+            await askHostAi(prompt, { title: `${actionBtn.dataset.label || '下一步'} · AI 建议`, waitingKey: actionBtn.dataset.waitingKey });
           } else {
             await navigator.clipboard.writeText(prompt);
             toast('指令已复制，粘贴到 DSH 会话即可');
@@ -956,34 +1371,47 @@
         toast('已删除素材');
         await refresh();
       } else if (action === 'suggest-open') {
-        // 时机卡按钮带 data-contact，计划卡按钮带 data-id，两处都可能是入口
         const contactId = id || actionBtn.dataset.contact;
         if (!contactId) { toast('缺少联系人信息', true); return; }
         const card = actionBtn.closest('[data-occasion]');
-        const occasion = card?.dataset.occasion || actionBtn.dataset.occasion || '';
-        $('#suggest-target').dataset.occasion = occasion;
-        await openSuggestModal(contactId, occasion, actionBtn.dataset.plan || '');
+        const occasion = actionBtn.dataset.occasion ?? card?.dataset.occasion ?? '';
+        const date = actionBtn.dataset.date ?? card?.dataset.date ?? '';
+        await openSuggestModal(contactId, occasion, actionBtn.dataset.plan || '', date);
       } else if (action === 'plan-open') {
         const card = actionBtn.closest('[data-contact]');
-        openPlanModal(id, card?.dataset.occasion || '', card?.dataset.date || '');
+        openPlanModal(
+          id || actionBtn.dataset.contact || card?.dataset.contact,
+          actionBtn.dataset.occasion ?? card?.dataset.occasion ?? '',
+          actionBtn.dataset.date ?? card?.dataset.date ?? '',
+        );
       } else if (action === 'plan-edit') {
-        openPlanModal(undefined, undefined, undefined, state.plans.find((p) => p.id === id));
+        const plan = findPlan(id);
+        if (!plan) { toast('计划不存在，请刷新后重试', true); return; }
+        openPlanModal(undefined, undefined, undefined, plan);
       } else if (action === 'jd-open') {
         openJdModal(id);
       } else if (action === 'plan-delete-suggestions') {
         // 一键删除「围绕该计划出主意」产生的这批建议（原计划保留，已送的台账卡不动）
-        const n = state.plans.filter((x) => x.basedOnPlanId === id && x.status !== 'sent').length;
+        const n = state.plans.filter((x) => x.basedOnPlanId === id && activePlan(x)).length;
         if (!n) return;
         if (!(await confirmDialog(`删除围绕该计划的 ${n} 条 AI 建议？原计划保留。`, { danger: true }))) return;
         const r = await api(`/api/plans/${id}/suggestions`, { method: 'DELETE' });
         toast(`已删除 ${r.deleted} 条 AI 建议`);
         await refresh();
       } else if (action === 'plan-delete') {
-        if (!(await confirmDialog('删除这个礼物计划？', { danger: true }))) return;
+        if (!(await confirmDialog('删除这个计划？', { danger: true }))) return;
         await api(`/api/plans/${id}`, { method: 'DELETE' });
         toast('已删除计划');
         await refresh();
+      } else if (action === 'plan-done') {
+        if (!(await confirmDialog('将这项计划标记为已完成？这只结束计划，不会自动生成送礼或其他记忆。'))) return;
+        await api(`/api/plans/${id}/done`, { method: 'POST' });
+        toast('计划已完成，未自动写入记忆');
+        await refresh();
       } else if (action === 'plan-sent') {
+        const plan = findPlan(id);
+        if (!plan) return;
+        if (!(await confirmDialog(`确认已经实际送出礼物「${plan.productName || plan.idea}」？这会创建已确认的送礼记忆并计入台账。普通见面、散步等安排请使用「已完成」。`))) return;
         await api(`/api/plans/${id}/sent`, { method: 'POST' });
         toast('已入台账，礼物记忆已记入时间线');
         await refresh();
@@ -1044,6 +1472,15 @@
         await api(`/api/memories/${id}`, { method: 'DELETE' });
         toast('已删除');
         await refresh();
+      } else if (action === 'edit-contact') {
+        // 编辑联系人：复用新建表单预填当前值，提交时按 editingContactId 走 PATCH
+        const { contact: c } = await api(`/api/contacts/${id}`);
+        state.editingContactId = id;
+        $('#nc-name').value = c.name || '';
+        $('#nc-relation').value = c.relation || 'friend';
+        $('#nc-birthday').value = c.birthday || '';
+        $('#nc-tags').value = (c.tags || []).join(' ');
+        openModal('contact');
       } else if (action === 'toggle-archive') {
         const contact = state.contacts.find((x) => x.id === id);
         await api(`/api/contacts/${id}`, { method: 'PATCH', body: { archived: !contact?.archived } });
@@ -1079,15 +1516,36 @@
 
   // ---------- 弹窗 ----------
   function applyTab() {
-    $$('.mtab').forEach((t) => t.classList.toggle('active', t.dataset.mtab === state.smartTab));
+    $$('.mtab').forEach((t) => {
+      t.classList.toggle('active', t.dataset.mtab === state.smartTab);
+      t.setAttribute('aria-selected', String(t.dataset.mtab === state.smartTab));
+    });
     $('#form-quick-memory').classList.toggle('hidden', state.smartTab !== 'single');
     $('#form-smart').classList.toggle('hidden', state.smartTab !== 'smart');
+    $('#qmt-ok').textContent = state.dshEmbedded ? '保存并让 AI 整理' : '保存并复制整理指令';
+    $('#capture-mode').textContent = state.dshEmbedded
+      ? '素材保存在本机；保存后，你选择的内容会交给 DSH 配置的模型整理，确认前不会成为长期记忆。'
+      : '素材保存在本机；复制指令后需粘贴到 DSH 会话才会开始整理，届时你选择的内容会交给配置的模型处理。';
+  }
+
+  function openRemember(contactId) {
+    openModal('memory');
+    state.smartTab = 'smart';
+    applyTab();
+    if (contactId) {
+      $('#qmt-contact').value = contactId;
+      $('.capture-options').open = true;
+    }
+    $('#qmt-text').focus();
   }
 
   function fillContactSelects() {
     const options = state.contacts.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
-    $('#qm-contact').innerHTML = options;
-    $('#qmt-contact').innerHTML = '<option value="">自动识别（可能涉及多人）</option>' + options;
+    const contactId = state.view === 'contacts' ? state.activeContactId : null;
+    $('#qm-contact').innerHTML = `<option value="">请选择联系人</option>${options}`;
+    $('#qm-contact').value = contactId || '';
+    $('#qmt-contact').innerHTML = options;
+    if (contactId) $('#qmt-contact').value = contactId;
   }
 
   function fillRelationSelect(selected = 'friend') {
@@ -1117,15 +1575,17 @@
   }
 
   function openModal(which) {
+    if ($('#modal-backdrop').classList.contains('hidden')) modalTrigger = document.activeElement;
     cancelJdSession();
     $('#form-jd').classList.toggle('hidden', which !== 'jd');
-    if (which === 'jd') {
-      $('#form-quick-memory').classList.add('hidden');
-      $('#form-smart').classList.add('hidden');
-    }
+    $('#form-quick-memory').classList.add('hidden');
+    $('#form-smart').classList.add('hidden');
     $('#modal-backdrop').classList.remove('hidden');
     $('#form-contact').classList.toggle('hidden', which !== 'contact');
-    if (which === 'contact') fillRelationSelect();
+    if (which === 'contact') {
+      fillRelationSelect();
+      $('#nc-title-text').textContent = state.editingContactId ? '编辑联系人' : '新建联系人';
+    }
     const isMemory = which === 'memory';
     $$('.modal-tabs').forEach((t) => t.classList.toggle('hidden', !isMemory));
     if (isMemory) {
@@ -1137,10 +1597,16 @@
     $('#form-suggest').classList.toggle('hidden', which !== 'suggest');
     $('#form-relations').classList.toggle('hidden', which !== 'relations');
     $('#form-first').classList.toggle('hidden', which !== 'first');
+    $('#form-airesult').classList.toggle('hidden', which !== 'airesult');
     if (which === 'relations') renderRelationTypes();
-    ($(`#${which === 'contact' ? 'nc-name' : which === 'plan' ? 'plan-contact' : which === 'suggest' ? 'suggest-list' : which === 'relations' ? 'rt-key' : which === 'first' ? 'fr-name' : 'qm-content'}`))?.focus?.();
+    syncModalBackground();
+    const root = $('#modal-backdrop');
+    $('.modal', root).setAttribute('aria-label', $('.modal-body:not(.hidden) h3', root)?.textContent || '记一笔');
+    ($(`#${which === 'contact' ? 'nc-name' : which === 'plan' ? 'plan-contact' : which === 'suggest' ? 'suggest-list' : which === 'relations' ? 'rt-key' : which === 'first' ? 'fr-name' : which === 'airesult' ? 'airesult-close' : 'qm-content'}`))?.focus?.();
+    if (!root.contains(document.activeElement)) focusableIn(root)[0]?.focus();
   }
   function closeModal() {
+    if ($('#modal-backdrop').classList.contains('hidden')) return;
     cancelJdSession();
     $('#form-jd').reset();
     $('#jd-results').replaceChildren();
@@ -1152,13 +1618,18 @@
     $('#form-relations').reset();
     $('#form-first').reset();
     state.editingPlanId = null;
+    state.editingContactId = null;
     state.suggestContactId = null;
     state.suggestPlanId = null;
+    $('#airesult-body').textContent = '';
+    syncModalBackground();
+    restoreFocus(modalTrigger);
+    modalTrigger = null;
   }
   $('#btn-new-contact').addEventListener('click', () => openModal('contact'));
   $('#btn-manage-relations').addEventListener('click', () => openModal('relations'));
   $('#btn-quick-memory').addEventListener('click', () => {
-    if (!state.contacts.length) { toast('先新建一个联系人', true); openModal('contact'); return; }
+    if (!state.contacts.length) { openRemember(); return; }
     openModal('memory');
   });
   $('#nc-cancel').addEventListener('click', closeModal);
@@ -1166,9 +1637,9 @@
   $('#qm-cancel').addEventListener('click', closeModal);
   $('#qmt-cancel').addEventListener('click', closeModal);
   $('#fr-cancel').addEventListener('click', closeModal);
-  // 空库首价值：场景按钮 → 打开引导弹窗（标题随场景变化）
+  $('#airesult-close').addEventListener('click', closeModal);
   const FIRST_SCENARIOS = {
-    say: '不会开口',
+    say: '想想下一步',
     gift: '不知道送什么',
     reconnect: '重新联系',
   };
@@ -1182,17 +1653,35 @@
       closeModal();
       await refresh();
       if (state.dshEmbedded) {
-        await sendToSession(r.prompt);
-        toast(`已把「${name}」交给 AI——TA 会先问你一两个关键问题，再给建议`);
+        await askHostAi(r.prompt, { title: `下一步 · ${name}` });
       } else {
         await navigator.clipboard.writeText(r.prompt);
-        toast('指令已复制，粘贴到 DSH 会话，AI 会先问你一两个关键问题');
+        toast('建议指令已复制，粘贴到 DSH 会话获取下一步建议');
       }
     } catch (e) { toast(e.message || '创建失败', true); }
   });
   $$('#modal-backdrop [data-role="plan-cancel"]').forEach((btn) => btn.addEventListener('click', closeModal));
   $('#modal-backdrop').addEventListener('click', (e) => { if (e.target === $('#modal-backdrop')) closeModal(); });
-  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+  document.addEventListener('keydown', (e) => {
+    const root = topModal();
+    if (!root) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if ($('#rel-dialog')) closeDialog(null);
+      else closeModal();
+    } else if (e.key === 'Tab') {
+      const items = focusableIn(root);
+      const index = items.indexOf(document.activeElement);
+      if (index < 0 || (e.shiftKey && index === 0) || (!e.shiftKey && index === items.length - 1)) {
+        e.preventDefault();
+        items[e.shiftKey ? items.length - 1 : 0]?.focus();
+      }
+    }
+  });
+  document.addEventListener('focusin', (e) => {
+    const root = topModal();
+    if (root && !root.contains(e.target)) focusableIn(root)[0]?.focus();
+  });
   document.addEventListener('click', (e) => {
     const tab = e.target.closest('.mtab');
     if (!tab) return;
@@ -1203,10 +1692,17 @@
   $('#form-contact').addEventListener('submit', async (e) => {
     e.preventDefault();
     const tags = $('#nc-tags').value.split(/\s+/).map((x) => x.trim()).filter(Boolean);
+    const payload = { name: $('#nc-name').value, relation: $('#nc-relation').value, birthday: $('#nc-birthday').value.trim(), tags };
     try {
-      await api('/api/contacts', { method: 'POST', body: { name: $('#nc-name').value, relation: $('#nc-relation').value, birthday: $('#nc-birthday').value.trim(), tags } });
-      closeModal();
-      toast('联系人已创建');
+      if (state.editingContactId) {
+        await api(`/api/contacts/${state.editingContactId}`, { method: 'PATCH', body: payload });
+        closeModal();
+        toast('联系人已更新');
+      } else {
+        await api('/api/contacts', { method: 'POST', body: payload });
+        closeModal();
+        toast('联系人已创建');
+      }
       await refresh();
     } catch (err) { toast(err.message, true); }
   });
@@ -1249,16 +1745,37 @@
 
   $('#form-smart').addEventListener('submit', async (e) => {
     e.preventDefault();
+    const button = $('#qmt-ok');
+    if (button.disabled) return;
+    button.disabled = true;
     try {
       const r = await api('/api/materials', {
         method: 'POST',
-        body: { text: $('#qmt-text').value, contactId: $('#qmt-contact').value, occasion: $('#qmt-occasion').value },
+        body: { text: $('#qmt-text').value, contactIds: [...$('#qmt-contact').selectedOptions].map((o) => o.value), occasion: $('#qmt-occasion').value },
       });
       closeModal();
-      toast('素材已保存，去 DSH 会话说「整理素材」');
-      state.view = 'home'; // 素材卡在首页，保存后带用户回去看
+      $('#form-smart').reset();
+      $('.capture-options').open = false;
+      state.view = 'home';
+      const more = $('.materials-more');
+      if (more) more.open = true;
+      state.disclosures.set('materials-more', true);
       await refresh();
+      $$('.material-card').find((card) => card.dataset.id === r.material.id)?.scrollIntoView({ block: 'center' });
+      if (state.dshEmbedded) {
+        toast('素材已保存，正在让 AI 整理；核对后再确认');
+        await askHostAi(`整理素材 ${r.material.id}`, { title: '素材整理报告' });
+      } else {
+        try {
+          const { prompt } = await api(`/api/materials/${r.material.id}/organize-prompt`);
+          await navigator.clipboard.writeText(prompt);
+          toast('素材已保存，整理指令已复制；粘贴到 DSH 会话后开始整理');
+        } catch {
+          toast('素材已保存，但指令未复制；可在素材卡点击「复制整理指令」重试', true);
+        }
+      }
     } catch (err) { toast(err.message, true); }
+    finally { button.disabled = false; }
   });
 
   function jdBusy(session, busy) {
@@ -1304,7 +1821,7 @@
 
   function openJdModal(id) {
     const plan = state.plans.find((p) => p.id === id);
-    if (!plan || plan.status === 'sent') { toast('计划不存在或已送出', true); return; }
+    if (!plan || !activePlan(plan)) { toast('计划不存在或已结束', true); return; }
     openModal('jd');
     $('#form-jd').reset();
     $('#jd-results').replaceChildren();
@@ -1377,28 +1894,35 @@
   }
   function openPlanModal(contactId, occasion, occasionDate, plan) {
     if (!state.contacts.length) { toast('先到「联系人」新建一个联系人', true); return; }
-    fillPlanContacts(contactId || state.contacts[0]?.id);
-    $('#plan-occasion').value = occasion || plan?.occasion || '';
-    $('#plan-date').value = occasionDate || plan?.occasionDate || '';
+    fillPlanContacts(plan?.contactId || contactId || state.contacts[0]?.id);
+    $('#plan-occasion').value = occasion ?? plan?.occasion ?? '';
+    $('#plan-date').value = occasionDate ?? plan?.occasionDate ?? '';
     $('#plan-idea').value = plan?.idea || '';
     $('#plan-budget').value = plan?.budget || '';
     $('#plan-product-name').value = plan?.productName || '';
     $('#plan-product-price').value = plan?.productPrice || '';
     $('#plan-product-url').value = plan?.productUrl || '';
-    $('#plan-status').value = plan?.status && plan.status !== 'sent' ? plan.status : 'idea';
+    $('#plan-status').value = plan && activePlan(plan) ? plan.status : 'idea';
     state.editingPlanId = plan?.id || null;
     openModal('plan');
   }
 
   $('#btn-new-plan').addEventListener('click', () => openPlanModal());
 
-  async function openSuggestModal(contactId, occasion, planId) {
+  async function openSuggestModal(contactId, occasion, planId, occasionDate = '') {
     const c = state.contacts.find((x) => x.id === contactId);
     if (!c) { toast('联系人不存在', true); return; }
-    const plan = planId ? state.plans.find((p) => p.id === planId) : null;
+    const plan = findPlan(planId);
+    if (planId && (!plan || plan.contactId !== contactId)) { toast('计划已变化，请刷新后重试', true); return; }
+    if (plan) {
+      occasion = plan.occasion || '';
+      occasionDate = plan.occasionDate || '';
+    }
     state.suggestContactId = contactId;
     state.suggestPlanId = plan?.id || null;
-    $('#suggest-target').innerHTML = `为 <b>${esc(c.name)}</b>${occasion ? ` · ${esc(occasion)}` : ''}${plan ? ` · 围绕已有计划「${esc(plan.idea)}」` : ''} 出主意`;
+    $('#suggest-target').dataset.occasion = occasion;
+    $('#suggest-target').dataset.date = occasionDate;
+    $('#suggest-target').innerHTML = `为 <b>${esc(c.name)}</b>${occasion ? ` · ${esc(occasion)}` : ''} · ${occasionDate ? esc(fmtDate(occasionDate)) : '日期未定'}${plan ? ` · 围绕已有计划「${esc(plan.idea)}」` : ''} 出主意`;
     const list = $('#suggest-list');
     list.innerHTML = '<div class="empty">正在读取记忆…</div>';
     openModal('suggest');
@@ -1406,8 +1930,10 @@
       const r = await api(`/api/memories?contact_id=${contactId}&status=confirmed`);
       const relevant = r.memories.filter((m) => ['preference', 'dislike', 'taboo', 'gift', 'attribute', 'event'].includes(m.type) && !m.supersededBy);
       if (!relevant.length) {
-        list.innerHTML = '<div class="empty">该联系人还没有已确认记忆。先在聊天里让我记一些喜好/禁忌，AI 的建议才有依据。</div>';
-        $('#suggest-ok').disabled = true;
+        // 零记忆不再是死路：后端 prompt 会带标签（职业/身份）给通用稳妥建议，放行让用户自己决定
+        const tags = c.tags || [];
+        list.innerHTML = `<div class="empty">还没有已确认记忆${tags.length ? `（TA 的标签：${tags.map((x) => esc(x)).join('、')}）` : ''}。可以直接继续，AI 会基于标签与关系给通用稳妥建议并明说没有记忆依据；想更贴合，先去「记一笔」补些喜好/禁忌。</div>`;
+        $('#suggest-ok').disabled = false;
         return;
       }
       $('#suggest-ok').disabled = false;
@@ -1424,16 +1950,24 @@
   $('#form-suggest').addEventListener('submit', async (e) => {
     e.preventDefault();
     const contactId = state.suggestContactId;
+    if (!contactId) return;
     const memoryIds = $$('#suggest-list input[type="checkbox"]:checked').map((x) => x.value);
     const budget = $('#suggest-budget').value.trim();
-    const occasion = $('#suggest-target').dataset.occasion || '';
+    const plan = findPlan(state.suggestPlanId);
+    if (state.suggestPlanId && (!plan || plan.contactId !== contactId)) { toast('计划已变化，请重新打开建议', true); return; }
+    const occasion = plan ? (plan.occasion || '') : ($('#suggest-target').dataset.occasion || '');
+    const occasionDate = plan ? (plan.occasionDate || '') : ($('#suggest-target').dataset.date || '');
     try {
-      const { prompt, evidenceCount } = await api('/api/gift-suggest', { method: 'POST', body: { contactId, memoryIds, budget, occasion, planId: state.suggestPlanId || undefined } });
-      const sessionId = await ensureDshSession();
-      const requestId = globalThis.crypto?.randomUUID?.() || `rel-gift-${Date.now()}`;
-      await dshRpc('session/prompt', { request: { requestId, sessionId, mode: 'queue', content: [{ type: 'text', text: prompt }], clientTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone } });
+      const { prompt, evidenceCount } = await api('/api/gift-suggest', { method: 'POST', body: { contactId, memoryIds, budget, occasion, occasionDate, planId: state.suggestPlanId || undefined } });
+      if (!state.dshEmbedded) {
+        await navigator.clipboard.writeText(prompt);
+        closeModal();
+        toast(evidenceCount ? '礼物建议指令已复制，粘贴到 DSH 会话即可' : '暂无记忆依据，指令已复制；AI 会基于标签给通用建议');
+        return;
+      }
+      // 嵌入模式：等 AI 回复就地弹层（同首页/详情页按钮动线），AI 建的方案卡随后出现在下方
       closeModal();
-      toast(evidenceCount ? '已交给 AI 想礼物，方案卡会出现在下面' : 'AI 会给通用建议，建议先为 TA 补些记忆');
+      await askHostAi(prompt, { title: '送什么 · AI 建议' });
     } catch (err) { toast(err.message, true); }
   });
 

@@ -10,7 +10,7 @@ use deck::{conds, DataTable, QueryExecutor, SelectExecutor, TableService};
 
 use crate::model::{self, Plan as PlanModel};
 
-const PLAN_STATUSES: [&str; 3] = ["idea", "decided", "sent"];
+const PLAN_STATUSES: [&str; 4] = ["idea", "decided", "sent", "done"];
 
 /// 计划服务
 pub struct Plan {
@@ -150,7 +150,7 @@ impl Plan {
             if s.is_empty() { "idea".to_owned() } else { s }
         };
         if !PLAN_STATUSES.contains(&status.as_str()) {
-            return Err(error!("status 必须是：idea / decided / sent"));
+            return Err(error!("status 必须是：idea / decided / sent / done"));
         }
         let now = model::now();
         let id = { let g = val.get_string("id"); if g.is_empty() { model::uid("gp") } else { g } };
@@ -182,6 +182,8 @@ impl Plan {
     pub fn set(&self) -> tube::Result<Json> {
         let val = self.value();
         let id = self.resolve_id(&val.get_string("id"))?;
+        let current = self.one(&id)?;
+        let current_status = current["status"].as_str().unwrap_or_default();
         let mut data = Map::new();
         for (payload_key, column, cap) in [
             ("idea", "idea", 200usize),
@@ -217,10 +219,17 @@ impl Plan {
         }
         if let Some(v) = Self::provided(&val, "status") {
             if !PLAN_STATUSES.contains(&v.as_str()) {
-                return Err(error!("status 必须是：idea / decided / sent"));
+                return Err(error!("status 必须是：idea / decided / sent / done"));
+            }
+            if ["sent", "done"].contains(&current_status) && v != current_status {
+                return Err(error!("已终结的计划不能更改状态"));
+            }
+            // 普通完成重试不刷新完成时间；仍允许修正文案等字段。
+            if v == "done" && current_status == "done" && data.is_empty() {
+                return Ok(current);
             }
             data.insert("status", Value::from(v.clone()));
-            if v == "sent" {
+            if v == "sent" && current["sentAt"].as_str().unwrap_or_default().is_empty() {
                 data.insert("sent_at", Value::from(model::now()));
             }
         }
@@ -242,6 +251,9 @@ impl Plan {
             return Err(error!("计划不存在: {id}"));
         }
         let plan = plan_json(&row);
+        if plan["status"].as_str() == Some("done") {
+            return Err(error!("已完成的计划不能标记已送出"));
+        }
         let existing = plan["memoryId"].as_str().unwrap_or_default();
         if !existing.is_empty() {
             let mem = Memory::new(Value::Null).one(existing);

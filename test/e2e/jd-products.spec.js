@@ -26,6 +26,8 @@ const jdButton = (page, id) => page.locator(`[data-action="jd-open"][data-id="${
 async function gifts(page) {
   await page.goto('/');
   await page.locator('.nav-item[data-view="gifts"]').click();
+  await expect(page.locator('#view-gifts .gift-tools > summary').first()).toBeVisible();
+  for (const summary of await page.locator('#view-gifts .gift-tools > summary').all()) await summary.click();
 }
 async function openReady(page, id) {
   await jdButton(page, id).click();

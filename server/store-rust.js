@@ -8,21 +8,15 @@ import {
   run as cli,
 } from './relstore-bridge.js';
 import { httpError, now } from './store-shared.js';
+import { deriveOccasions, upcomingHolidays } from './occasions.js';
 
 export const RELATIONS = ['family', 'friend', 'colleague', 'client', 'partner', 'other'];
 export const MEMORY_TYPES = ['preference', 'dislike', 'taboo', 'event', 'gift', 'promise', 'interaction', 'attribute'];
 export const MEMORY_STATUSES = ['pending', 'confirmed', 'rejected'];
 export const DIRECTIONS = ['', 'user_to_contact', 'contact_to_user', 'both'];
 export const LIFESPANS = ['long', 'short'];
-export const PLAN_STATUSES = ['idea', 'decided', 'sent'];
+export const PLAN_STATUSES = ['idea', 'decided', 'sent', 'done'];
 export const FUZZY_DATE_RE = /^(?:\d{4}-\d{2}(?:-\d{2})?|\d{4}-\d{2}-__|每年-\d{2}-\d{2}|\d{2}-\d{2})$/;
-
-const FIXED_HOLIDAYS = [
-  { occasion: 'teacher_day', label: '教师节', md: '09-10', match: (c) => c.tags.includes('老师') || c.tags.includes('教师') || c.name.includes('老师') || c.name.includes('教师') },
-  { occasion: 'women_day', label: '妇女节', md: '03-08', match: () => false },
-  { occasion: 'new_year', label: '元旦', md: '01-01', match: () => false },
-  { occasion: 'christmas', label: '圣诞节', md: '12-25', match: () => false },
-];
 
 export function uid(prefix = '') {
   return (prefix ? `${prefix}_` : '') + Math.random().toString(16).slice(2, 10);
@@ -435,7 +429,8 @@ export function createPlan(fields = {}) {
   const contactId = String(fields.contactId ?? '');
   if (!getContact(contactId)) throw httpError(404, '联系人不存在');
   const v = validatePlanFields(fields);
-  const status = PLAN_STATUSES.includes(fields.status) ? fields.status : 'idea';
+  const status = String(fields.status ?? '').trim() || 'idea';
+  if (!PLAN_STATUSES.includes(status)) throw httpError(400, `status 必须是：${PLAN_STATUSES.join(' / ')}`);
   const { plan } = cli(['plan', 'add',
     '--contact', contactId,
     '--idea', v.idea,
@@ -482,8 +477,12 @@ export function updatePlan(id, patch = {}) {
       '--product-name', v.productName, '--product-price', v.productPrice, '--product-url', v.productUrl);
   }
   if ('status' in patch) {
-    if (!PLAN_STATUSES.includes(patch.status)) throw httpError(400, 'status 必须是：idea / decided / sent');
-    args.push('--status', patch.status);
+    const status = String(patch.status ?? '').trim() || 'idea';
+    if (!PLAN_STATUSES.includes(status)) throw httpError(400, `status 必须是：${PLAN_STATUSES.join(' / ')}`);
+    if (['sent', 'done'].includes(p.status) && status !== p.status) {
+      throw httpError(400, '已终结的计划不能更改状态');
+    }
+    args.push('--status', status);
   }
   const { plan } = cli(args);
   return plan;
@@ -496,9 +495,18 @@ export function deletePlan(id) {
   return removed;
 }
 
+export function markPlanDone(id) {
+  const p = getPlan(id);
+  if (!p) throw httpError(404, '计划不存在');
+  if (p.status === 'sent') throw httpError(400, '已送出的计划不能标记完成');
+  if (p.status === 'done') return p;
+  return updatePlan(id, { status: 'done' });
+}
+
 export function markPlanSent(id) {
   const p = getPlan(id);
   if (!p) throw httpError(404, '计划不存在');
+  if (p.status === 'done') throw httpError(400, '已完成的计划不能标记已送出');
   const { plan, memory } = cli(['plan', 'sent', String(id)]);
   return { plan: plan || p, memory };
 }
@@ -506,7 +514,14 @@ export function markPlanSent(id) {
 // ---------- 礼赠视图 ----------
 export function giftReciprocity() {
   const { items } = cli(['reciprocity']);
-  return items;
+  const stamp = (m) => (m.date || '').replace('每年-', '0000-') || (m.createdAt || '').slice(0, 10);
+  const received = listMemories({ type: 'gift', status: 'confirmed' })
+    .filter((m) => !m.supersededBy && ['contact_to_user', 'both'].includes(m.direction))
+    .sort((a, b) => stamp(b).localeCompare(stamp(a)));
+  return items.map((item) => {
+    const memory = received.find((m) => m.contactId === item.contactId);
+    return { ...item, memoryId: memory.id, content: memory.content };
+  });
 }
 
 export function giftLedger() {
@@ -515,9 +530,10 @@ export function giftLedger() {
 }
 
 export function giftOccasions(days = 30) {
-  const { occasions } = cli(['occasion', '--days', String(days)]);
-  return occasions;
+  return deriveOccasions(listContacts({ includeArchived: false }), listPlans(), days);
 }
+
+export { upcomingHolidays };
 
 export function fadingContacts(days = 90) {
   const { fading } = cli(['fading', '--days', String(days)]);
@@ -525,11 +541,19 @@ export function fadingContacts(days = 90) {
 }
 
 // ---------- 素材 ----------
-export function saveMaterial({ kind = 'text', text = '', contactId = '', occasion = '' } = {}) {
+export function saveMaterial({ kind = 'text', text = '', contactId = '', contactIds, occasion = '' } = {}) {
   const content = String(text ?? '');
   if (!content.trim()) throw httpError(400, '素材内容不能为空');
   if (content.length > 200_000) throw httpError(400, '素材过长（上限 20 万字符）');
-  const cid = String(contactId ?? '');
+  // 多人素材：contactId 字段只存第一人（锚点，rust CLI --contact 校验存在性存不了多人），
+  // 完整列表由 facade 写侧车（material-contacts.js），与 JSON 路径共享同一约定
+  let cid = String(contactId ?? '');
+  if (Array.isArray(contactIds)) {
+    const ids = [...new Set(contactIds.map(String).filter(Boolean))];
+    if (ids.length > 10) throw httpError(400, '主要涉及人最多 10 个');
+    if (ids.length && !ids.every((x) => getContact(x))) throw httpError(404, '关联的联系人不存在');
+    cid = ids[0] || '';
+  }
   if (cid && !getContact(cid)) throw httpError(404, '关联的联系人不存在');
   const { material } = cli(['material', 'add',
     '--text', content,

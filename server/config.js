@@ -28,6 +28,7 @@ export const CONTACTS_PATH = path.join(DATA_DIR, 'contacts.json');
 export const MEMORIES_PATH = path.join(DATA_DIR, 'memories.json');
 export const MATERIALS_PATH = path.join(DATA_DIR, 'materials.json');
 export const MATERIAL_REPORTS_PATH = path.join(DATA_DIR, 'material-reports.json');
+export const MATERIAL_CONTACTS_PATH = path.join(DATA_DIR, 'material-contacts.json');
 export const MEMORY_VECTORS_PATH = path.join(DATA_DIR, 'memory-vectors.json');
 export const ORGANIZE_QUESTIONS_PATH = path.join(DATA_DIR, 'organize-questions.json');
 export const PLAN_SUGGESTIONS_PATH = path.join(DATA_DIR, 'plan-suggestions.json');

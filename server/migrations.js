@@ -108,7 +108,7 @@ export function migrateDb(rawDb) {
       p.productName = typeof p.productName === 'string' ? p.productName.slice(0, 100) : '';
       p.productPrice = typeof p.productPrice === 'string' ? p.productPrice.slice(0, 40) : '';
       p.productUrl = typeof p.productUrl === 'string' ? p.productUrl.slice(0, 500) : '';
-      p.status = ['idea', 'decided', 'sent'].includes(p.status) ? p.status : 'idea';
+      p.status = ['idea', 'decided', 'sent', 'done'].includes(p.status) ? p.status : 'idea';
       p.sentAt = typeof p.sentAt === 'string' ? p.sentAt : '';
       p.memoryId = typeof p.memoryId === 'string' ? p.memoryId : '';
       p.source = p.source === 'ai' ? 'ai' : 'user';
