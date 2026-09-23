@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 pub const GATEWAY: &str = "https://api.jd.com/routerjson";
-pub const GOODS: &str = "jd.union.open.goods.query";
+pub const GOODS: &str = "jd.union.open.goods.jingfen.query";
 pub const PROMOTION: &str = "jd.union.open.promotion.common.get";
 pub const REQUIRED: [&str; 3] = ["JD_APP_KEY", "JD_APP_SECRET", "JD_SITE_ID"];
 pub const RESPONSE_LIMIT: u64 = 2 * 1024 * 1024;
@@ -71,19 +71,49 @@ pub fn decode_result(body: Value, method: &str, key: &str) -> std::result::Resul
         return Err(api_error(error));
     }
     let wrapper_key = format!("{}_responce", method.replace('.', "_"));
-    let wrapper = body.get(&wrapper_key).ok_or_else(|| {
-        if body.get("code").is_some() {
-            api_error(&body)
-        } else {
-            protocol_error()
-        }
-    })?;
-    if wrapper.get("code").is_some() && !code_is(wrapper, 0) {
+    let wrapper = body
+        .get(&wrapper_key)
+        .or_else(|| body.get("jingfen_query_responce"))
+        .ok_or_else(|| {
+            if body.get("code").is_some() {
+                api_error(&body)
+            } else {
+                Failure::new(
+                    502,
+                    format!(
+                        "京东返回的数据格式异常（缺少 {}），请稍后重试",
+                        wrapper_key
+                    ),
+                )
+            }
+        })?;
+    if wrapper.get("code").is_some_and(|code| !code_is(wrapper, 0)) {
         return Err(api_error(wrapper));
     }
-    let result = wrapper.get(key).ok_or_else(protocol_error)?;
+    let result = wrapper
+        .get(key)
+        .or_else(|| wrapper.get("result"))
+        .or_else(|| wrapper.get("data"))
+        .ok_or_else(|| {
+            let keys: Vec<&str> = wrapper
+                .as_object()
+                .map(|obj| obj.keys().map(String::as_str).collect())
+                .unwrap_or_default();
+            Failure::new(
+                502,
+                format!("京东返回的数据格式异常（未找到 {}，实际字段：{:?}）", key, keys),
+            )
+        })?;
     let result = match result.as_str() {
-        Some(text) => serde_json::from_str(text).map_err(|_| protocol_error())?,
+        Some(text) => serde_json::from_str(text).map_err(|_| {
+            Failure::new(
+                502,
+                format!(
+                    "京东返回的数据格式异常（结果解析失败，前 200 字符：{}）",
+                    text.chars().take(200).collect::<String>()
+                ),
+            )
+        })?,
         None => result.clone(),
     };
     if !code_is(&result, 200) {

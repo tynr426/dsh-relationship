@@ -19,6 +19,7 @@
     <div class="top-actions">
       <span id="service-status" class="service-status" role="status" aria-live="polite"><i></i><span>本地 · 关系记忆</span></span>
       <button id="btn-quick-memory" class="primary-btn" type="button">＋ 记一笔</button>
+      <button id="btn-quick-plan" class="primary-btn" type="button">＋ 记个打算</button>
     </div>
   </header>
 
@@ -269,6 +270,10 @@
       <!-- 计划 -->
       <form id="form-plan" class="modal-body hidden">
         <h3>计划</h3>
+        <label>一句话（本地解析，自动帮你填，可再改）
+          <textarea id="plan-say" rows="2" maxlength="200" placeholder="比如：下周三约小李吃饭 · 教师节前看望王老师 · 打算联系一下老张"></textarea>
+        </label>
+        <p class="smart-hint hidden" id="plan-say-hint" aria-live="polite"></p>
         <label>为谁
           <select id="plan-contact" required></select>
         </label>
@@ -324,6 +329,7 @@
   </div>
 
   <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+  <script src="plan-parse.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

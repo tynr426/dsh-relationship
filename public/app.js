@@ -1894,6 +1894,8 @@
   }
   function openPlanModal(contactId, occasion, occasionDate, plan) {
     if (!state.contacts.length) { toast('先到「联系人」新建一个联系人', true); return; }
+    $('#plan-say').value = '';
+    $('#plan-say-hint').classList.add('hidden');
     fillPlanContacts(plan?.contactId || contactId || state.contacts[0]?.id);
     $('#plan-occasion').value = occasion ?? plan?.occasion ?? '';
     $('#plan-date').value = occasionDate ?? plan?.occasionDate ?? '';
@@ -1908,6 +1910,28 @@
   }
 
   $('#btn-new-plan').addEventListener('click', () => openPlanModal());
+  $('#btn-quick-plan').addEventListener('click', () => openPlanModal());
+
+  // 一句话建计划：纯本地规则解析，边说边拆到下面的表单位；没识别的部分留给用户补，不猜
+  let sayTimer = null;
+  $('#plan-say').addEventListener('input', () => {
+    clearTimeout(sayTimer);
+    const text = $('#plan-say').value.trim();
+    const hint = $('#plan-say-hint');
+    if (!text) { hint.classList.add('hidden'); return; }
+    sayTimer = setTimeout(() => {
+      const r = PlanParse.parse(text, { contacts: state.contacts });
+      const bits = [];
+      if (r.contactId) { $('#plan-contact').value = r.contactId; bits.push(`联系人 ${r.contactName}`); }
+      else bits.push('没认出联系人，请在下面选择');
+      if (r.date) { $('#plan-date').value = r.date; bits.push(`日期 ${r.date}`); }
+      else bits.push('没认出日期，可手动补');
+      if (r.occasion) { $('#plan-occasion').value = r.occasion; bits.push(`场合 ${r.occasion}`); }
+      if (r.idea) $('#plan-idea').value = r.idea;
+      hint.textContent = `已填：${bits.join(' · ')}。请核对，保存前都可手改。`;
+      hint.classList.remove('hidden');
+    }, 200);
+  });
 
   async function openSuggestModal(contactId, occasion, planId, occasionDate = '') {
     const c = state.contacts.find((x) => x.id === contactId);

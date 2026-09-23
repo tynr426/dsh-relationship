@@ -106,7 +106,7 @@ fn search_query(keyword: &str, min_price: Option<f64>, max_price: Option<f64>) -
     if min_price.zip(max_price).is_some_and(|(min, max)| min > max) {
         return Err(Failure::new(400, "最低价不能大于最高价"));
     }
-    let mut query = json!({"sceneId": 1, "keyword": keyword, "pageIndex": 1, "pageSize": 20});
+    let mut query = json!({"eliteId": 1, "keyword": keyword, "pageIndex": 1, "pageSize": 20});
     if let Some(price) = min_price {
         query["pricefrom"] = json!(price);
     }
@@ -207,17 +207,17 @@ mod tests {
             ("sign_method".into(), "md5".into()),
             (
                 "360buy_param_json".into(),
-                "{\"goodsReqDTO\":{\"keyword\":\"岩茶\",\"sceneId\":1}}".into(),
+                "{\"goodsReq\":{\"keyword\":\"岩茶\",\"eliteId\":1}}".into(),
             ),
         ]);
         assert_eq!(
             sign(&params, "demo-secret"),
-            "ADD1D49671F47A0C464A74A9CDC40007"
+            "E98439544DA55EB086BC656A9BA269B1"
         );
         params.insert("sign".into(), "old-signature".into());
         assert_eq!(
             sign(&params, "demo-secret"),
-            "ADD1D49671F47A0C464A74A9CDC40007"
+            "E98439544DA55EB086BC656A9BA269B1"
         );
     }
 
@@ -244,7 +244,7 @@ mod tests {
         let query = search_query(" 岩茶 ", Some(10.5), Some(200.0)).unwrap();
         assert_eq!(
             query,
-            json!({"sceneId": 1, "keyword": "岩茶", "pricefrom": 10.5, "priceto": 200.0, "pageIndex": 1, "pageSize": 20})
+            json!({"eliteId": 1, "keyword": "岩茶", "pricefrom": 10.5, "priceto": 200.0, "pageIndex": 1, "pageSize": 20})
         );
         for keyword in ["", "\n", &"茶".repeat(81), "茶\u{0001}"] {
             assert_eq!(search_query(keyword, None, None).unwrap_err().status, 400);
@@ -265,7 +265,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parse_items(&result).unwrap().len(), 1);
-        let documented = json!({"jd_union_open_goods_query_responce": {"queryResult": {"code": "200", "data": {"goodsResp": goods()}}}});
+        let documented = json!({"jd_union_open_goods_jingfen_query_responce": {"queryResult": {"code": "200", "data": {"goodsResp": goods()}}}});
         assert_eq!(
             parse_items(&decode_result(documented, GOODS, "queryResult").unwrap()).unwrap()[0]
                 .price,
@@ -278,7 +278,7 @@ mod tests {
         for body in [
             json!({"error_response": {"code": "403", "unknown": "test-secret"}}),
             json!({"code": "408", "zh_desc": "\u{1}控制字符test-secret"}),
-            json!({"jd_union_open_goods_query_responce": {"queryResult": {"code": 408, "message": format!("长{}", "长".repeat(200))}}}),
+            json!({"jd_union_open_goods_jingfen_query_responce": {"queryResult": {"code": 408, "message": format!("长{}", "长".repeat(200))}}}),
             json!({"unexpected": "test-secret"}),
         ] {
             let error = decode_result(body, GOODS, "queryResult").unwrap_err();
@@ -295,7 +295,7 @@ mod tests {
         assert!(text.contains("签名验证失败"), "{text}");
         assert!(!text.contains("test-secret"));
         let error = decode_result(
-            json!({"jd_union_open_goods_query_responce": {"queryResult": {"code": 403, "message": "无访问权限", "requestId": "test-secret"}}}),
+            json!({"jd_union_open_goods_jingfen_query_responce": {"queryResult": {"code": 403, "message": "无访问权限", "requestId": "test-secret"}}}),
             GOODS,
             "queryResult",
         )
@@ -344,7 +344,7 @@ mod tests {
         assert_eq!(result["items"][0]["price"], 120.0);
         let requests = server.join().unwrap();
         let query: Value = serde_json::from_str(&requests[0]["360buy_param_json"]).unwrap();
-        assert_eq!(query["goodsReqDTO"]["priceto"], 100.0);
+        assert_eq!(query["goodsReq"]["priceto"], 100.0);
     }
 
     #[test]
@@ -373,7 +373,7 @@ mod tests {
         let lookup: Value = serde_json::from_str(&requests[0]["360buy_param_json"]).unwrap();
         assert_eq!(
             lookup,
-            json!({"goodsReqDTO": {"sceneId": 1, "itemIds": ["union_item-1"]}})
+            json!({"goodsReq": {"eliteId": 1, "itemIds": ["union_item-1"]}})
         );
         let promote: Value = serde_json::from_str(&requests[1]["360buy_param_json"]).unwrap();
         assert_eq!(

@@ -953,4 +953,32 @@ test.describe('关系记忆工作台', () => {
     await expect(page.locator('#btn-manage-relations')).toBeFocused();
     expect(errors).toEqual([]);
   });
+
+  test('一句话建计划：本地解析自动拆联系人/日期/想法，核对后保存', async ({ page, request }) => {
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    const contact = (await (await request.post('/api/contacts', { data: { name: 'E2E 一句话小李' } })).json()).contact;
+    const d = new Date(); d.setDate(d.getDate() + 1);
+    const tomorrow = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    await page.goto('/');
+    // 联系人列表由启动时 refresh 异步载入：弹窗可能因列表未就绪被拒，toPass 兜底重开
+    await expect(async () => {
+      await page.getByRole('button', { name: '＋ 记个打算' }).click();
+      await expect(page.locator('#plan-say')).toBeVisible();
+    }).toPass();
+    await page.locator('#plan-say').fill(`明天约${contact.name}吃饭`);
+    await expect(page.locator('#plan-contact')).toHaveValue(contact.id);
+    await expect(page.locator('#plan-date')).toHaveValue(tomorrow);
+    await expect(page.locator('#plan-idea')).toHaveValue('约吃饭');
+    await expect(page.locator('#plan-say-hint')).toBeVisible();
+    await expect(page.locator('#plan-say-hint')).toContainText(`联系人 ${contact.name}`);
+    await page.locator('#form-plan button[type="submit"]').click();
+    await expect(page.locator('#toast')).toContainText('计划已保存');
+    const plans = (await (await request.get('/api/plans')).json()).plans;
+    const mine = plans.find((p) => p.contactId === contact.id);
+    expect(mine).toBeTruthy();
+    expect(mine.occasionDate).toBe(tomorrow);
+    expect(mine.idea).toBe('约吃饭');
+    expect(errors).toEqual([]);
+  });
 });

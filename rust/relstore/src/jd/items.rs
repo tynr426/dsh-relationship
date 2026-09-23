@@ -59,6 +59,10 @@ pub fn parse_items(result: &Value) -> std::result::Result<Vec<Item>, Failure> {
     };
     let rows = if let Some(rows) = data.as_array() {
         rows.iter().collect::<Vec<_>>()
+    } else if let Some(rows) = data.get("goodsList").and_then(|v| v.as_array()) {
+        rows.iter().collect()
+    } else if let Some(rows) = data.get("result").and_then(|v| v.as_array()) {
+        rows.iter().collect()
     } else if let Some(rows) = data.get("goodsResp") {
         if let Some(array) = rows.as_array() {
             array.iter().collect()
@@ -67,6 +71,8 @@ pub fn parse_items(result: &Value) -> std::result::Result<Vec<Item>, Failure> {
         } else {
             return Err(super::protocol::protocol_error());
         }
+    } else if data.is_object() && data.get("itemId").is_some() {
+        vec![data]
     } else {
         return Err(super::protocol::protocol_error());
     };

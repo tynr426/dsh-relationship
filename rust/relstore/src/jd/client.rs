@@ -92,7 +92,7 @@ impl JdClient {
     }
 
     pub fn goods(&self, query: Value) -> std::result::Result<Vec<Item>, Failure> {
-        let result = self.request(GOODS, json!({"goodsReqDTO": query}), "queryResult")?;
+        let result = self.request(GOODS, json!({"goodsReq": query}), "queryResult")?;
         parse_items(&result)
     }
 
@@ -104,7 +104,7 @@ impl JdClient {
     pub fn promote(&self, item_id: &str) -> std::result::Result<Value, Failure> {
         validate_item_id(item_id)?;
         let item = self
-            .goods(json!({"sceneId": 1, "itemIds": [item_id]}))?
+            .goods(json!({"eliteId": 1, "itemIds": [item_id]}))?
             .into_iter()
             .find(|item| item.item_id == item_id)
             .ok_or_else(|| Failure::new(404, "商品已不可推广或已下架，请重新搜索"))?;
