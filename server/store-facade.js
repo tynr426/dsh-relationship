@@ -13,6 +13,9 @@ import * as materialReports from './material-reports.js';
 import * as materialContacts from './material-contacts.js';
 import * as organizeQuestions from './organize-questions.js';
 import * as planSuggestions from './plan-suggestions.js';
+import { createMemoryRevisions } from './memory-revisions.js';
+import { createFollowups } from './followups.js';
+import { createMaterialDelivery } from './material-delivery.js';
 
 let mode = process.env.REL_STORE;
 if (mode !== 'rust' && mode !== 'json') {
@@ -34,6 +37,29 @@ if (mode !== 'rust' && mode !== 'json') {
 
 export const STORE_MODE = mode;
 const impl = await import(mode === 'rust' ? './store-rust.js' : './store.js');
+const revisions = createMemoryRevisions({ store: impl, validateMemoryFields: (fields) => impl.validateMemoryFields(fields) });
+const { proposeMemoryUpdate, listMemoryRevisions, confirmMemoryRevision, rejectMemoryRevision,
+  memoryHistory, restoreMemoryHistory, updateMemory } = revisions;
+const followups = createFollowups({ store: impl });
+const { listFollowups, updateFollowup } = followups;
+const deliveries = createMaterialDelivery({ store: impl });
+const { allMaterialDeliveries, materialDelivery, markMaterialDelivery } = deliveries;
+
+function loadStore() {
+  revisions.validate();
+  followups.validate();
+  deliveries.validate();
+  const result = impl.loadStore();
+  revisions.recover({ allowConflict: true });
+  return result;
+}
+function overview() {
+  // 恢复 journal 后再计算主库统计，保证历史/提案与主库处于同一已确认状态。
+  const pendingRevisions = listMemoryRevisions({ status: 'pending' });
+  const result = impl.overview();
+  return { ...result, pendingRevisions, counts: { ...result.counts, pendingRevisions: pendingRevisions.length } };
+}
+function counts() { return overview().counts; }
 
 // ---------- 素材整理报告（facade 层，两种模式共用侧车存储） ----------
 /** 保存素材：多人素材（contactIds 数组）的完整列表写侧车，contactId 字段只存第一人（锚点）。
@@ -117,27 +143,56 @@ function deletePlan(id) {
   planSuggestions.clearBaseReferences(String(id));
   return removed;
 }
+function deleteMemory(id) {
+  followups.validate();
+  const removed = revisions.deleteMemory(id);
+  followups.remove({ memoryIds: [String(id)] });
+  return removed;
+}
 // 报告与反问随素材清理：删素材必清；联系人级联删素材时（rust 模式）也清，
 // JSON 模式联系人删除不动素材（既有行为），报告随素材保留。
 function deleteMaterial(id) {
+  deliveries.validate();
   const removed = impl.deleteMaterial(id);
   materialReports.removeMaterialReports([String(id)]);
   materialContacts.removeMaterialContacts([String(id)]);
   organizeQuestions.removeOrganizeQuestions([String(id)]);
+  deliveries.remove([String(id)]);
   return removed;
 }
 function deleteContact(id) {
+  id = String(id);
+  followups.validate();
+  deliveries.validate();
   const materialIds = impl.listMaterials({}).filter((mt) => mt.contactId === id).map((mt) => mt.id);
-  const result = impl.deleteContact(id);
+  const result = revisions.deleteContact(id);
+  followups.remove({ contactId: id });
   const gone = materialIds.filter((mid) => !impl.getMaterial(mid));
   materialReports.removeMaterialReports(gone);
   materialContacts.removeMaterialContacts(gone);
   organizeQuestions.removeOrganizeQuestions(gone);
+  deliveries.remove(gone);
   return result;
 }
 
 export default {
   ...impl,
+  loadStore,
+  overview,
+  counts,
+  proposeMemoryUpdate,
+  listMemoryRevisions,
+  confirmMemoryRevision,
+  rejectMemoryRevision,
+  memoryHistory,
+  restoreMemoryHistory,
+  updateMemory,
+  deleteMemory,
+  listFollowups,
+  updateFollowup,
+  allMaterialDeliveries,
+  materialDelivery,
+  markMaterialDelivery,
   saveMaterial,
   materialContactIds,
   allMaterialContacts,

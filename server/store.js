@@ -1,11 +1,12 @@
 // 数据层：内存态 + 原子落盘。contacts / memories / materials 三个 JSON 文件，
 // meta.json 存 schemaVersion。单用户本地应用，删除即真删。
-import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { DATA_DIR, MATERIALS_DIR, CONTACTS_PATH, MEMORIES_PATH, MATERIALS_PATH, PLANS_PATH, RELATION_TYPES_PATH, META_PATH, ensureDirs } from './config.js';
+import { isDeepStrictEqual } from 'node:util';
+import { CONTACTS_PATH, MEMORIES_PATH, MATERIALS_PATH, PLANS_PATH, RELATION_TYPES_PATH, META_PATH, ensureDirs } from './config.js';
 import { migrateDb, CURRENT_SCHEMA_VERSION } from './migrations.js';
 import { deriveOccasions, upcomingHolidays } from './occasions.js';
+import { readJsonFile, validateDataFile, atomicWriteFile, JsonFileError } from './json-file.js';
 
 export const RELATIONS = ['family', 'friend', 'colleague', 'client', 'partner', 'other'];
 export const MEMORY_TYPES = ['preference', 'dislike', 'taboo', 'event', 'gift', 'promise', 'interaction', 'attribute'];
@@ -38,12 +39,10 @@ export function httpError(status, message) {
 let db = migrateDb({ schemaVersion: 0, contacts: [], memories: [], materials: [], plans: [] });
 db.relationTypes = seedRelationTypes([]);
 let saveTimer = null;
+let loadFailed = false;
 
 function readJsonArray(file) {
-  try {
-    const v = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return Array.isArray(v) ? v : [];
-  } catch { return []; }
+  return readJsonFile(file, [], (v) => validateDataFile(path.basename(file), v));
 }
 
 /** 关系类型装载：文件缺失/为空时播种内置 6 类（幂等；已注册的自定义类型原样保留） */
@@ -56,29 +55,36 @@ function seedRelationTypes(stored) {
   return [...byKey.values()].map((t) => ({ builtin: false, sort: 100, createdAt: '', updatedAt: '', ...t }));
 }
 
+export function suspendPersistence() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  loadFailed = true;
+}
+
 export function loadStore() {
-  ensureDirs();
-  let meta = {};
-  try { meta = JSON.parse(fs.readFileSync(META_PATH, 'utf8')); } catch { /* first run */ }
-  db = migrateDb({
-    schemaVersion: Number.isInteger(meta.schemaVersion) ? meta.schemaVersion : 0,
+  // 完整加载成功前禁止旧内存落盘，避免损坏读取后仍被延时写覆盖。
+  suspendPersistence();
+  const meta = readJsonFile(META_PATH, { schemaVersion: 0 }, (v) => validateDataFile('meta.json', v));
+  const raw = {
+    schemaVersion: meta.schemaVersion,
     contacts: readJsonArray(CONTACTS_PATH),
     memories: readJsonArray(MEMORIES_PATH),
     materials: readJsonArray(MATERIALS_PATH),
     plans: readJsonArray(PLANS_PATH),
-  });
-  db.relationTypes = seedRelationTypes(readJsonArray(RELATION_TYPES_PATH));
+  };
+  const types = readJsonArray(RELATION_TYPES_PATH);
+  const next = migrateDb(raw);
+  next.relationTypes = seedRelationTypes(types);
+  db = next;
+  loadFailed = false;
   writeAll();
   return db;
 }
 
 function writeAll() {
+  if (loadFailed) throw new JsonFileError(META_PATH, 'LOAD_FAILED_WRITES_BLOCKED');
   ensureDirs();
-  const write = (file, value) => {
-    const tmp = file + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(value, null, 1));
-    fs.renameSync(tmp, file);
-  };
+  const write = (file, value) => atomicWriteFile(file, JSON.stringify(value, null, 1));
   write(CONTACTS_PATH, db.contacts);
   write(MEMORIES_PATH, db.memories);
   write(MATERIALS_PATH, db.materials);
@@ -89,6 +95,7 @@ function writeAll() {
 
 export function persist() {
   clearTimeout(saveTimer);
+  if (loadFailed) throw new JsonFileError(META_PATH, 'LOAD_FAILED_WRITES_BLOCKED');
   saveTimer = setTimeout(writeAll, 80);
 }
 export function flush() {
@@ -349,7 +356,7 @@ export function listMemories({ contactId, status, type, q, direction, occasion, 
 }
 export function getMemory(id) { return db.memories.find((m) => m.id === id) || null; }
 
-function validateMemoryFields({ type, content, date, importance, saidAt, direction, lifespan, occasion }) {
+export function validateMemoryFields({ type, content, date, importance, saidAt, direction, lifespan, occasion }) {
   if (!MEMORY_TYPES.includes(type)) throw httpError(400, `type 必须是：${MEMORY_TYPES.join(' / ')}`);
   const text = String(content ?? '').trim();
   if (!text) throw httpError(400, '记忆内容不能为空');
@@ -502,8 +509,11 @@ export function restoreMemory(id) {
   return m;
 }
 
-export function updateMemory(id, patch = {}) {
+export function updateMemory(id, patch = {}, { expected } = {}) {
   const m = getMemory(String(id));
+  if (expected && !isDeepStrictEqual(m, expected)) {
+    throw Object.assign(httpError(409, '原记忆已修改，旧提案不能覆盖'), { code: 'MEMORY_CONFLICT' });
+  }
   if (!m) throw httpError(404, '记忆不存在');
   if (m.status !== 'confirmed') throw httpError(400, `状态为 ${m.status}，只有已确认记忆可以直接编辑`);
   applyMemoryEdit(m, patch);

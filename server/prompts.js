@@ -6,9 +6,9 @@
 // ── 纪律片段：每条一个 key，一个主题只说一遍 ──────────────────────────────
 export const DISCIPLINE = {
   onePerFact: '一条记忆只含一个事实，禁止把多件事塞进一条',
-  pendingOnly: 'AI 写入记忆一律为待确认（pending）状态，不得自称"已记住"而未实际调用工具',
+  pendingOnly: 'AI 写入记忆一律为待确认（pending）状态；memory_update 只提交原文→建议的修改提案，用户在工作台确认前原文不变、检索仍用旧内容，不得声称已修改；不得自称"已记住"而未实际调用工具',
   confirmHumanOnly: '确认入库是用户的拍板动作，没有 AI 工具（memory_confirm 已下线）——用户说"确认"时引导其回工作台待确认队列操作',
-  sessionPendingCheck: '每次会话开始（收到用户第一条消息时）先调用 pending_summary 查看待确认队列：有待确认记忆或待确认联系人就主动提醒用户回工作台逐条确认，并简述最重要的几条；没有就不提',
+  sessionPendingCheck: '每次会话开始（收到用户第一条消息时）先调用 pending_summary 查看待确认队列：有待确认记忆、修改提案或待确认联系人就主动提醒用户回工作台逐条确认，并简述最重要的几条；没有就不提',
   reportOnOrganize: '素材整理完必须用 material_report 提交整理报告（report 写清拆出的记忆清单、哪些已被既有记忆覆盖而未重复登记、发现的冲突）——对话里的汇报说完就没了，报告落进工作台素材卡才能供用户确认时对照；提交后再提示用户回工作台确认',
   searchFirst: '任何录入前先 contact_search 定位联系人防建重；命中即复用返回的编号；匹配到同名或近似称呼的疑似同一人时先与用户确认，而不是静默合并；查不到的直接 contact_add 新建——AI 新建的联系人一律进工作台待确认队列，由用户确认收录，不必停下等待，直接用返回的编号继续登记',
   sceneFirst: '先判断这段对话属于什么场景（场景标签+发生日期+参与人，一次判断即可，不二次调用），再从场景中逐条提取；同一场景可拆出多条不同 type/direction 的记忆（如一次教师节对话可同时拆出用户→老师的感谢、老师→用户的回应、双向的共同话题，各占一条）',
@@ -141,7 +141,7 @@ const TOOLS = ['contact_search', 'contact_add', 'contact_update', 'memory_add', 
 
 /** 工具清单段（播报/自足指令共用）：名字 + 一句话约束 */
 export function toolCatalog() {
-  return '可用工具：contact_search（查找联系人，任何录入前必调）、contact_add（新建联系人，AI 新建一律进工作台待确认队列、由用户确认收录，不必等待直接用返回的编号继续；tags 填身份标签如 老师/同学/客户，节日匹配依赖标签）、contact_update、memory_add（登记一条待确认记忆，一条只含一个事实；从素材提取须带 sourceQuote 原话摘录）、memory_batch_add（一段素材拆多条，每条带 sourceQuote 原话摘录与 saidAt=原话时间戳，闸门校验；长素材分多批提取，每批接着上一批的消息继续）、memory_reject（驳回待确认记忆须给理由——提取查重后清除本批重复条目时用）、memory_update、memory_search（生成祝福/礼物建议前必调，只返回已确认记忆，检索为空要明说）、timeline_get（读取某人时间线）、gift_plan_add（把礼物方案落成计划卡，理由须引用记忆点；先 gift_plan_list 查已有计划，同联系人相同想法会被拒绝——优化已有计划用 gift_plan_update 更新原卡）、gift_plan_list、gift_plan_update、gift_plan_delete、material_save（存档用户粘贴的原始素材）、material_list（列出素材，用户说"整理素材"时先调；有已拆条数但无整理报告的素材是整理未完成，应续跑而非重拆）、material_get（读素材全文后提取；响应里的 today 字段是当天日期，相对时间一律以它为锚推算；extracted 列表是已拆出的记忆，续跑时对照它跳过已覆盖的消息）、material_report（素材整理完提交整理报告，报告显示在工作台素材卡上供用户确认时对照）、organize_question（整理中确需用户拍板时登记反问——先登记再在对话里提问，工作台素材卡会以「再告诉我一点」显示问题供用户直接作答；用户作答后带 done=true 清除；整理判断以当前库为准，已删除视为不存在，不得为此反问）、pending_summary（查看待确认队列：待确认记忆与 AI 新建的待确认联系人；会话开始先调，有就提醒用户回工作台确认）。';
+  return '可用工具：contact_search（查找联系人，任何录入前必调）、contact_add（新建联系人，AI 新建一律进工作台待确认队列、由用户确认收录，不必等待直接用返回的编号继续；tags 填身份标签如 老师/同学/客户，节日匹配依赖标签）、contact_update、memory_add（登记一条待确认记忆，一条只含一个事实；从素材提取须带 sourceQuote 原话摘录）、memory_batch_add（一段素材拆多条，每条带 sourceQuote 原话摘录与 saidAt=原话时间戳，闸门校验；长素材分多批提取，每批接着上一批的消息继续）、memory_reject（驳回待确认记忆须给理由——提取查重后清除本批重复条目时用）、memory_update（只提交已确认记忆的修改提案，用户确认前原文不变，不得声称已修改；没有 AI 确认工具）、memory_search（生成祝福/礼物建议前必调，只返回已确认记忆，检索为空要明说）、timeline_get（读取某人时间线）、gift_plan_add（把礼物方案落成计划卡，理由须引用记忆点；先 gift_plan_list 查已有计划，同联系人相同想法会被拒绝——优化已有计划用 gift_plan_update 更新原卡）、gift_plan_list、gift_plan_update、gift_plan_delete、material_save（存档用户粘贴的原始素材）、material_list（列出素材，用户说"整理素材"时先调；有已拆条数但无整理报告的素材是整理未完成，应续跑而非重拆）、material_get（读素材全文后提取；响应里的 today 字段是当天日期，相对时间一律以它为锚推算；extracted 列表是已拆出的记忆，续跑时对照它跳过已覆盖的消息）、material_report（素材整理完提交整理报告，报告显示在工作台素材卡上供用户确认时对照）、organize_question（整理中确需用户拍板时登记反问——先登记再在对话里提问，工作台素材卡会以「再告诉我一点」显示问题供用户直接作答；用户作答后带 done=true 清除；整理判断以当前库为准，已删除视为不存在，不得为此反问）、pending_summary（查看待确认队列：待确认记忆、修改提案与 AI 新建的待确认联系人；会话开始先调，有就提醒用户回工作台确认）。';
 }
 
 /** 插件播报段（lib/index.js 引用）：对话即录入 + 整理流程 + 纪律 */

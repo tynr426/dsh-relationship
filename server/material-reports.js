@@ -2,21 +2,16 @@
 // 报告是展示性元数据（AI 整理完提交、工作台素材卡展示），不参与 rust/json 的
 // 关系数据——统一放一个 JSON 侧车文件，两种存储模式共用同一实现，防双实现漂移。
 // 生命周期跟随素材：素材删除（含联系人级联删除）时由 store-facade 负责清理。
-import fs from 'node:fs';
 import { MATERIAL_REPORTS_PATH, ensureDirs } from './config.js';
+import { readJsonFile, validateDataFile, atomicWriteFile } from './json-file.js';
 
 function readAll() {
-  try {
-    const v = JSON.parse(fs.readFileSync(MATERIAL_REPORTS_PATH, 'utf8'));
-    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
-  } catch { return {}; }
+  return readJsonFile(MATERIAL_REPORTS_PATH, {}, (v) => validateDataFile('material-reports.json', v));
 }
 
 function writeAll(map) {
   ensureDirs();
-  const tmp = MATERIAL_REPORTS_PATH + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(map, null, 1));
-  fs.renameSync(tmp, MATERIAL_REPORTS_PATH);
+  atomicWriteFile(MATERIAL_REPORTS_PATH, JSON.stringify(map, null, 1));
 }
 
 /** 取单条报告；无报告返回 null。 */

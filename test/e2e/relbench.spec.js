@@ -15,6 +15,11 @@ test.describe('关系记忆工作台', () => {
     await expect(page.locator('.howto-panel')).not.toHaveAttribute('open', '');
     await expect(page.locator('.nav-item svg').first()).toHaveCSS('width', '20px');
     await expect(page.locator('.privacy-note svg')).toHaveCSS('width', '18px');
+    await expect(page.locator('#topbar .primary-btn')).toHaveCount(1);
+    await expect(page.locator('#btn-quick-memory')).toHaveClass('primary-btn');
+    await expect(page.locator('#btn-quick-plan')).toHaveClass('ghost-btn');
+    await expect(page.locator('#view-home .primary-btn')).toHaveCount(0);
+    await expect(page.locator('#view-home .home-priority')).toHaveCount(0);
   });
 
   test('空库首价值：一句原话 → 保存素材 → 核对确认 → 下次联系有依据', async ({ page, request }) => {
@@ -25,6 +30,13 @@ test.describe('关系记忆工作台', () => {
     await expect(page.locator('#attention-list')).toBeEmpty();
     await page.getByRole('button', { name: '＋ 记一笔' }).click();
     await expect(page.locator('#form-contact')).toBeHidden();
+    await expect(page.locator('#qmt-text')).toBeFocused();
+    await expect(page.locator('#modal-backdrop [role="tablist"]')).toHaveCount(0);
+    await page.getByRole('button', { name: '不使用 AI？手动录入' }).click();
+    await expect(page.getByRole('dialog', { name: '手动录入', exact: true })).toBeVisible();
+    await expect(page.locator('#qm-contact-hint')).toBeVisible();
+    await expect(page.locator('#qm-ok')).toBeDisabled();
+    await page.getByRole('button', { name: '返回原话输入' }).click();
     await expect(page.locator('#qmt-text')).toBeFocused();
     await page.keyboard.press('Escape');
     await page.getByRole('button', { name: '记住一件事', exact: true }).click();
@@ -60,6 +72,8 @@ test.describe('关系记忆工作台', () => {
     await tool('material_report', { id: material.id, report: '拆出 1 条：对花生过敏。请核对原话后确认。' });
     const memoryCard = page.locator(`.pending-card[data-id="${memory.id}"]`);
     await expect(memoryCard).toContainText('原话：对花生过敏');
+    await expect(page.locator('#view-home .home-priority')).toHaveCount(1);
+    await expect(page.locator('#pending-panel')).toHaveClass(/home-priority/);
     await expect(page.locator('#recent-box')).toBeHidden();
     await page.locator(`.contact-pending[data-id="${contact.id}"]`).getByRole('button', { name: '确认收录' }).click();
     await memoryCard.getByRole('button', { name: '确认', exact: true }).click();
@@ -219,6 +233,10 @@ test.describe('关系记忆工作台', () => {
     await expect(page.locator('#toast')).toContainText('联系人已创建');
 
     await page.getByRole('button', { name: '＋ 记一笔' }).click();
+    await expect(page.locator('#qmt-text')).toBeFocused();
+    await page.getByRole('button', { name: '不使用 AI？手动录入' }).click();
+    await expect(page.locator('#qm-content')).toBeFocused();
+    await expect(page.locator('#form-quick-memory')).toContainText('不经过 AI，保存后直接进入长期记忆');
     await page.locator('#qm-contact').selectOption(contactId);
     await page.locator('#qm-type').selectOption('taboo');
     await page.locator('#qm-content').fill('对海鲜过敏');
@@ -253,6 +271,106 @@ test.describe('关系记忆工作台', () => {
     await expect(page.locator('.memory-row', { hasText: '对虾蟹过敏' })).toHaveCount(0);
   });
 
+  test('记一笔默认输入原话，手动录入往返保留两份草稿且不提前写入', async ({ page, request }) => {
+    const contact = (await (await request.post('/api/contacts', { data: { name: 'E2E 统一录入' } })).json()).contact;
+    const before = (await (await request.get('/api/materials')).json()).materials.length;
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('/');
+    await page.locator('#btn-quick-memory').click();
+    await expect(page.getByRole('dialog', { name: '记一笔', exact: true })).toBeVisible();
+    await expect(page.locator('#qmt-text')).toBeFocused();
+    await expect(page.locator('#form-quick-memory')).toBeHidden();
+    await expect(page.locator('#modal-backdrop [role="tablist"]')).toHaveCount(0);
+    await page.locator('#qmt-text').fill('E2E 统一录入说喜欢清淡口味');
+    await page.locator('.capture-options > summary').click();
+    await page.locator('#qmt-contact').selectOption(contact.id);
+    await page.locator('#qmt-occasion').fill('日常');
+    await page.getByRole('button', { name: '不使用 AI？手动录入' }).click();
+    await expect(page.getByRole('dialog', { name: '手动录入', exact: true })).toBeVisible();
+    await expect(page.locator('#qm-content')).toBeFocused();
+    await expect(page.locator('#form-smart')).toBeHidden();
+    await expect(page.locator('#qm-contact-hint')).toBeHidden();
+    await expect(page.locator('#qm-content')).toHaveValue('');
+    await page.locator('#qm-contact').selectOption(contact.id);
+    await page.locator('#qm-type').selectOption('preference');
+    await page.locator('#qm-content').fill('另一份手工草稿，不应随素材提交');
+    await page.locator('#qm-importance').selectOption('3');
+    await page.getByRole('button', { name: '返回原话输入' }).click();
+    await expect(page.locator('#qmt-text')).toBeFocused();
+    await expect(page.locator('#qmt-text')).toHaveValue('E2E 统一录入说喜欢清淡口味');
+    await expect(page.locator('#qmt-contact')).toHaveValues([contact.id]);
+    await expect(page.locator('#qmt-occasion')).toHaveValue('日常');
+    await page.getByRole('button', { name: '不使用 AI？手动录入' }).click();
+    await expect(page.locator('#qm-contact')).toHaveValue(contact.id);
+    await expect(page.locator('#qm-type')).toHaveValue('preference');
+    await expect(page.locator('#qm-content')).toHaveValue('另一份手工草稿，不应随素材提交');
+    await expect(page.locator('#qm-importance')).toHaveValue('3');
+    await page.getByRole('button', { name: '返回原话输入' }).click();
+    expect((await (await request.get('/api/materials')).json()).materials).toHaveLength(before);
+    expect((await (await request.get(`/api/memories?contact_id=${contact.id}`)).json()).memories).toEqual([]);
+    expect(await page.locator('#form-smart').evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    const saved = page.waitForResponse((r) => r.url().endsWith('/api/materials') && r.request().method() === 'POST');
+    await page.locator('#qmt-ok').click();
+    const material = (await (await saved).json()).material;
+    await expect(page.locator('#toast')).toContainText('素材已保存');
+    const listed = (await (await request.get('/api/materials')).json()).materials.find((item) => item.id === material.id);
+    expect(listed.contactIds).toEqual([contact.id]);
+    expect((await (await request.get(`/api/memories?contact_id=${contact.id}`)).json()).memories).toEqual([]);
+    await expect(page.locator(`.material-card[data-id="${material.id}"]`)).toContainText('待 AI 整理');
+    await page.locator('#btn-quick-memory').click();
+    await expect(page.locator('#qmt-text')).toBeFocused();
+    await expect(page.locator('#qmt-text')).toHaveValue('');
+    await page.getByRole('button', { name: '不使用 AI？手动录入' }).click();
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#btn-quick-memory')).toBeFocused();
+    await page.locator('#btn-quick-memory').click();
+    await expect(page.locator('#qmt-text')).toBeFocused();
+    expect(errors).toEqual([]);
+  });
+
+  test('记一笔先于联系人加载打开时补齐选项，刷新不清除草稿和归属', async ({ page, request }) => {
+    const contact = (await (await request.post('/api/contacts', { data: { name: 'E2E 延迟归属' } })).json()).contact;
+    let releaseContacts;
+    const release = new Promise((resolve) => { releaseContacts = resolve; });
+    await page.route('**/api/contacts', async (route) => {
+      const response = await route.fetch();
+      await release;
+      await route.fulfill({ response });
+    }, { times: 1 });
+    try {
+      await page.goto('/');
+      await page.locator('#btn-quick-memory').click();
+      await page.locator('#qmt-text').fill('联系人还没加载也能先输入原话');
+      await expect(page.locator('#qmt-contact option')).toHaveCount(0);
+      await page.locator('#qmt-manual').click();
+      await page.locator('#qm-content').fill('延迟加载时的手工草稿');
+      await expect(page.locator('#qm-ok')).toBeDisabled();
+      releaseContacts();
+      await expect(page.locator(`#qm-contact option[value="${contact.id}"]`)).toBeAttached();
+      await expect(page.locator('#qm-ok')).toBeEnabled();
+      await expect(page.locator('#qm-contact-hint')).toBeHidden();
+      await expect(page.locator('#qm-content')).toHaveValue('延迟加载时的手工草稿');
+      await page.locator('#qm-contact').selectOption(contact.id);
+      await page.locator('#qm-back').click();
+      await expect(page.locator('#qmt-text')).toHaveValue('联系人还没加载也能先输入原话');
+      await page.locator('.capture-options > summary').click();
+      await page.locator('#qmt-contact').selectOption(contact.id);
+      await page.locator('#qmt-occasion').fill('归属保留验证');
+      const renamed = await request.patch(`/api/contacts/${contact.id}`, { data: { name: 'E2E 延迟归属改名' } });
+      expect(renamed.ok()).toBeTruthy();
+      await expect(page.locator(`#qmt-contact option[value="${contact.id}"]`)).toHaveText('E2E 延迟归属改名');
+      await expect(page.locator('#qmt-contact')).toHaveValues([contact.id]);
+      await expect(page.locator('#qmt-text')).toHaveValue('联系人还没加载也能先输入原话');
+      await expect(page.locator('#qmt-occasion')).toHaveValue('归属保留验证');
+      await page.locator('#qmt-manual').click();
+      await expect(page.locator('#qm-contact')).toHaveValue(contact.id);
+      await expect(page.locator('#qm-content')).toHaveValue('延迟加载时的手工草稿');
+      expect((await (await request.get(`/api/memories?contact_id=${contact.id}`)).json()).memories).toEqual([]);
+    } finally { releaseContacts(); }
+  });
+
   test('智能整理：粘贴素材 → AI 拆条 → 按素材批量确认', async ({ page, request }) => {
     await page.goto('/');
     await page.locator('.nav-item[data-view="contacts"]').click();
@@ -261,9 +379,7 @@ test.describe('关系记忆工作台', () => {
     await page.locator('#nc-ok').click();
     await expect(page.locator('#toast')).toContainText('联系人已创建');
 
-    // 打开记一笔弹窗，切到「智能整理」，粘贴长文本
     await page.getByRole('button', { name: '＋ 记一笔' }).click();
-    await page.locator('.mtab[data-mtab="smart"]').click();
     await expect(page.locator('#form-smart')).toBeVisible();
     await page.locator('.capture-options > summary').click();
     await page.locator('#qmt-contact').selectOption({ label: 'E2E 素材小李' });
@@ -292,7 +408,7 @@ test.describe('关系记忆工作台', () => {
     // 整理未完成态：已拆出条目但无报告——徽标提示 + 保留「继续整理」入口（不被 processed 锁死）
     await expect(card).toContainText('已拆出 2 条');
     await expect(card).toContainText('整理未完成');
-    await expect(card.getByRole('button', { name: '继续整理' })).toBeVisible();
+    await expect(card.getByRole('button', { name: '复制继续整理指令' })).toBeVisible();
 
     // 反问生命周期：AI 登记 → 横幅出现；独立模式作答=复制（不算送达，横幅保留）→ 手动放弃清除
     const asked = await request.post('/api/tools', { data: { name: 'organize_question', args: { materialId: material.id, question: '还有一条模糊提及的茶叶，要不要单独登记？', options: [
@@ -324,7 +440,7 @@ test.describe('关系记忆工作台', () => {
     await expect(card).toContainText('已拆出 2 条');
     await expect(card.locator('.material-report')).toContainText('拆出 2 条');
     await expect(card).not.toContainText('整理未完成');
-    await expect(card.getByRole('button', { name: '继续整理' })).toHaveCount(0);
+    await expect(card.getByRole('button', { name: '复制继续整理指令' })).toHaveCount(0);
     // 待确认卡展示原话摘录（提取闸门溯源）
     await expect(page.locator(`.pending-card[data-id="${createdIds[0]}"]`)).toContainText('原话：他说女儿十月办婚礼');
     await card.getByRole('button', { name: '确认这 2 条' }).click();
@@ -347,10 +463,9 @@ test.describe('关系记忆工作台', () => {
 
     await page.goto('/');
     await page.getByRole('button', { name: '＋ 记一笔' }).click();
-    await page.locator('.mtab[data-mtab="smart"]').click();
     await expect(page.locator('#form-smart')).toBeVisible();
     await page.locator('.capture-options > summary').click();
-    await page.locator('#qmt-contact').selectOption([{ label: 'E2E 多人甲' }, { label: 'E2E 多人乙' }]);
+    await page.locator('#qmt-contact').selectOption([a.id, b.id]);
     await page.locator('#qmt-text').fill('中秋送礼记录：给甲送了武夷岩茶，给乙送了稻香村月饼。');
     await page.locator('#qmt-ok').click();
     await expect(page.locator('#toast')).toContainText('素材已保存');
@@ -467,9 +582,11 @@ test.describe('关系记忆工作台', () => {
 
     await page.locator('#btn-new-plan').click();
     await page.locator('#plan-contact').selectOption(contactId);
-    await page.locator('#plan-occasion').fill('teacher_day');
     await page.locator('#plan-idea').fill('钢笔礼盒（老师每天板书）');
+    await page.locator('#plan-details > summary').click();
+    await page.locator('#plan-occasion').fill('teacher_day');
     await page.locator('#plan-budget').fill('¥200');
+    await page.locator('#plan-product-details > summary').click();
     await page.locator('#plan-product-name').fill('英雄钢笔经典款');
     await page.locator('#plan-product-price').fill('¥168');
     await page.locator('#plan-product-url').fill('https://e2e.test/pen/hero');
@@ -751,8 +868,15 @@ test.describe('关系记忆工作台', () => {
     await expect(card).toContainText('小陈提到周末要搬家');
     await expect(card).toContainText('待 AI 整理');
     expect((await (await request.get('/api/materials')).json()).materials.length).toBe(before + 1);
+    await card.getByRole('button', { name: '手动复制' }).click();
+    await expect(page.locator('#airesult-title')).toHaveText('手动复制整理指令');
+    const { prompt } = await (await request.get(`/api/materials/${material.id}/organize-prompt`)).json();
+    expect(await page.evaluate(() => window.getSelection().toString())).toBe(prompt);
+    expect((await (await request.get(`/api/materials/${material.id}`)).json()).material.delivery).toBeNull();
+    expect(await page.locator('#form-airesult').evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await page.keyboard.press('Escape');
     await card.getByRole('button', { name: '复制整理指令' }).click();
-    await expect(page.locator('#toast')).toContainText('整理提示词已复制');
+    await expect(page.locator('#toast')).toContainText('整理指令已复制');
     expect(await page.evaluate(() => window.copiedPrompts)).toEqual([expect.stringContaining(material.id)]);
     expect((await (await request.get('/api/materials')).json()).materials.length).toBe(before + 1);
     await page.getByRole('button', { name: '记住一件事', exact: true }).click();
@@ -876,7 +1000,12 @@ test.describe('关系记忆工作台', () => {
     await expect(page.locator('#contact-detail h2')).toHaveText(contacts[1].name);
     await expect(page.locator('.contact-back')).toBeInViewport();
     await page.locator('#btn-quick-memory').click();
+    await expect(page.locator('#qmt-text')).toBeFocused();
+    await expect(page.locator('#qmt-contact')).toHaveValues([contacts[1].id]);
+    await expect(page.locator('.capture-options')).toHaveAttribute('open', '');
+    await page.getByRole('button', { name: '不使用 AI？手动录入' }).click();
     await expect(page.locator('#qm-contact')).toHaveValue(contacts[1].id);
+    expect(await page.locator('#form-quick-memory').evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
     await page.locator('#qm-content').fill('记录给第二位联系人');
     await page.locator('#form-quick-memory button[type="submit"]').click();
     await expect(page.locator('#contact-detail')).toContainText('记录给第二位联系人');
@@ -902,10 +1031,15 @@ test.describe('关系记忆工作台', () => {
     await expect(page.locator(`.contact-row[data-id="${contacts[1].id}"]`)).toBeFocused();
     await page.locator(`.contact-row[data-id="${contacts[2].id}"]`).click();
     await page.locator('#btn-quick-memory').click();
+    await expect(page.locator('#qmt-contact')).toHaveValues([contacts[2].id]);
+    await page.getByRole('button', { name: '不使用 AI？手动录入' }).click();
     await expect(page.locator('#qm-contact')).toHaveValue(contacts[2].id);
     await page.keyboard.press('Escape');
     await page.locator('.nav-item[data-view="home"]').click();
     await page.locator('#btn-quick-memory').click();
+    await expect(page.locator('#qmt-text')).toBeFocused();
+    await expect(page.locator('#qmt-contact')).toHaveValues([]);
+    await page.getByRole('button', { name: '不使用 AI？手动录入' }).click();
     await expect(page.locator('#qm-contact')).toHaveValue('');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   });
@@ -954,6 +1088,76 @@ test.describe('关系记忆工作台', () => {
     expect(errors).toEqual([]);
   });
 
+  test('打算分层：未识别人不猜选，细节折叠可保存，失败保留且编辑不丢商品信息', async ({ page, request }) => {
+    const contact = (await (await request.post('/api/contacts', { data: { name: 'E2E 分层打算' } })).json()).contact;
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('/');
+    await page.locator('.nav-item[data-view="contacts"]').click();
+    await expect(page.locator(`.contact-row[data-id="${contact.id}"]`)).toBeVisible();
+    await page.locator('.nav-item[data-view="home"]').click();
+    await page.locator('#btn-quick-plan').click();
+    await expect(page.locator('#plan-say')).toBeFocused();
+    await expect(page.locator('#plan-save')).toBeInViewport();
+    await expect(page.locator('#form-plan .primary-btn')).toHaveCount(1);
+    await page.locator('#plan-say').fill('找一天一起散步');
+    await expect(page.locator('#plan-contact')).toHaveValue('');
+    await page.locator('#plan-save').click();
+    await expect(page.locator('#plan-contact')).toBeFocused();
+    await expect(page.locator('#form-plan')).toBeVisible();
+    await page.locator('#plan-contact').selectOption(contact.id);
+    await page.locator('#plan-idea').fill('送一本喜欢的书');
+    await page.locator('#plan-details > summary').click();
+    await page.locator('#plan-occasion').fill('拜访');
+    await page.locator('#plan-budget').fill('¥100');
+    await page.locator('#plan-status').selectOption('decided');
+    await page.locator('#plan-details > summary').click();
+    await expect(page.locator('#plan-details-summary')).toContainText('拜访 · ¥100 · 已定');
+    await page.locator('#plan-product-details > summary').click();
+    await page.locator('#plan-product-name').fill('旅行随笔');
+    await page.locator('#plan-product-price').fill('¥68');
+    await page.locator('#plan-product-url').fill('https://e2e.test/pen/hero');
+    await page.locator('#plan-product-details > summary').click();
+    await expect(page.locator('#plan-product-summary')).toContainText('旅行随笔');
+    expect(await page.locator('#form-plan').evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await page.route('**/api/plans', async (route) => {
+      if (route.request().method() === 'POST') await route.fulfill({ status: 500, json: { ok: false, error: '保存暂时失败' } });
+      else await route.continue();
+    }, { times: 1 });
+    await page.locator('#plan-save').click();
+    await expect(page.locator('#toast')).toContainText('保存暂时失败');
+    await expect(page.locator('#plan-idea')).toHaveValue('送一本喜欢的书');
+    await expect(page.locator('#plan-product-url')).toHaveValue('https://e2e.test/pen/hero');
+    await page.locator('#plan-save').click();
+    await expect(page.locator('#toast')).toContainText('计划已保存');
+    const plans = (await (await request.get(`/api/plans?contact_id=${contact.id}`)).json()).plans;
+    expect(plans).toHaveLength(1);
+    expect(plans[0]).toMatchObject({ idea: '送一本喜欢的书', occasion: '拜访', budget: '¥100', status: 'decided', productName: '旅行随笔', productPrice: '¥68', productUrl: 'https://e2e.test/pen/hero' });
+    await page.locator('.nav-item[data-view="gifts"]').click();
+    await page.locator(`#plans-list [data-action="plan-edit"][data-id="${plans[0].id}"]`).click();
+    await expect(page.getByRole('dialog', { name: '编辑打算', exact: true })).toBeVisible();
+    await expect(page.locator('#plan-capture')).toBeHidden();
+    await expect(page.locator('#plan-idea')).toBeFocused();
+    await expect(page.locator('#plan-details')).not.toHaveAttribute('open', '');
+    await expect(page.locator('#plan-product-details')).not.toHaveAttribute('open', '');
+    await expect(page.locator('#plan-product-summary')).toContainText('旅行随笔');
+    await page.locator('#plan-idea').fill('见面时送旅行随笔');
+    await page.locator('#plan-save').click();
+    await expect(page.locator('#toast')).toContainText('计划已保存');
+    const edited = (await (await request.get(`/api/plans?contact_id=${contact.id}`)).json()).plans;
+    expect(edited).toHaveLength(1);
+    expect(edited[0]).toMatchObject({ ...plans[0], idea: '见面时送旅行随笔', updatedAt: expect.any(String) });
+    expect((await (await request.get(`/api/memories?contact_id=${contact.id}`)).json()).memories).toEqual([]);
+    await page.locator('#btn-quick-plan').click();
+    await expect(page.locator('#plan-capture')).toBeVisible();
+    await expect(page.locator('#plan-say')).toBeFocused();
+    await expect(page.locator('#plan-details-summary')).toHaveText('（可选）');
+    await expect(page.locator('#plan-product-summary')).toHaveText('（仅送礼时选填）');
+    await expect(page.locator('#plan-save')).toHaveText('保存打算');
+    expect(errors).toEqual([]);
+  });
+
   test('一句话建计划：本地解析自动拆联系人/日期/想法，核对后保存', async ({ page, request }) => {
     const errors = [];
     page.on('pageerror', (e) => errors.push(e.message));
@@ -966,6 +1170,12 @@ test.describe('关系记忆工作台', () => {
       await page.getByRole('button', { name: '＋ 记个打算' }).click();
       await expect(page.locator('#plan-say')).toBeVisible();
     }).toPass();
+    await expect(page.locator('#plan-say')).toBeFocused();
+    await expect(page.getByRole('dialog', { name: '记个打算', exact: true })).toBeVisible();
+    await expect(page.locator('#plan-contact')).toHaveValue('');
+    await expect(page.locator('#plan-details')).not.toHaveAttribute('open', '');
+    await expect(page.locator('#plan-product-details')).not.toHaveAttribute('open', '');
+    await expect(page.locator('#plan-product-name')).toBeHidden();
     await page.locator('#plan-say').fill(`明天约${contact.name}吃饭`);
     await expect(page.locator('#plan-contact')).toHaveValue(contact.id);
     await expect(page.locator('#plan-date')).toHaveValue(tomorrow);
@@ -1000,6 +1210,288 @@ test.describe('关系记忆工作台', () => {
     await giftCard.getByRole('button', { name: '京东找同款' }).click();
     await expect(page.locator('#jd-keyword')).toHaveValue('低糖蛋糕');
     await page.keyboard.press('Escape');
+    expect(errors).toEqual([]);
+  });
+
+  test('数据安全：AI 修改需确认，历史可查看和恢复', async ({ page, request }) => {
+    const errors = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    const { contact } = await (await request.post('/api/contacts', { data: { name: 'E2E 修改确认' } })).json();
+    const { memory } = await (await request.post('/api/memories', { data: { contactId: contact.id, type: 'preference', content: '原先喜欢红茶' } })).json();
+    await request.post('/api/tools', { data: { name: 'memory_update', args: { id: memory.id, content: '现在喜欢绿茶', importance: 3 } } });
+    await page.goto('/');
+    const card = page.locator('.revision-card', { hasText: 'E2E 修改确认' });
+    await expect(card).toContainText('原先喜欢红茶');
+    await expect(card).toContainText('现在喜欢绿茶');
+    await expect(card).toContainText('重要度');
+    const original = (await (await request.get(`/api/contacts/${contact.id}/timeline`)).json()).memories.find((m) => m.id === memory.id);
+    expect(original.content).toBe('原先喜欢红茶');
+    await card.getByRole('button', { name: '确认修改', exact: true }).click();
+    await expect(card).toHaveCount(0);
+    await page.locator('.nav-item[data-view="contacts"]').click();
+    await page.locator('.contact-row', { hasText: 'E2E 修改确认' }).click();
+    const row = page.locator(`.memory-row[data-id="${memory.id}"]`);
+    await expect(row).toContainText('现在喜欢绿茶');
+    await row.getByRole('button', { name: '修改历史' }).click();
+    await expect(page.locator('#memory-history')).toContainText('原先喜欢红茶');
+    await page.getByRole('button', { name: '恢复到此次修改前' }).click();
+    await page.locator('#rel-dialog-ok').click();
+    await expect(page.locator('#memory-history .history-entry')).toHaveCount(2);
+    await page.locator('#history-close').click();
+    await expect(row).toContainText('原先喜欢红茶');
+    expect(errors).toEqual([]);
+  });
+
+  test('数据安全：原文变化时旧提案不能覆盖，可选择保留原内容', async ({ page, request }) => {
+    const { contact } = await (await request.post('/api/contacts', { data: { name: 'E2E 修改冲突' } })).json();
+    const { memory } = await (await request.post('/api/memories', { data: { contactId: contact.id, type: 'event', content: '原计划周末见面' } })).json();
+    await request.post('/api/tools', { data: { name: 'memory_update', args: { id: memory.id, content: 'AI 建议周六见面' } } });
+    await request.patch(`/api/memories/${memory.id}`, { data: { content: '用户确定周日见面' } });
+    const { pendingRevisions } = await (await request.get('/api/overview')).json();
+    const proposal = pendingRevisions.find((p) => p.memoryId === memory.id);
+    await page.goto('/');
+    const card = page.locator(`.revision-card[data-revision="${proposal.id}"]`);
+    await card.getByRole('button', { name: '确认修改' }).click();
+    await expect(page.locator('#toast')).toContainText('旧提案不能覆盖');
+    await expect(card).toBeVisible();
+    const current = (await (await request.get(`/api/contacts/${contact.id}/timeline`)).json()).memories.find((m) => m.id === memory.id);
+    expect(current.content).toBe('用户确定周日见面');
+    await card.getByRole('button', { name: '保留原内容' }).click();
+    await expect(card).toHaveCount(0);
+  });
+
+  test('数据安全：窄屏入口可达，弹窗可用键盘关闭', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 });
+    await page.goto('/');
+    const trigger = page.getByRole('button', { name: '数据安全与备份' });
+    await expect(trigger).toBeVisible();
+    await trigger.click();
+    await expect(page.locator('#safety-status')).toContainText('JSON');
+    await expect(page.locator('#safety-close')).toBeEnabled();
+    expect(await page.locator('#form-safety').evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await page.keyboard.press('Escape');
+    await expect(page.locator('#form-safety')).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await page.setViewportSize({ width: 768, height: 900 });
+    await trigger.click();
+    await expect(page.locator('#form-safety')).toBeVisible();
+  });
+
+  test('跟进闭环：事项独立处理、延期、恢复，不改事实和台账', async ({ page, request }) => {
+    const errors = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    const post = async (url, data) => { const res = await request.post(url, { data }); expect(res.ok()).toBeTruthy(); return res.json(); };
+    const { contact } = await post('/api/contacts', { name: 'E2E 跟进闭环' });
+    const { memory: first } = await post('/api/memories', { contactId: contact.id, type: 'promise', content: '闭环事项一：发送照片', date: '2000-01-01' });
+    const { memory: second } = await post('/api/memories', { contactId: contact.id, type: 'promise', content: '闭环事项二：安排聚餐', date: '2000-01-02' });
+    const { memory: gift } = await post('/api/memories', { contactId: contact.id, type: 'gift', direction: 'contact_to_user', content: '闭环收到的一本书', date: '2000-01-03' });
+    const facts = (await (await request.get(`/api/contacts/${contact.id}/timeline`)).json()).memories;
+    const ledger = await (await request.get('/api/gifts/ledger')).json();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('/');
+    const more = page.locator('[data-disclosure="followups-more"]');
+    if (await more.count()) await more.locator(':scope > summary').click();
+    const firstCard = page.locator(`.followup-section [data-followup="promise:${first.id}"]`);
+    const secondCard = page.locator(`.followup-section [data-followup="promise:${second.id}"]`);
+    await firstCard.getByRole('button', { name: '已办妥', exact: true }).click();
+    await expect(page.locator('#rel-dialog')).toContainText('不修改原始记忆或新增送礼记录');
+    await page.locator('#rel-dialog-cancel').click();
+    await expect(firstCard).toBeVisible();
+    await firstCard.getByRole('button', { name: '已办妥', exact: true }).click();
+    await page.locator('#rel-dialog-ok').click();
+    await expect(firstCard).toHaveCount(0);
+    await expect(secondCard).toBeVisible();
+    await secondCard.getByRole('button', { name: '稍后提醒' }).click();
+    await page.locator('#rel-dialog-input').fill('2000-01-01');
+    await page.locator('#rel-dialog-ok').click();
+    await expect(page.locator('#rel-dialog')).toBeVisible();
+    const until = await page.locator('#rel-dialog-input').getAttribute('min');
+    await page.locator('#rel-dialog-input').fill(until);
+    await page.locator('#rel-dialog-ok').click();
+    await expect(secondCard).toHaveCount(0);
+    await page.locator('.handled-followups > summary').click();
+    const handledSecond = page.locator(`.handled-followups [data-followup="promise:${second.id}"]`);
+    await expect(handledSecond).toContainText(`${until} 起重新出现在工作台`);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.reload();
+    await page.locator('.handled-followups > summary').click();
+    await expect(handledSecond).toContainText('稍后提醒');
+    await handledSecond.getByRole('button', { name: '恢复提醒' }).click();
+    await expect(handledSecond).toHaveCount(0);
+    if (await more.count()) await more.locator(':scope > summary').click();
+    await expect(secondCard).toBeVisible();
+    await secondCard.getByRole('button', { name: '不再跟进' }).click();
+    await page.locator('#rel-dialog-ok').click();
+    await expect(secondCard).toHaveCount(0);
+    await page.locator('.nav-item[data-view="gifts"]').click();
+    const giftCard = page.locator(`#reciprocity-list [data-followup="reciprocity:${gift.id}"]`);
+    await expect(giftCard).toBeVisible();
+    await giftCard.getByRole('button', { name: '已办妥' }).click();
+    await page.locator('#rel-dialog-ok').click();
+    await expect(giftCard).toHaveCount(0);
+    await expect(page.locator('#ledger-received')).toContainText('闭环收到的一本书');
+    await page.locator('.nav-item[data-view="contacts"]').click();
+    await page.locator(`.contact-row[data-id="${contact.id}"]`).click();
+    await expect(page.locator('.briefing-card')).not.toContainText('闭环事项');
+    const after = await (await request.get(`/api/contacts/${contact.id}/timeline`)).json();
+    expect(after.briefing.promises).toEqual([]);
+    expect(after.briefing.reciprocity).toEqual([]);
+    expect(after.memories).toEqual(facts);
+    expect(await (await request.get('/api/gifts/ledger')).json()).toEqual(ledger);
+    expect(errors).toEqual([]);
+  });
+
+  test('独立模式未完成素材可继续复制，发送留痕不等于确认', async ({ page, request }) => {
+    await page.addInitScript(() => { Object.defineProperty(navigator.clipboard, 'writeText', { configurable: true, value: async (text) => { window.lastPrompt = text; } }); });
+    const { contact } = await (await request.post('/api/contacts', { data: { name: 'E2E 继续整理' } })).json();
+    const { material } = await (await request.post('/api/materials', { data: { text: 'E2E 未整理完成的素材：喜欢绿茶' } })).json();
+    const extraction = await request.post('/api/tools', { data: { name: 'memory_add', args: { contactId: contact.id, type: 'preference', content: '喜欢绿茶', sourceId: material.id, sourceQuote: '喜欢绿茶' } } });
+    expect(extraction.ok()).toBeTruthy();
+    const { memory } = await extraction.json();
+    await page.goto('/');
+    const card = page.locator(`.material-card[data-id="${material.id}"]`);
+    await expect(card).toContainText('整理未完成');
+    await expect(card.locator('[data-action="organize-material"]')).toHaveCount(0);
+    await card.getByRole('button', { name: '复制继续整理指令' }).click();
+    await expect(card).toContainText('尚未确认发送');
+    expect(await page.evaluate(() => window.lastPrompt)).toContain(material.id);
+    const saved = (await (await request.get(`/api/materials/${material.id}`)).json()).material;
+    expect(saved.delivery.copiedAt).toBeTruthy();
+    expect(saved.delivery.sentAt).toBe('');
+    expect(saved.report || '').toBe('');
+    expect((await (await request.get(`/api/memories?contact_id=${contact.id}`)).json()).memories.find((item) => item.id === memory.id).status).toBe('pending');
+    await page.reload();
+    await expect(card).toContainText('尚未确认发送');
+    await expect(card.getByRole('button', { name: '复制继续整理指令' })).toBeEnabled();
+  });
+
+  test('建议复制失败保留输入，重试复用联系人', async ({ page, request }) => {
+    await page.addInitScript(() => {
+      let fail = true;
+      Object.defineProperty(navigator.clipboard, 'writeText', { configurable: true, value: async () => {
+        if (fail) { fail = false; throw new Error('E2E clipboard denied'); }
+      } });
+    });
+    await page.goto('/');
+    await page.getByRole('button', { name: '想想下一步', exact: true }).click();
+    await page.locator('#fr-name').fill('E2E 建议复制重试');
+    await page.locator('#fr-note').fill('下周想约对方散步');
+    await page.locator('#fr-go').click();
+    await expect(page.locator('#toast')).toContainText('输入已保留');
+    await expect(page.locator('#form-first')).toBeVisible();
+    await expect(page.locator('#fr-name')).toHaveValue('E2E 建议复制重试');
+    await expect(page.locator('#fr-note')).toHaveValue('下周想约对方散步');
+    await expect(page.locator('#fr-go')).toBeEnabled();
+    await page.locator('#fr-go').click();
+    await expect(page.locator('#form-first')).toBeHidden();
+    const { contacts } = await (await request.get('/api/contacts')).json();
+    expect(contacts.filter((c) => c.name === 'E2E 建议复制重试')).toHaveLength(1);
+  });
+
+  test('模拟宿主：发送失败可重试，成功后才记录送达并关闭建议表单', async ({ page, request }) => {
+    let rejectNext = true;
+    let sequence = 0;
+    const accepted = [];
+    await page.route('**/api/dsh-relationship/workbench/**', async (route) => {
+      const url = new URL(route.request().url());
+      url.pathname = url.pathname.replace('/api/dsh-relationship/workbench', '');
+      if (url.pathname === '/api/events') { await route.abort(); return; }
+      await route.fulfill({ response: await route.fetch({ url: url.toString() }) });
+    });
+    await page.route('**/api/session/*', async (route) => {
+      const body = route.request().postDataJSON();
+      let value = {};
+      if (body.method === 'session/create') value = { sessionId: 'e2e-dispatch' };
+      if (body.method === 'session/list') value = { items: [{ sessionId: 'e2e-dispatch' }] };
+      if (body.method === 'session/prompt') {
+        if (rejectNext) { rejectNext = false; await route.fulfill({ status: 503, json: {} }); return; }
+        accepted.push(body.payload.args.request.content[0].text);
+        sequence++;
+      }
+      await route.fulfill({ json: { rpcId: body.rpcId, result: { ok: true, value } } });
+    });
+    await page.route('**/api/agentPresets/list', (route) => route.fulfill({ json: { result: { ok: true, value: { items: [{ id: 'relationship' }] } } } }));
+    await page.routeWebSocket('**/api/remote.mux', (socket) => socket.onMessage((message) => {
+      const { streamId } = JSON.parse(message);
+      socket.send(JSON.stringify({ streamId, type: 'item', value: { type: 'snapshot', records: [{ event: { seq: sequence, type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'E2E 模拟宿主回复' }] } } } }] } }));
+    }));
+    await page.goto('/api/dsh-relationship/workbench/');
+    await page.getByRole('button', { name: '记住一件事', exact: true }).click();
+    await page.locator('#qmt-text').fill('E2E 宿主发送失败保留素材');
+    const response = page.waitForResponse((res) => res.url().endsWith('/api/materials') && res.request().method() === 'POST');
+    await page.locator('#qmt-ok').click();
+    const { material } = await (await response).json();
+    const card = page.locator(`.material-card[data-id="${material.id}"]`);
+    await expect(page.locator('#toast')).toContainText('素材已保存，但指令未发送');
+    expect((await (await request.get(`/api/materials/${material.id}`)).json()).material.delivery).toBeNull();
+    await card.getByRole('button', { name: 'AI 整理', exact: true }).click();
+    await expect(card).toContainText('尚未收到整理报告');
+    expect(accepted).toEqual([`整理素材 ${material.id}`]);
+    const saved = (await (await request.get(`/api/materials/${material.id}`)).json()).material;
+    expect(saved.delivery.sentAt).toBeTruthy();
+    expect(saved.delivery.copiedAt).toBe('');
+    expect(saved.status).toBe('raw');
+    await card.getByRole('button', { name: '重新发送整理指令' }).click();
+    await page.locator('#rel-dialog-cancel').click();
+    expect(accepted).toHaveLength(1);
+    rejectNext = true;
+    await page.getByRole('button', { name: '想想下一步', exact: true }).click();
+    await page.locator('#fr-name').fill('E2E 宿主建议重试');
+    await page.locator('#fr-note').fill('记得询问搬家近况');
+    await page.locator('#fr-go').click();
+    await expect(page.locator('#toast')).toContainText('输入已保留');
+    await expect(page.locator('#fr-note')).toHaveValue('记得询问搬家近况');
+    await page.locator('#fr-go').click();
+    await expect(page.locator('#form-first')).toBeHidden();
+    await expect(page.locator('#airesult-body')).toContainText('E2E 模拟宿主回复');
+    expect(accepted).toHaveLength(2);
+  });
+
+  test('批量确认遇到失效记忆时按实际结果反馈', async ({ page, request }) => {
+    const { contact } = await (await request.post('/api/contacts', { data: { name: 'E2E 部分确认' } })).json();
+    const { material } = await (await request.post('/api/materials', { data: { text: 'E2E 部分确认素材：喜欢游泳；喜欢爬山' } })).json();
+    const memories = [];
+    for (const content of ['喜欢游泳', '喜欢爬山']) {
+      const extraction = await request.post('/api/tools', { data: { name: 'memory_add', args: { contactId: contact.id, type: 'preference', content, sourceId: material.id, sourceQuote: content } } });
+      expect(extraction.ok()).toBeTruthy();
+      memories.push((await extraction.json()).memory);
+    }
+    await page.goto('/');
+    await page.route('**/api/memories/confirm', async (route) => {
+      await request.delete(`/api/memories/${memories[1].id}`);
+      await route.continue();
+    });
+    await page.locator(`.material-card[data-id="${material.id}"]`).getByRole('button', { name: '确认这 2 条' }).click();
+    await expect(page.locator('#toast')).toContainText('已确认 1 条素材记忆；1 条未确认');
+    expect((await (await request.get(`/api/memories?contact_id=${contact.id}`)).json()).memories.find((item) => item.id === memories[0].id).status).toBe('confirmed');
+  });
+
+  test('数据安全：导出、预览不写入、确认恢复及坏文件拒绝', async ({ page, request }) => {
+    const errors = [];
+    page.on('pageerror', (error) => errors.push(error.message));
+    await page.goto('/');
+    await page.getByRole('button', { name: '数据安全与备份' }).click();
+    await expect(page.locator('#safety-status')).toContainText('JSON');
+    const downloaded = page.waitForEvent('download');
+    await page.getByRole('button', { name: '导出当前数据', exact: true }).click();
+    const backupFile = fs.readFileSync(await (await downloaded).path());
+    await expect(page.locator('#safety-export')).toBeEnabled();
+    const { contact: later } = await (await request.post('/api/contacts', { data: { name: 'E2E 备份后的记录' } })).json();
+    await page.locator('#safety-file').setInputFiles({ name: 'backup.json', mimeType: 'application/json', buffer: backupFile });
+    await expect(page.locator('#safety-preview')).toContainText('尚未修改当前数据');
+    expect((await request.get(`/api/contacts/${later.id}`)).status()).toBe(200);
+    await page.getByRole('button', { name: '确认恢复此备份', exact: true }).click();
+    await page.locator('#rel-dialog-cancel').click();
+    expect((await request.get(`/api/contacts/${later.id}`)).status()).toBe(200);
+    await page.getByRole('button', { name: '确认恢复此备份', exact: true }).click();
+    await page.locator('#rel-dialog-ok').click();
+    await expect(page.locator('#safety-status')).toContainText('恢复完成');
+    expect((await request.get(`/api/contacts/${later.id}`)).status()).toBe(404);
+    await page.locator('#safety-file').setInputFiles({ name: 'broken.json', mimeType: 'application/json', buffer: Buffer.from('{broken') });
+    await expect(page.locator('#safety-status')).toContainText('不是有效的 JSON');
+    await expect(page.locator('#safety-restore')).toBeHidden();
+    await page.locator('#safety-close').click();
+    await expect(page.locator('#form-safety')).not.toBeVisible();
     expect(errors).toEqual([]);
   });
 });

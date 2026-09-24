@@ -20,6 +20,10 @@
     overview: { counts: {}, pending: [], upcoming: [] },
     materials: [],
     attention: [],
+    handledFollowups: [],
+    followupBusy: new Set(),
+    materialSending: new Set(),
+    confirming: false,
     occasionGroups: [],
     disclosures: new Map(),
     holidays: [],
@@ -34,7 +38,6 @@
     memorySearchLoading: false,
     editingPendingId: null,
     editingMemoryId: null,
-    smartTab: 'single',
     // 嵌入 DSH（同源 iframe）时可直连宿主：建会话、发 prompt
     dshEmbedded: location.pathname.startsWith('/api/dsh-relationship/workbench'),
     info: {},
@@ -44,6 +47,8 @@
     editingContactId: null,
     suggestContactId: null,
     suggestPlanId: null,
+    supersedeMemoryId: null,
+    supersedeContactId: null,
     relationTypes: [],
     // 「AI 正在想」等待键（如 brief:c1 / gift:c1 / att:gift:c1）：存 state 而非 DOM，
     // SSE 重渲染换新节点也不丢等待态；askHostAi 收尾时清除
@@ -86,6 +91,7 @@
   let dialogResolver = null;
   let dialogTrigger = null;
   let modalTrigger = null;
+  let sendingSuggestion = false;
   function topModal() {
     return $('#rel-dialog') || $('#modal-backdrop:not(.hidden)');
   }
@@ -142,7 +148,7 @@
       $(danger ? '#rel-dialog-cancel' : '#rel-dialog-ok').focus();
     });
   }
-  function promptDialog(msg, placeholder = '') {
+  function promptDialog(msg, placeholder = '', { type = 'text', min = '', value = '' } = {}) {
     return new Promise((resolve) => {
       closeDialog(null);
       dialogResolver = resolve;
@@ -154,7 +160,7 @@
         <div class="modal-body">
           <h3>请输入</h3>
           <p style="margin:0;font-size:13.5px;line-height:1.6">${esc(msg)}</p>
-          <input id="rel-dialog-input" placeholder="${esc(placeholder)}" style="padding:8px 10px;border:1px solid var(--border);border-radius:8px">
+          <input id="rel-dialog-input" type="${esc(type)}" aria-label="${esc(msg)}" placeholder="${esc(placeholder)}" min="${esc(min)}" value="${esc(value)}" ${type === 'date' ? 'required' : ''} style="padding:8px 10px;border:1px solid var(--border);border-radius:8px">
           <div class="modal-actions">
             <button type="button" id="rel-dialog-cancel" class="ghost-btn">取消</button>
             <button type="button" id="rel-dialog-ok" class="primary-btn">确定</button>
@@ -163,9 +169,10 @@
       document.body.appendChild(bd);
       syncModalBackground();
       const input = $('#rel-dialog-input');
+      const submit = () => { if (input.reportValidity()) closeDialog(input.value.trim() || null); };
       $('#rel-dialog-cancel').onclick = () => closeDialog(null);
-      $('#rel-dialog-ok').onclick = () => closeDialog(input.value.trim() || null);
-      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') closeDialog(input.value.trim() || null); });
+      $('#rel-dialog-ok').onclick = submit;
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
       bd.addEventListener('mousedown', (e) => { if (e.target === bd) closeDialog(null); });
       input.focus();
     });
@@ -272,14 +279,32 @@
     });
   }
 
-  /** 素材卡一键 AI 整理：直连宿主会话发「整理素材」，模型跑完回工作台确认。 */
-  async function organizeViaHost(materialId) {
-    if (!state.dshEmbedded) {
-      toast('独立模式：请点「复制整理指令」粘贴到 DSH 会话', true);
-      return;
+  async function deliverMaterial(materialId, copy = !state.dshEmbedded) {
+    if (state.materialSending.has(materialId)) return;
+    state.materialSending.add(materialId);
+    render();
+    try {
+      try {
+        if (copy) {
+          const { prompt } = await api(`/api/materials/${materialId}/organize-prompt`);
+          await navigator.clipboard.writeText(prompt);
+        } else {
+          await sendToSession(`整理素材 ${materialId}`);
+        }
+      } catch (error) {
+        toast(`素材已保存，但指令未${copy ? '复制' : '发送'}；可在素材卡重试或选择「手动复制」。${error.message}`, true);
+        return;
+      }
+      try {
+        await api(`/api/materials/${materialId}/delivery`, { method: 'POST', body: { status: copy ? 'copied' : 'sent' } });
+        toast(copy ? '素材已保存，整理指令已复制；粘贴到 DSH 会话后开始整理' : '素材已保存，整理指令已发送到 DSH；等待整理报告，核对后再确认');
+      } catch {
+        toast(`指令已${copy ? '复制' : '发送'}，但状态保存失败；不要重复发送，请先查看 DSH 会话`, true);
+      }
+    } finally {
+      state.materialSending.delete(materialId);
+      await refresh();
     }
-    await sendToSession(`整理素材 ${materialId}`);
-    toast('已交给 AI 整理，完成后回工作台确认', false);
   }
 
   /** 从 DSH 会话事件的内容块数组提取纯文本（同 dsh-qa contentText）。 */
@@ -325,7 +350,7 @@
    * 等待态走 state.aiWaiting（SSE 重渲染不丢）；成功弹层并 refresh（AI 建的卡落到工作台），
    * 超时回退提示去会话看。
    */
-  async function askHostAi(prompt, { title, waitingKey } = {}) {
+  async function askHostAi(prompt, { title, waitingKey, onSent } = {}) {
     if (waitingKey) {
       if (state.aiWaiting.has(waitingKey)) { toast('AI 正在想，稍候…'); return; }
       state.aiWaiting.add(waitingKey);
@@ -340,6 +365,7 @@
         baseSeq = Math.max(0, ...(base.records || []).map((r) => r?.event?.seq ?? 0));
       } catch { /* 基线快照失败也能继续：退化为「会话里出现新 AI 回复即展示」 */ }
       await sendToSession(prompt);
+      onSent?.();
       const deadline = Date.now() + 90000;
       for (;;) {
         if (Date.now() > deadline) { toast('AI 还在生成，稍后到 DSH 会话里看结果'); return; }
@@ -385,8 +411,13 @@
       ]);
       state.overview = overview;
       state.contacts = contacts.contacts;
+      if (!$('#modal-backdrop').classList.contains('hidden') &&
+          (!$('#form-smart').classList.contains('hidden') || !$('#form-quick-memory').classList.contains('hidden'))) {
+        fillContactSelects({ preserveSelection: true });
+      }
       state.materials = materials.materials;
       state.attention = attention === null ? null : (attention.items || []);
+      state.handledFollowups = attention?.handledFollowups || [];
       state.occasionGroups = attention?.occasionGroups || [];
       state.holidays = attention === null ? [] : (attention.holidays || []);
       state.opportunities = attention === null ? [] : (attention.opportunities || []);
@@ -503,10 +534,37 @@
     markStatus(true);
   }
 
+  const MEMORY_FIELD_LABELS = { content: '内容', type: '类型', date: '事实时间', importance: '重要度', saidAt: '话语时间', direction: '方向', lifespan: '寿命', occasion: '场景' };
+  function memoryDiff(before, after) {
+    const display = (key, value) => {
+      if (key === 'type') return TYPE_CN[value] || value;
+      if (key === 'direction') return DIRECTION_CN[value] || '无';
+      if (key === 'lifespan') return value === 'short' ? '临时' : '长期';
+      return value ?? '';
+    };
+    return `<dl class="revision-diff">${Object.entries(MEMORY_FIELD_LABELS)
+      .filter(([key]) => (before?.[key] ?? '') !== (after?.[key] ?? ''))
+      .map(([key, label]) => `<div><dt>${label}</dt><dd><span>原内容</span> ${esc(display(key, before?.[key])) || '（空）'}</dd><dd><span>修改后</span> ${esc(display(key, after?.[key])) || '（空）'}</dd></div>`).join('')}</dl>`;
+  }
+
+  function renderRevisions() {
+    $('#revision-queue').innerHTML = (state.overview.pendingRevisions || []).map((p) => {
+      const contact = state.contacts.find((c) => c.id === p.contactId);
+      return `<article class="pending-card revision-card" data-revision="${esc(p.id)}">
+        <div class="pending-main"><b>${esc(contact?.name || '联系人')} · AI 建议修改</b>
+          <p class="material-hint">确认前原记忆仍然有效；本条修改不会随「全部确认」一起接受。</p>
+          ${memoryDiff(p.before, p.after)}</div>
+        <div class="pending-actions">
+          <button type="button" class="primary-btn" data-action="confirm-revision" data-id="${esc(p.id)}">确认修改</button>
+          <button type="button" class="ghost-btn" data-action="reject-revision" data-id="${esc(p.id)}">保留原内容</button>
+        </div></article>`;
+    }).join('');
+  }
+
   function renderNav() {
     $$('.nav-item').forEach((btn) => btn.classList.toggle('active', btn.dataset.view === state.view));
     $$('.view').forEach((v) => v.classList.toggle('active', v.id === `view-${state.view}`));
-    const pending = (state.overview.counts.pending || 0) + (state.overview.counts.pendingContacts || 0);
+    const pending = (state.overview.counts.pending || 0) + (state.overview.counts.pendingContacts || 0) + (state.overview.counts.pendingRevisions || 0);
     const navPending = $('#nav-pending-count');
     navPending.textContent = String(pending);
     navPending.classList.toggle('hidden', pending === 0);
@@ -518,7 +576,7 @@
 
   function renderHome() {
     const c = state.overview.counts;
-    const pendingTotal = (c.pending || 0) + (c.pendingContacts || 0);
+    const pendingTotal = (c.pending || 0) + (c.pendingContacts || 0) + (c.pendingRevisions || 0);
 
     const attentionCount = (state.attention || []).length;
     const groupCount = state.occasionGroups.length;
@@ -614,11 +672,17 @@
       }).join('');
     }
 
+    renderRevisions();
     renderMaterialBox();
 
     renderRecentRemembered();
 
     renderAttention();
+    $$('#view-home .home-priority').forEach((el) => el.classList.remove('home-priority'));
+    const priority = pendingTotal ? $('#pending-panel')
+      : $('.followup-section') || $('.priority-occasions')
+        || (materialStates.some((m) => m.raw || m.important) ? $('#material-box') : null);
+    priority?.classList.add('home-priority');
   }
 
   // 最近记住了：已确认记忆的最近几条（确认闸门之后才出现），强化「它真的在帮我记」
@@ -654,7 +718,7 @@
   function attentionAiButton(a, kind, label, occasion = '', date = '') {
     const key = `att:${kind}:${a.contactId}:${occasion}:${date}`;
     const waiting = state.aiWaiting.has(key);
-    return `<button type="button" class="primary-btn attention-ai" data-action="attention-ai" data-kind="${kind}" data-label="${esc(label)}" data-waiting-key="${esc(key)}" data-id="${esc(a.contactId)}" data-occasion="${esc(occasion)}" data-date="${esc(date)}"${waiting ? ' disabled' : ''}>${waiting ? 'AI 正在想…' : label}</button>`;
+    return `<button type="button" class="action-btn attention-ai" data-action="attention-ai" data-kind="${kind}" data-label="${esc(label)}" data-waiting-key="${esc(key)}" data-id="${esc(a.contactId)}" data-occasion="${esc(occasion)}" data-date="${esc(date)}"${waiting ? ' disabled' : ''}>${waiting ? 'AI 正在想…' : label}</button>`;
   }
 
   function attentionPlanStatus(p) {
@@ -697,9 +761,9 @@
     const key = `occasion-person:${group.id}:${a.contactId}`;
     const hasDetails = plans.length || ideas.length || history.length || a.lastSeen;
     const primary = firstPlan
-      ? `<button type="button" class="primary-btn" data-action="plan-edit" data-id="${esc(firstPlan.id)}" data-plan="${esc(firstPlan.id)}" data-occasion="${esc(firstPlan.occasion || '')}" data-date="${esc(firstPlan.occasionDate || '')}">继续计划</button>`
+      ? `<button type="button" class="action-btn" data-action="plan-edit" data-id="${esc(firstPlan.id)}" data-plan="${esc(firstPlan.id)}" data-occasion="${esc(firstPlan.occasion || '')}" data-date="${esc(firstPlan.occasionDate || '')}">继续计划</button>`
       : ideas.length
-        ? `<button type="button" class="primary-btn" data-action="attention-ideas" aria-expanded="${state.disclosures.get(key) || false}">查看AI主意</button>`
+        ? `<button type="button" class="action-btn" data-action="attention-ideas" aria-expanded="${state.disclosures.get(key) || false}">查看AI主意</button>`
         : attentionAiButton(a, 'briefing', briefingLabel(a), a.occasion || '', a.date || '');
     return `<article class="attention-card" data-id="${esc(a.contactId)}">
       <div class="att-top"><b class="att-what">${esc(a.contactName)}</b><span class="badge">${relationCn(a.relation)}</span>${a.lastSeen && Number.isFinite(a.lastSeen.days) ? `<span class="badge date">上次互动 ${a.lastSeen.days} 天前</span>` : ''}</div>
@@ -757,15 +821,25 @@
     </section>`;
   }
 
+  const FOLLOWUP_STATUS_CN = { done: '已办妥', dismissed: '不再跟进', snoozed: '稍后提醒', active: '恢复提醒' };
+  function followupActions(item) {
+    if (!item.id || !item.sourceVersion) return '';
+    const statuses = item.status === 'active' ? ['done', 'snoozed', 'dismissed'] : ['active'];
+    return statuses.map((status) => `<button type="button" class="ghost-btn" data-action="followup-update" data-id="${esc(item.id)}" data-version="${esc(item.sourceVersion)}" data-status="${status}" ${state.followupBusy.has(item.id) ? 'disabled' : ''}>${FOLLOWUP_STATUS_CN[status]}</button>`).join('');
+  }
+
   function attentionFollowup(a) {
     const label = { fading: '找个话题', promise: '想怎么跟进', reciprocity: '想个回礼' }[a.kind];
-    return `<article class="attention-card followup-card" data-id="${esc(a.contactId)}">
-      <div class="att-top"><b class="att-what">${esc(a.contactName)}</b><span class="badge">${relationCn(a.relation)}</span><span class="badge date">${esc(a.label)}</span></div>
-      <p class="att-reason">${esc(a.text)}</p>
+    const handled = a.status && a.status !== 'active';
+    return `<article class="attention-card followup-card" data-id="${esc(a.contactId)}" data-followup="${esc(a.id || '')}">
+      <div class="att-top"><b class="att-what">${esc(a.contactName)}</b><span class="badge">${relationCn(a.relation)}</span><span class="badge date">${esc(handled ? FOLLOWUP_STATUS_CN[a.status] : a.label)}</span></div>
+      <p class="att-reason">${esc(a.text || a.content)}</p>
       ${a.date ? `<p class="att-sub">记录日期 ${esc(fmtDate(a.date))}</p>` : ''}
+      ${a.status === 'snoozed' ? `<p class="att-sub">${esc(a.until)} 起重新出现在工作台</p>` : ''}
       <div class="att-actions">
-        ${attentionAiButton(a, a.kind === 'reciprocity' ? 'gift' : 'briefing', label || '想怎么跟进', a.kind === 'reciprocity' ? 'thank_you' : (a.occasion || ''))}
-        <button type="button" class="ghost-btn" data-action="remember-open" data-id="${esc(a.contactId)}">记下进展</button>
+        ${handled ? '' : attentionAiButton(a, a.kind === 'reciprocity' ? 'gift' : 'briefing', label || '想怎么跟进', a.kind === 'reciprocity' ? 'thank_you' : (a.occasion || ''))}
+        ${followupActions(a)}
+        ${handled ? '' : `<button type="button" class="ghost-btn" data-action="remember-open" data-id="${esc(a.contactId)}">记下进展</button>`}
         <button type="button" class="ghost-btn" data-action="view-contact" data-id="${esc(a.contactId)}">查看关系</button>
       </div>
     </article>`;
@@ -798,7 +872,7 @@
     }
     listEl.innerHTML = (items.length ? `<section class="followup-section">
           <div class="occasion-group-head"><h2>有记录的待跟进</h2><span>${items.length} 件事项</span></div>
-          <p class="material-hint">来自承诺和收礼记录；没有后续记录，不等于你还没做。已联系或办妥，可以记下进展。</p>
+          <p class="material-hint">来自承诺和收礼记录；没有后续记录，不等于你还没做。处理提醒不改原始事实，也不会新增送礼记录；稍后提醒仅在工作台内展示。</p>
           <div class="occasion-people">${items.slice(0, 3).map(attentionFollowup).join('')}</div>
           ${items.length > 3 ? `<details class="home-disclosure" ${disclosureAttrs('followups-more')}>
             <summary>其余 ${items.length - 3} 件跟进事项</summary>
@@ -815,6 +889,11 @@
           </details>` : ''}
         </section>` : '')
       + (!groups.length && !items.length ? '<div class="empty">暂时没有有记录的待跟进或安排，不必为了节日勉强联系。想起一件事时，随手记下来。</div>' : '')
+      + (state.handledFollowups.length ? `<details class="home-disclosure handled-followups" ${disclosureAttrs('handled-followups')}>
+          <summary>已处理与稍后提醒 · ${state.handledFollowups.length} 件</summary>
+          <p class="material-hint">仅保留当前有效来源的处理状态；可随时恢复提醒，原始记录仍在联系人时间线。</p>
+          <div class="occasion-people">${state.handledFollowups.map(attentionFollowup).join('')}</div>
+        </details>` : '')
       + (fading.length ? `<details class="home-disclosure fading-more" ${disclosureAttrs('fading-more')}>
           <summary>久未更新的往来 · ${fading.length} 人（按需回顾）</summary>
           <p class="material-hint">只按本地互动记录间隔提示，不判断关系是否疏远。</p>
@@ -855,6 +934,9 @@
             ${mt.contactName ? `<span class="badge">${esc(mt.contactName)}</span>` : ''}
             <span>${esc((mt.capturedAt || '').slice(0, 10))}</span>
           </div>
+          ${!complete && mt.delivery ? `<p class="material-hint">${mt.delivery.sentAt
+            ? '整理指令已发送到 DSH，尚未收到整理报告；发送不等于完成，请勿重复提交。'
+            : '整理指令已复制，尚未确认发送；粘贴到 DSH 会话后才会开始整理。'}</p>` : ''}
           ${mt.question ? `<div class="material-question">
             <p class="mq-title">${`再告诉我一点 · ${mt.question.status === 'sent' ? '已发送作答' : '等你回答'}`}<button class="mq-dismiss" data-action="dismiss-question" data-id="${esc(mt.id)}">不再等待</button></p>
             <p class="mq-text">${esc(mt.question.question || '')}</p>
@@ -874,8 +956,9 @@
         </div>
         <div class="material-actions">
           ${pendingCount ? `<button class="primary-btn" data-action="confirm-material" data-id="${esc(mt.id)}">确认这 ${pendingCount} 条</button>` : ''}
-          ${raw || incomplete ? `<button class="primary-btn" data-action="organize-material" data-id="${esc(mt.id)}">${raw ? 'AI 整理' : '继续整理'}</button>` : ''}
-          ${mt.status === 'raw' ? `<button class="ghost-btn" data-action="copy-material" data-id="${esc(mt.id)}">复制整理指令</button>` : ''}
+          ${(raw || incomplete) && state.dshEmbedded ? `<button class="primary-btn" data-action="organize-material" data-id="${esc(mt.id)}" ${state.materialSending.has(mt.id) ? 'disabled' : ''}>${state.materialSending.has(mt.id) ? '发送中…' : incomplete ? '继续整理' : mt.delivery?.sentAt ? '重新发送整理指令' : 'AI 整理'}</button>` : ''}
+          ${raw || incomplete ? `<button class="ghost-btn" data-action="copy-material" data-id="${esc(mt.id)}" ${state.materialSending.has(mt.id) ? 'disabled' : ''}>${incomplete ? '复制继续整理指令' : '复制整理指令'}</button>` : ''}
+          ${raw || incomplete ? `<button class="ghost-btn" data-action="manual-material" data-id="${esc(mt.id)}">手动复制</button>` : ''}
           <button class="ghost-btn" data-action="delete-material" data-id="${esc(mt.id)}">删除</button>
         </div>
       </article>`;
@@ -965,7 +1048,7 @@
         </details>` : ''}
       </div>
       <div class="occ-actions">
-        ${activePlan(p) ? `<button type="button" class="primary-btn" data-action="plan-edit" data-id="${esc(p.id)}">编辑</button>
+        ${activePlan(p) ? `<button type="button" class="action-btn" data-action="plan-edit" data-id="${esc(p.id)}">编辑</button>
           <button type="button" class="ghost-btn" data-action="plan-done" data-id="${esc(p.id)}">已完成</button>` : ''}
         ${sugCount ? `<button type="button" class="icon-btn danger" data-action="plan-delete-suggestions" data-id="${esc(p.id)}">删这批建议(${sugCount})</button>` : ''}
         <button type="button" class="icon-btn danger" data-action="plan-delete" data-id="${esc(p.id)}">删除</button>
@@ -1012,13 +1095,14 @@
 
     $('#reciprocity-count').textContent = `· ${reciprocity.length}`;
     $('#reciprocity-list').innerHTML = reciprocity.length ? reciprocity.map((r) => `
-      <article class="occ-card reciprocity">
+      <article class="occ-card reciprocity" data-followup="${esc(r.id)}">
         <div class="occ-main">
           <p class="occ-title"><b>${esc(r.name)}</b> 在 ${esc(fmtDate(r.date))} 送了：${esc(r.content)} <span class="badge dir">TA→我</span></p>
           ${r.hasActivePlan ? '<div class="occ-plan muted">已有相关计划</div>' : '<div class="occ-plan empty-plan">暂无后续送礼记录，不代表你还未回应</div>'}
         </div>
         <div class="occ-actions">
           ${r.hasActivePlan ? '' : `<button class="ghost-btn" data-action="plan-open" data-contact="${esc(r.contactId)}" data-occasion="thank_you">记回礼计划</button>`}
+          ${followupActions(r)}
         </div>
       </article>`).join('') : '<div class="empty">没有待回应的人情。收到的礼物会记在台账里。</div>';
 
@@ -1042,7 +1126,7 @@
   function renderContacts() {
     const listEl = $('#contact-list');
     if (!state.contacts.length) {
-      listEl.innerHTML = '<div class="empty">还没有联系人。</div>';
+      listEl.innerHTML = '<div class="empty">还没有联系人。<br><button type="button" class="ghost-btn" data-action="new-contact-quick" style="margin-top:8px">＋ 新建联系人</button></div>';
     } else {
       listEl.innerHTML = state.contacts.map((c) => `
         <button type="button" class="contact-row${c.id === state.activeContactId ? ' active' : ''}" data-id="${esc(c.id)}">
@@ -1130,6 +1214,7 @@
               : `${esc(m.content)} <span class="badge type">${TYPE_CN[m.type] || esc(m.type)}</span>${m.lifespan === 'short' ? ' <span class="badge short">临时</span>' : ''}${directionLabel(m.direction) ? ` <span class="badge dir">${directionLabel(m.direction)}</span>` : ''}${m.occasion ? ` <span class="badge occ">${esc(m.occasion)}</span>` : ''}${m.importance === 3 ? ' <span class="badge imp3">关键</span>' : ''}${m.saidAt ? ` <span class="badge">讲于 ${esc(m.saidAt)}</span>` : ''}`}</span>
             <span class="row-actions">
               ${editing ? '' : `<button class="icon-btn" data-action="edit-memory" data-id="${esc(m.id)}">编辑</button>
+                                <button class="icon-btn" data-action="memory-history" data-id="${esc(m.id)}">修改历史</button>
                                 <button class="icon-btn danger" data-action="delete-memory" data-id="${esc(m.id)}">删除</button>`}
             </span>
           </div>`;
@@ -1266,6 +1351,8 @@
         memorySearchSeq++;
         render();
         $$('.contact-row').find((el) => el.dataset.id === previous)?.focus();
+      } else if (action === 'new-contact-quick') {
+        openModal('contact');
       } else if (action === 'confirm') {
         await api('/api/memories/confirm', { method: 'POST', body: { ids: [id] } });
         toast('已确认进入长期记忆');
@@ -1280,19 +1367,54 @@
         const del = await api(`/api/contacts/${id}`, { method: 'DELETE' });
         toast(`已删除（连带 ${del.removedMemories} 条记忆）`);
         await refresh();
-      } else if (action === 'confirm-all') {
-        const ids = (state.overview.pending || []).map((m) => m.id);
-        if (!ids.length) return;
-        await api('/api/memories/confirm', { method: 'POST', body: { ids } });
-        toast(`已确认 ${ids.length} 条进入长期记忆`);
-        await refresh();
-      } else if (action === 'confirm-material') {
+      } else if (action === 'confirm-revision' || action === 'reject-revision') {
+        actionBtn.disabled = true;
+        try {
+          const operation = action === 'confirm-revision' ? 'confirm' : 'reject';
+          await api(`/api/memory-revisions/${encodeURIComponent(id)}/${operation}`, { method: 'POST', body: {} });
+          toast(operation === 'confirm' ? '修改已确认，原内容已保留在历史中' : '已保留原内容');
+          await refresh();
+        } catch (error) {
+          toast(error.message, true);
+          actionBtn.disabled = false;
+        }
+      } else if (action === 'memory-history') {
+        await showMemoryHistory(id);
+      } else if (action === 'confirm-all' || action === 'confirm-material') {
+        if (state.confirming) return;
         const mt = state.materials.find((x) => x.id === id);
-        const ids = (mt?.extracted || []).filter((m) => m.status === 'pending').map((m) => m.id);
+        const memories = action === 'confirm-all' ? state.overview.pending || [] : mt?.extracted || [];
+        const ids = memories.filter((m) => m.status === 'pending').map((m) => m.id);
         if (!ids.length) return;
-        await api('/api/memories/confirm', { method: 'POST', body: { ids } });
-        toast(`已确认 ${ids.length} 条素材记忆`);
-        await refresh();
+        state.confirming = true;
+        actionBtn.disabled = true;
+        try {
+          const { confirmed, failed } = await api('/api/memories/confirm', { method: 'POST', body: { ids } });
+          toast(`已确认 ${confirmed.length} 条${action === 'confirm-material' ? '素材记忆' : '进入长期记忆'}${failed.length ? `；${failed.length} 条未确认：${failed[0].error}` : ''}`, failed.length > 0);
+        } finally {
+          state.confirming = false;
+          await refresh();
+        }
+      } else if (action === 'followup-update') {
+        if (state.followupBusy.has(id)) return;
+        const status = actionBtn.dataset.status;
+        const sourceVersion = actionBtn.dataset.version;
+        state.followupBusy.add(id);
+        try {
+          let until;
+          if (status === 'snoozed') {
+            const tomorrow = new Date();
+            tomorrow.setDate(tomorrow.getDate() + 1);
+            const date = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
+            until = await promptDialog('哪天起再次提醒？仅在工作台内展示，不发送系统通知。', '', { type: 'date', min: date, value: date });
+            if (!until) return;
+          } else if (status !== 'active' && !(await confirmDialog(`将这条提醒标记为「${FOLLOWUP_STATUS_CN[status]}」？只处理当前事项，不修改原始记忆或新增送礼记录；之后可恢复提醒。`))) return;
+          await api(`/api/followups/${encodeURIComponent(id)}`, { method: 'PATCH', body: { status, sourceVersion, ...(until ? { until } : {}) } });
+          toast(status === 'active' ? '已恢复提醒' : `已标记${FOLLOWUP_STATUS_CN[status]}，原始记录保留`);
+        } finally {
+          state.followupBusy.delete(id);
+          await refresh();
+        }
       } else if (action === 'remember-open') {
         openRemember(id);
       } else if (action === 'first-run') {
@@ -1353,19 +1475,23 @@
             toast('指令已复制，粘贴到 DSH 会话即可');
           }
         } catch (e) { toast(e.message || '生成失败', true); }
-      } else if (action === 'organize-material') {
-        // 一键交给宿主 AI：嵌入模式直连 DSH 会话；独立模式提示走复制指令。
-        // 发送后短暂禁用防连点重复发指令（SSE 重渲染换新节点或 8 秒后自动恢复可点）
-        actionBtn.disabled = true;
-        setTimeout(() => { actionBtn.disabled = false; }, 8000);
-        await organizeViaHost(id);
-      } else if (action === 'copy-material') {
-        // 整理指令由后端从提示词注册表（server/prompts.js）拼装，前端不再手写模板
-        try {
-          const { prompt } = await api(`/api/materials/${id}/organize-prompt`);
-          await navigator.clipboard.writeText(prompt);
-          toast('整理提示词已复制，粘贴到 DSH 会话即可');
-        } catch (e) { toast(e.message || '复制失败，请手动复制素材 ID：' + id, true); }
+      } else if (action === 'manual-material') {
+        const { prompt } = await api(`/api/materials/${id}/organize-prompt`);
+        showAiResult('手动复制整理指令', prompt);
+        $('#airesult-body').setAttribute('tabindex', '0');
+        $('#airesult-body').focus();
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents($('#airesult-body'));
+        selection.removeAllRanges();
+        selection.addRange(range);
+        toast('请复制选中的完整指令，再粘贴到 DSH 会话；查看指令不算已发送');
+      } else if (action === 'organize-material' || action === 'copy-material') {
+        if (state.materialSending.has(id)) return;
+        const mt = state.materials.find((item) => item.id === id);
+        if (action === 'organize-material' && mt?.delivery?.sentAt
+          && !(await confirmDialog('这份素材的整理指令已经发送过。请先检查 DSH 会话，确认需要再次发送？'))) return;
+        await deliverMaterial(id, action === 'copy-material');
       } else if (action === 'answer-question') {
         // AI 整理反问的工作台作答：嵌入模式直发宿主会话，独立模式复制作答指令。
         // 发送/复制失败横幅保留待重试；成功只标送达/已复制，不清横幅——
@@ -1414,7 +1540,7 @@
           actionBtn.dataset.date ?? card?.dataset.date ?? '',
         );
       } else if (action === 'plan-edit') {
-        const plan = findPlan(id);
+        const plan = state.plans.find((item) => item.id === id);
         if (!plan) { toast('计划不存在，请刷新后重试', true); return; }
         openPlanModal(undefined, undefined, undefined, plan);
       } else if (action === 'jd-open') {
@@ -1478,13 +1604,26 @@
         toast('已驳回（可在需要时恢复）');
         await refresh();
       } else if (action === 'supersede-ask') {
-        const keepId = await promptDialog('这条记忆被哪条已确认记忆取代了？粘贴那条记忆的 ID（m_ 开头，时间线里可查）：', 'm_…');
-        if (!keepId) return;
+        const pending = state.overview.pending.find((m) => m.id === id);
+        if (!pending) return;
+        state.supersedeMemoryId = id;
+        state.supersedeContactId = pending.contactId;
+        $('#supersede-search').value = '';
+        $('#supersede-list').innerHTML = '<div class="empty">正在读取记忆…</div>';
+        openModal('supersede');
         try {
-          await api('/api/memories/supersede', { method: 'POST', body: { id, keepId: keepId.trim() } });
-          toast('已标记被取代（不再出现在时间线与检索）');
-          await refresh();
-        } catch (e) { toast(e.message || '取代失败', true); }
+          const r = await api(`/api/memories?contact_id=${pending.contactId}&status=confirmed`);
+          if (state.supersedeMemoryId !== id) return;
+          const candidates = (r.memories || []).filter((m) => !m.supersededBy);
+          $('#supersede-list').innerHTML = candidates.length ? candidates.map((m) =>
+            `<button type="button" class="supersede-item" data-memory-id="${esc(m.id)}">
+              <span class="badge type">${esc(TYPE_CN[m.type] || m.type)}</span>
+              <span class="supersede-text">${esc(m.content)}</span>
+              ${m.date ? `<span class="badge date">${esc(fmtDate(m.date))}</span>` : ''}
+            </button>`).join('') : '<div class="empty">该联系人没有已确认的记忆，无法标记取代。</div>';
+        } catch (error) {
+          if (state.supersedeMemoryId === id) $('#supersede-list').innerHTML = `<div class="empty">${esc(error.message)}</div>`;
+        }
       } else if (action === 'edit-memory') {
         state.editingMemoryId = id;
         render();
@@ -1547,37 +1686,39 @@
   });
 
   // ---------- 弹窗 ----------
-  function applyTab() {
-    $$('.mtab').forEach((t) => {
-      t.classList.toggle('active', t.dataset.mtab === state.smartTab);
-      t.setAttribute('aria-selected', String(t.dataset.mtab === state.smartTab));
-    });
-    $('#form-quick-memory').classList.toggle('hidden', state.smartTab !== 'single');
-    $('#form-smart').classList.toggle('hidden', state.smartTab !== 'smart');
-    $('#qmt-ok').textContent = state.dshEmbedded ? '保存并让 AI 整理' : '保存并复制整理指令';
+  function setMemoryMode(mode) {
+    const manual = mode === 'manual';
+    $('#form-quick-memory').classList.toggle('hidden', !manual);
+    $('#form-smart').classList.toggle('hidden', manual);
+    $('#modal-backdrop .modal').setAttribute('aria-label', manual ? '手动录入' : '记一笔');
+    $('#qmt-ok').textContent = state.dshEmbedded ? '保存并让 AI 整理' : '保存原话';
     $('#capture-mode').textContent = state.dshEmbedded
       ? '素材保存在本机；保存后，你选择的内容会交给 DSH 配置的模型整理，确认前不会成为长期记忆。'
       : '素材保存在本机；复制指令后需粘贴到 DSH 会话才会开始整理，届时你选择的内容会交给配置的模型处理。';
+    $(manual ? '#qm-content' : '#qmt-text').focus();
   }
 
   function openRemember(contactId) {
     openModal('memory');
-    state.smartTab = 'smart';
-    applyTab();
     if (contactId) {
+      $('#qm-contact').value = contactId;
       $('#qmt-contact').value = contactId;
-      $('.capture-options').open = true;
     }
-    $('#qmt-text').focus();
+    if ($('#qmt-contact').selectedOptions.length) $('.capture-options').open = true;
   }
 
-  function fillContactSelects() {
+  function fillContactSelects({ preserveSelection = false } = {}) {
     const options = state.contacts.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
-    const contactId = state.view === 'contacts' ? state.activeContactId : null;
+    const contactId = preserveSelection ? $('#qm-contact').value : (state.view === 'contacts' ? state.activeContactId : null);
+    const selectedIds = new Set(preserveSelection
+      ? [...$('#qmt-contact').selectedOptions].map((option) => option.value)
+      : (contactId ? [contactId] : []));
     $('#qm-contact').innerHTML = `<option value="">请选择联系人</option>${options}`;
     $('#qm-contact').value = contactId || '';
+    $('#qm-contact-hint').classList.toggle('hidden', state.contacts.length > 0);
+    $('#qm-ok').disabled = !state.contacts.length;
     $('#qmt-contact').innerHTML = options;
-    if (contactId) $('#qmt-contact').value = contactId;
+    for (const option of $('#qmt-contact').options) option.selected = selectedIds.has(option.value);
   }
 
   function fillRelationSelect(selected = 'friend') {
@@ -1600,6 +1741,176 @@
       </div>`).join('') : '<div class="empty">还没有关系类型。</div>';
   }
 
+  let safetyToken = '';
+  let safetyBusy = false;
+  let historyRequest = 0;
+
+  function clearRestorePreview() {
+    safetyToken = '';
+    $('#safety-preview').replaceChildren();
+    $('#safety-preview').classList.add('hidden');
+    $('#safety-restore').classList.add('hidden');
+  }
+
+  async function safetyTask(operation) {
+    if (safetyBusy) return;
+    safetyBusy = true;
+    $$('#form-safety button, #safety-file').forEach((el) => { el.disabled = true; });
+    try { await operation(); }
+    catch (error) { $('#safety-status').textContent = error.message || '操作失败，请重试'; }
+    finally {
+      safetyBusy = false;
+      $$('#form-safety button, #safety-file').forEach((el) => { el.disabled = false; });
+    }
+  }
+
+  function backupCounts(counts = {}) {
+    return [['contacts', '位联系人'], ['memories', '条记忆'], ['materials', '份素材'], ['plans', '个计划'], ['followups', '条提醒处理'], ['materialDeliveries', '条发送记录']]
+      .map(([key, label]) => `${Number(counts[key]) || 0} ${label}`).join(' · ');
+  }
+
+  async function loadBackupList() {
+    const result = await api('/api/data/status');
+    $('#safety-status').textContent = result.recoveryRequired
+      ? '数据恢复未完成，已暂停业务读写。请先下载现有备份，再重启工作台；若仍无法启动，请保留原数据目录和恢复日志以便排查。'
+      : result.backupError ? `自动备份失败：${result.backupError}`
+      : `${result.backend === 'rust' ? 'SQLite' : 'JSON'} 存储 · 自动备份保留最近 7 份，手动与恢复前备份另行保留。`;
+    $('#safety-backups').innerHTML = result.backups.length ? result.backups.map((b) =>
+      `<article class="backup-row"><div><b>${esc(new Date(b.createdAt).toLocaleString('zh-CN', { hour12: false }))}</b><p>${esc(backupCounts(b.counts))}</p></div>
+        <div class="safety-actions"><button class="ghost-btn" type="button" data-backup-download="${esc(b.id)}">下载</button>
+        <button class="ghost-btn" type="button" data-backup-preview="${esc(b.id)}">预览恢复</button></div></article>`).join('')
+      : '<p class="empty">还没有备份，可以先点击「立即备份」。</p>';
+  }
+
+  async function downloadBackup(id) {
+    const response = await fetch(`api/data/backups/${encodeURIComponent(id)}/download`);
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(result.error || '备份下载失败');
+    }
+    const url = URL.createObjectURL(await response.blob());
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `relationship-backup-${Date.now()}.json`;
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  async function previewRestore(body) {
+    clearRestorePreview();
+    const result = await api('/api/data/restore/preview', { method: 'POST', body });
+    safetyToken = result.token;
+    $('#safety-preview').innerHTML = `<b>恢复预览 · 尚未修改当前数据</b><p>${esc(new Date(result.preview.createdAt).toLocaleString('zh-CN', { hour12: false }))}</p><p>${esc(backupCounts(result.preview.counts))}</p><p>恢复范围包含素材报告、反问、计划关联、修改历史、提醒处理及素材发送记录。旧版备份不含的提醒与发送状态将被清空。</p>`;
+    $('#safety-preview').classList.remove('hidden');
+    $('#safety-restore').classList.remove('hidden');
+    $('#safety-status').textContent = '校验通过，请核对备份时间和数量后再确认。';
+  }
+
+  async function showMemoryHistory(memoryId) {
+    const request = ++historyRequest;
+    $('#memory-history').textContent = '正在读取修改历史…';
+    openModal('history');
+    try {
+      const { history } = await api(`/api/memories/${encodeURIComponent(memoryId)}/history`);
+      if (request !== historyRequest) return;
+      $('#memory-history').innerHTML = history.length ? history.map((entry) =>
+        `<article class="history-entry"><b>${esc(new Date(entry.createdAt).toLocaleString('zh-CN', { hour12: false }))}</b><span class="badge">${entry.source === 'ai-confirmed' ? 'AI 修改经确认' : entry.source === 'restore' ? '历史恢复' : '手动修改'}</span>
+        ${memoryDiff(entry.before, entry.after)}<button class="ghost-btn" type="button" data-history-restore="${esc(entry.id)}" data-memory-id="${esc(memoryId)}">恢复到此次修改前</button></article>`).join('')
+        : '<p class="empty">暂无修改历史；启用此功能后的修改会记录在这里。</p>';
+    } catch (error) {
+      if (request === historyRequest) $('#memory-history').textContent = error.message;
+    }
+  }
+
+  $('#btn-data-safety').addEventListener('click', () => {
+    clearRestorePreview();
+    $('#safety-file').value = '';
+    openModal('safety');
+    safetyTask(loadBackupList);
+  });
+  $('#safety-create').addEventListener('click', () => safetyTask(async () => {
+    await api('/api/data/backups', { method: 'POST', body: {} });
+    await loadBackupList();
+    $('#safety-status').textContent = '备份已保存到本机。';
+  }));
+  $('#safety-export').addEventListener('click', () => safetyTask(async () => {
+    const { backup } = await api('/api/data/backups', { method: 'POST', body: {} });
+    await downloadBackup(backup.id);
+    await loadBackupList();
+  }));
+  $('#safety-backups').addEventListener('click', (event) => {
+    const download = event.target.closest('[data-backup-download]');
+    const preview = event.target.closest('[data-backup-preview]');
+    if (download) safetyTask(() => downloadBackup(download.dataset.backupDownload));
+    if (preview) safetyTask(() => previewRestore({ backupId: preview.dataset.backupPreview }));
+  });
+  $('#safety-file').addEventListener('change', () => safetyTask(async () => {
+    clearRestorePreview();
+    const file = $('#safety-file').files[0];
+    if (!file) return;
+    if (file.size > 64 * 1024 * 1024) throw new Error('备份文件不能超过 64 MB');
+    let backup;
+    try { backup = JSON.parse(await file.text()); }
+    catch { throw new Error('文件不是有效的 JSON 备份，未修改当前数据'); }
+    await previewRestore({ backup });
+  }));
+  $('#safety-restore').addEventListener('click', async () => {
+    if (safetyBusy || !safetyToken) return;
+    if (!(await confirmDialog('恢复会替换当前联系人、记忆、素材和计划，并先备份现有数据。确定恢复已预览的备份？', { danger: true }))) return;
+    await safetyTask(async () => {
+      const token = safetyToken;
+      clearRestorePreview();
+      await api('/api/data/restore/confirm', { method: 'POST', body: { token } });
+      state.editingMemoryId = null;
+      state.editingPendingId = null;
+      await loadBackupList();
+      await refresh();
+      $('#safety-status').textContent = '恢复完成，恢复前的数据已另行备份。';
+    });
+  });
+  $('#safety-close').addEventListener('click', closeModal);
+  $('#history-close').addEventListener('click', closeModal);
+  $('#supersede-cancel').addEventListener('click', closeModal);
+  $('#supersede-search').addEventListener('input', () => {
+    const query = $('#supersede-search').value.trim().toLowerCase();
+    $$('#supersede-list .supersede-item').forEach((el) => {
+      el.classList.toggle('hidden', query && !el.textContent.toLowerCase().includes(query));
+    });
+  });
+  $('#supersede-list').addEventListener('click', async (e) => {
+    const item = e.target.closest('.supersede-item');
+    if (!item || item.disabled) return;
+    const keepId = item.dataset.memoryId;
+    const id = state.supersedeMemoryId;
+    if (!id || !keepId) return;
+    item.disabled = true;
+    try {
+      await api('/api/memories/supersede', { method: 'POST', body: { id, keepId } });
+      state.supersedeMemoryId = null;
+      state.supersedeContactId = null;
+      closeModal();
+      toast('已标记被取代（不再出现在时间线与检索）');
+      await refresh();
+    } catch (err) {
+      item.disabled = false;
+      toast(err.message || '取代失败', true);
+    }
+  });
+  $('#memory-history').addEventListener('click', async (event) => {
+    const button = event.target.closest('[data-history-restore]');
+    if (!button || button.disabled) return;
+    if (!(await confirmDialog('将当前记忆恢复到这次修改前的内容？此次恢复也会记录在历史中。'))) return;
+    button.disabled = true;
+    try {
+      await api(`/api/memories/${encodeURIComponent(button.dataset.memoryId)}/history/${encodeURIComponent(button.dataset.historyRestore)}/restore`, { method: 'POST', body: {} });
+      await showMemoryHistory(button.dataset.memoryId);
+      await refresh();
+      toast('已恢复旧内容，并记录本次修改');
+    } catch (error) { toast(error.message, true); button.disabled = false; }
+  });
+
   let jdSession = null;
   function cancelJdSession() {
     jdSession?.controller.abort();
@@ -1618,16 +1929,16 @@
       fillRelationSelect();
       $('#nc-title-text').textContent = state.editingContactId ? '编辑联系人' : '新建联系人';
     }
-    const isMemory = which === 'memory';
-    $$('.modal-tabs').forEach((t) => t.classList.toggle('hidden', !isMemory));
-    if (isMemory) {
-      state.smartTab = 'single';
+    if (which === 'memory') {
       fillContactSelects();
-      applyTab();
+      setMemoryMode('smart');
     }
     $('#form-plan').classList.toggle('hidden', which !== 'plan');
     $('#form-suggest').classList.toggle('hidden', which !== 'suggest');
     $('#form-relations').classList.toggle('hidden', which !== 'relations');
+    $('#form-safety').classList.toggle('hidden', which !== 'safety');
+    $('#form-history').classList.toggle('hidden', which !== 'history');
+    $('#form-supersede').classList.toggle('hidden', which !== 'supersede');
     $('#form-first').classList.toggle('hidden', which !== 'first');
     $('#form-airesult').classList.toggle('hidden', which !== 'airesult');
     $('#form-qr').classList.toggle('hidden', which !== 'qr');
@@ -1635,11 +1946,14 @@
     syncModalBackground();
     const root = $('#modal-backdrop');
     $('.modal', root).setAttribute('aria-label', $('.modal-body:not(.hidden) h3', root)?.textContent || '记一笔');
-    ($(`#${which === 'contact' ? 'nc-name' : which === 'plan' ? 'plan-contact' : which === 'suggest' ? 'suggest-list' : which === 'relations' ? 'rt-key' : which === 'first' ? 'fr-name' : which === 'airesult' ? 'airesult-close' : which === 'qr' ? 'form-qr [data-role="plan-cancel"]' : 'qm-content'}`))?.focus?.();
+    ($(`#${which === 'memory' ? 'qmt-text' : which === 'contact' ? 'nc-name' : which === 'plan' ? 'plan-contact' : which === 'suggest' ? 'suggest-list' : which === 'relations' ? 'rt-key' : which === 'first' ? 'fr-name' : which === 'airesult' ? 'airesult-close' : which === 'qr' ? 'form-qr [data-role="plan-cancel"]' : which === 'supersede' ? 'supersede-search' : 'qm-content'}`))?.focus?.();
     if (!root.contains(document.activeElement)) focusableIn(root)[0]?.focus();
   }
   function closeModal() {
-    if ($('#modal-backdrop').classList.contains('hidden')) return;
+    if (sendingSuggestion || $('#modal-backdrop').classList.contains('hidden')) return;
+    if (safetyBusy && !$('#form-safety').classList.contains('hidden')) return;
+    clearRestorePreview();
+    historyRequest += 1;
     cancelJdSession();
     $('#form-jd').reset();
     $('#jd-results').replaceChildren();
@@ -1662,10 +1976,10 @@
   }
   $('#btn-new-contact').addEventListener('click', () => openModal('contact'));
   $('#btn-manage-relations').addEventListener('click', () => openModal('relations'));
-  $('#btn-quick-memory').addEventListener('click', () => {
-    if (!state.contacts.length) { openRemember(); return; }
-    openModal('memory');
-  });
+  $('#btn-quick-memory').addEventListener('click', () => openRemember());
+  $('#qmt-manual').addEventListener('click', () => setMemoryMode('manual'));
+  $('#qm-create-contact').addEventListener('click', () => openModal('contact'));
+  $('#qm-back').addEventListener('click', () => setMemoryMode('smart'));
   $('#nc-cancel').addEventListener('click', closeModal);
   $('#rt-cancel').addEventListener('click', closeModal);
   $('#qm-cancel').addEventListener('click', closeModal);
@@ -1679,20 +1993,26 @@
   };
   $('#form-first').addEventListener('submit', async (e) => {
     e.preventDefault();
+    const button = $('#fr-go');
+    if (button.disabled) return;
     const name = $('#fr-name').value.trim();
     if (!name) return;
     const note = $('#fr-note').value.trim();
+    button.disabled = true;
+    sendingSuggestion = true;
     try {
       const r = await api('/api/first-run', { method: 'POST', body: { name, scenario: state.firstScenario, note } });
-      closeModal();
       await refresh();
       if (state.dshEmbedded) {
-        await askHostAi(r.prompt, { title: `下一步 · ${name}` });
+        await askHostAi(r.prompt, { title: `下一步 · ${name}`, onSent: () => { sendingSuggestion = false; closeModal(); } });
       } else {
         await navigator.clipboard.writeText(r.prompt);
+        sendingSuggestion = false;
+        closeModal();
         toast('建议指令已复制，粘贴到 DSH 会话获取下一步建议');
       }
-    } catch (e) { toast(e.message || '创建失败', true); }
+    } catch (error) { toast(`建议未发送，输入已保留，可重试。${error.message}`, true); }
+    finally { sendingSuggestion = false; button.disabled = false; }
   });
   $$('#modal-backdrop [data-role="plan-cancel"]').forEach((btn) => btn.addEventListener('click', closeModal));
   $('#modal-backdrop').addEventListener('click', (e) => { if (e.target === $('#modal-backdrop')) closeModal(); });
@@ -1715,12 +2035,6 @@
   document.addEventListener('focusin', (e) => {
     const root = topModal();
     if (root && !root.contains(e.target)) focusableIn(root)[0]?.focus();
-  });
-  document.addEventListener('click', (e) => {
-    const tab = e.target.closest('.mtab');
-    if (!tab) return;
-    state.smartTab = tab.dataset.mtab;
-    applyTab();
   });
 
   // 嵌入 DSH（sandbox iframe）时，桌面壳会静默吞掉来自 iframe 的 target=_blank——
@@ -1818,18 +2132,7 @@
       state.disclosures.set('materials-more', true);
       await refresh();
       $$('.material-card').find((card) => card.dataset.id === r.material.id)?.scrollIntoView({ block: 'center' });
-      if (state.dshEmbedded) {
-        toast('素材已保存，正在让 AI 整理；核对后再确认');
-        await askHostAi(`整理素材 ${r.material.id}`, { title: '素材整理报告' });
-      } else {
-        try {
-          const { prompt } = await api(`/api/materials/${r.material.id}/organize-prompt`);
-          await navigator.clipboard.writeText(prompt);
-          toast('素材已保存，整理指令已复制；粘贴到 DSH 会话后开始整理');
-        } catch {
-          toast('素材已保存，但指令未复制；可在素材卡点击「复制整理指令」重试', true);
-        }
-      }
+      await deliverMaterial(r.material.id);
     } catch (err) { toast(err.message, true); }
     finally { button.disabled = false; }
   });
@@ -1993,13 +2296,23 @@
 
   // ---------- 礼赠 ----------
   function fillPlanContacts(selected) {
-    $('#plan-contact').innerHTML = state.contacts.map((c) => `<option value="${esc(c.id)}"${c.id === selected ? ' selected' : ''}>${esc(c.name)}</option>`).join('');
+    $('#plan-contact').innerHTML = '<option value="">请选择联系人</option>'
+      + state.contacts.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
+    $('#plan-contact').value = selected || '';
   }
+
+  function updatePlanDetailsSummary() {
+    const details = [$('#plan-occasion').value.trim(), $('#plan-budget').value.trim(), $('#plan-status').value === 'decided' ? '已定' : ''].filter(Boolean);
+    $('#plan-details-summary').textContent = details.length ? `· ${details.join(' · ')}` : '（可选）';
+    const product = $('#plan-product-name').value.trim() || ($('#plan-product-price').value.trim() || $('#plan-product-url').value.trim() ? '已填商品信息' : '');
+    $('#plan-product-summary').textContent = product ? `· ${product}` : '（仅送礼时选填）';
+  }
+
   function openPlanModal(contactId, occasion, occasionDate, plan) {
     if (!state.contacts.length) { toast('先到「联系人」新建一个联系人', true); return; }
     $('#plan-say').value = '';
     $('#plan-say-hint').classList.add('hidden');
-    fillPlanContacts(plan?.contactId || contactId || state.contacts[0]?.id);
+    fillPlanContacts(plan?.contactId || contactId || (state.view === 'contacts' ? state.activeContactId : ''));
     $('#plan-occasion').value = occasion ?? plan?.occasion ?? '';
     $('#plan-date').value = occasionDate ?? plan?.occasionDate ?? '';
     $('#plan-idea').value = plan?.idea || '';
@@ -2008,32 +2321,37 @@
     $('#plan-product-price').value = plan?.productPrice || '';
     $('#plan-product-url').value = plan?.productUrl || '';
     $('#plan-status').value = plan && activePlan(plan) ? plan.status : 'idea';
+    $('#plan-details').open = false;
+    $('#plan-product-details').open = false;
+    $('#plan-title').textContent = plan ? '编辑打算' : '记个打算';
+    $('#plan-capture').classList.toggle('hidden', Boolean(plan));
+    $('#plan-save').textContent = plan ? '保存修改' : '保存打算';
+    updatePlanDetailsSummary();
     state.editingPlanId = plan?.id || null;
     openModal('plan');
+    $(plan ? '#plan-idea' : '#plan-say').focus();
   }
 
   $('#btn-new-plan').addEventListener('click', () => openPlanModal());
   $('#btn-quick-plan').addEventListener('click', () => openPlanModal());
+  $('#form-plan').addEventListener('input', updatePlanDetailsSummary);
+  $('#form-plan').addEventListener('change', updatePlanDetailsSummary);
 
-  // 一句话建计划：纯本地规则解析，边说边拆到下面的表单位；没识别的部分留给用户补，不猜
-  let sayTimer = null;
   $('#plan-say').addEventListener('input', () => {
-    clearTimeout(sayTimer);
     const text = $('#plan-say').value.trim();
     const hint = $('#plan-say-hint');
     if (!text) { hint.classList.add('hidden'); return; }
-    sayTimer = setTimeout(() => {
-      const r = PlanParse.parse(text, { contacts: state.contacts });
-      const bits = [];
-      if (r.contactId) { $('#plan-contact').value = r.contactId; bits.push(`联系人 ${r.contactName}`); }
-      else bits.push('没认出联系人，请在下面选择');
-      if (r.date) { $('#plan-date').value = r.date; bits.push(`日期 ${r.date}`); }
-      else bits.push('没认出日期，可手动补');
-      if (r.occasion) { $('#plan-occasion').value = r.occasion; bits.push(`场合 ${r.occasion}`); }
-      if (r.idea) $('#plan-idea').value = r.idea;
-      hint.textContent = `已填：${bits.join(' · ')}。请核对，保存前都可手改。`;
-      hint.classList.remove('hidden');
-    }, 200);
+    const r = PlanParse.parse(text, { contacts: state.contacts });
+    const bits = [];
+    if (r.contactId) { $('#plan-contact').value = r.contactId; bits.push(`联系人 ${r.contactName}`); }
+    else bits.push('没认出联系人，请核对选择');
+    if (r.date) { $('#plan-date').value = r.date; bits.push(`日期 ${r.date}`); }
+    else bits.push('日期可留空或手动补充');
+    if (r.occasion) $('#plan-occasion').value = r.occasion;
+    if (r.idea) $('#plan-idea').value = r.idea;
+    hint.textContent = `${bits.join(' · ')}。保存前可修改。`;
+    hint.classList.remove('hidden');
+    updatePlanDetailsSummary();
   });
 
   async function openSuggestModal(contactId, occasion, planId, occasionDate = '') {
@@ -2076,6 +2394,8 @@
 
   $('#form-suggest').addEventListener('submit', async (e) => {
     e.preventDefault();
+    const button = $('#suggest-ok');
+    if (button.disabled) return;
     const contactId = state.suggestContactId;
     if (!contactId) return;
     const memoryIds = $$('#suggest-list input[type="checkbox"]:checked').map((x) => x.value);
@@ -2084,18 +2404,20 @@
     if (state.suggestPlanId && (!plan || plan.contactId !== contactId)) { toast('计划已变化，请重新打开建议', true); return; }
     const occasion = plan ? (plan.occasion || '') : ($('#suggest-target').dataset.occasion || '');
     const occasionDate = plan ? (plan.occasionDate || '') : ($('#suggest-target').dataset.date || '');
+    button.disabled = true;
+    sendingSuggestion = true;
     try {
       const { prompt, evidenceCount } = await api('/api/gift-suggest', { method: 'POST', body: { contactId, memoryIds, budget, occasion, occasionDate, planId: state.suggestPlanId || undefined } });
       if (!state.dshEmbedded) {
         await navigator.clipboard.writeText(prompt);
+        sendingSuggestion = false;
         closeModal();
         toast(evidenceCount ? '礼物建议指令已复制，粘贴到 DSH 会话即可' : '暂无记忆依据，指令已复制；AI 会基于标签给通用建议');
         return;
       }
-      // 嵌入模式：等 AI 回复就地弹层（同首页/详情页按钮动线），AI 建的方案卡随后出现在下方
-      closeModal();
-      await askHostAi(prompt, { title: '送什么 · AI 建议' });
-    } catch (err) { toast(err.message, true); }
+      await askHostAi(prompt, { title: '送什么 · AI 建议', onSent: () => { sendingSuggestion = false; closeModal(); } });
+    } catch (err) { toast(`建议未发送，输入已保留，可重试。${err.message}`, true); }
+    finally { sendingSuggestion = false; button.disabled = false; }
   });
 
   $('#form-plan').addEventListener('submit', async (e) => {
@@ -2123,11 +2445,30 @@
   // ---------- SSE ----------
   function connectEvents() {
     const es = new EventSource('api/events');
-    const relevant = ['memory.changed', 'contact.changed', 'material.changed', 'plan.changed', 'relation.changed', 'overview'];
+    const relevant = ['memory.changed', 'contact.changed', 'material.changed', 'plan.changed', 'followup.changed', 'relation.changed', 'overview'];
     for (const name of relevant) es.addEventListener(name, scheduleRefresh);
+    es.addEventListener('data.restored', () => {
+      state.editingMemoryId = null;
+      state.editingPendingId = null;
+      state.memorySearchQuery = '';
+      state.memorySearchResults = [];
+      clearRestorePreview();
+      cancelJdSession();
+      if (!safetyBusy) closeModal();
+      scheduleRefresh();
+    });
     es.onopen = () => markStatus(true);
     es.onerror = () => markStatus(false);
   }
+
+  let reminderDay = new Date().toDateString();
+  setInterval(() => {
+    const today = new Date().toDateString();
+    if (today === reminderDay) return;
+    reminderDay = today;
+    scheduleRefresh();
+  }, 60000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) scheduleRefresh(); });
 
   // ---------- 启动 ----------
   api('api/info').then((info) => { state.info = info || {}; }).catch(() => {});

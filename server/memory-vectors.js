@@ -1,24 +1,17 @@
-import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { MEMORY_VECTORS_PATH, ensureDirs } from './config.js';
 import { cosine, memorySearchText, textVector, vectorEntries, vectorFromEntries } from './vector-search.js';
+import { readJsonFile, validateDataFile, atomicWriteFile } from './json-file.js';
 
 const VERSION = 1;
 
 function readAll() {
-  try {
-    const v = JSON.parse(fs.readFileSync(MEMORY_VECTORS_PATH, 'utf8'));
-    return v && v.version === VERSION && v.items && typeof v.items === 'object' && !Array.isArray(v.items)
-      ? v
-      : { version: VERSION, items: {} };
-  } catch { return { version: VERSION, items: {} }; }
+  return readJsonFile(MEMORY_VECTORS_PATH, { version: VERSION, items: {} }, (v) => validateDataFile('memory-vectors.json', v));
 }
 
 function writeAll(cache) {
   ensureDirs();
-  const tmp = MEMORY_VECTORS_PATH + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(cache, null, 1));
-  fs.renameSync(tmp, MEMORY_VECTORS_PATH);
+  atomicWriteFile(MEMORY_VECTORS_PATH, JSON.stringify(cache, null, 1));
 }
 
 function fingerprint(memory) {

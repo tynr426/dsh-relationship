@@ -20,8 +20,23 @@
               "icon": "lucide-file",
               "title": "2026-09-20-article-organize-question"
             }
+          },
+          {
+            "id": "518946ee75cb55b3",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "docs/2026-09-20-article-organize-question.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "2026-09-20-article-organize-question"
+            }
           }
-        ]
+        ],
+        "currentTab": 1
       }
     ],
     "direction": "vertical"
@@ -83,7 +98,7 @@
       }
     ],
     "direction": "horizontal",
-    "width": 300
+    "width": 372.11328125
   },
   "right": {
     "id": "c51341b83e3bb187",
@@ -190,41 +205,42 @@
   },
   "active": "3876969ff1846e1f",
   "lastOpenFiles": [
+    "test-results/relbench-关系记忆工作台-取代：pendin-06ee1-后退出队列，confirmed-记忆被取代后退出时间线-relbench/trace.zip",
+    "test-results/relbench-关系记忆工作台-取代：pendin-06ee1-后退出队列，confirmed-记忆被取代后退出时间线-relbench/error-context.md",
+    "test-results/relbench-关系记忆工作台-取代：pendin-06ee1-后退出队列，confirmed-记忆被取代后退出时间线-relbench",
     "test-results",
-    "test-results/jd-products-选择失败可重试；发商品编号与展示名称-价格，关联原-AI-卡而不新建-已送-jd-products-retry1/trace.zip",
+    "public/app.js.tmp.36761.1790236728514",
+    "public/style.css.tmp.36761.1790236723287",
+    "test-results/relbench-关系记忆工作台-打算分层：未识别人不猜选，细节折叠可保存，失败保留且编辑不丢商品信息-relbench-retry1/trace.zip",
+    "test-results/relbench-关系记忆工作台-打算分层：未识别人不猜选，细节折叠可保存，失败保留且编辑不丢商品信息-relbench-retry1/error-context.md",
+    "test-results/relbench-关系记忆工作台-打算分层：未识别人不猜选，细节折叠可保存，失败保留且编辑不丢商品信息-relbench-retry1",
+    "test-results/relbench-关系记忆工作台-打算分层：未识别人不猜选，细节折叠可保存，失败保留且编辑不丢商品信息-relbench/trace.zip",
+    "test-results/relbench-关系记忆工作台-打算分层：未识别人不猜选，细节折叠可保存，失败保留且编辑不丢商品信息-relbench/error-context.md",
+    "test-results/relbench-关系记忆工作台-打算分层：未识别人不猜选，细节折叠可保存，失败保留且编辑不丢商品信息-relbench",
+    "public/style.css.tmp.36761.1790235727173",
+    "test-results/relbench-关系记忆工作台-智能整理多人素材：多选两人保存，素材卡显示双名-relbench-retry1/trace.zip",
+    "test-results/relbench-关系记忆工作台-智能整理多人素材：多选两人保存，素材卡显示双名-relbench-retry1/error-context.md",
+    "test-results/relbench-关系记忆工作台-智能整理多人素材：多选两人保存，素材卡显示双名-relbench/error-context.md",
+    "test-results/relbench-关系记忆工作台-记一笔默认输入原话，手动录入往返保留两份草稿且不提前写入-relbench-retry1/error-context.md",
+    "test-results/relbench-关系记忆工作台-记一笔默认输入原话，手动录入往返保留两份草稿且不提前写入-relbench/error-context.md",
+    "docs/2026-09-20-article-collab-architecture.md",
+    "docs/2026-09-20-article-prompt-as-config.md",
+    "docs/2026-09-20-article-product-intro.md",
+    "docs/2026-09-20-article-organize-question.md",
+    "docs/2026-09-20-article-electron-sandbox-iframe.md",
+    "docs/2026-09-20-article-ai-memory-gates.md",
+    "test-results/relbench-关系记忆工作台-批量确认遇到失效记忆时按实际结果反馈-relbench/error-context.md",
+    "test-results/relbench-关系记忆工作台-独立模式未完成素材可继续复制，发送留痕不等于确认-relbench/error-context.md",
+    "test-results/relbench-关系记忆工作台-智能整理：粘贴素材-→-AI-拆条-→-按素材批量确认-relbench/error-context.md",
+    "test-results/relbench-关系记忆工作台-一句话记录：复制失败保留原话可重试，空白不保存，窄屏不溢出-relbench-retry1/error-context.md",
+    "test-results/relbench-关系记忆工作台-一句话记录：复制失败保留原话可重试，空白不保存，窄屏不溢出-relbench/error-context.md",
+    "test-results/relbench-关系记忆工作台-智能整理：粘贴素材-→-AI-拆条-→-按素材批量确认-relbench-retry1/error-context.md",
+    "test-results/relbench-关系记忆工作台-数据安全：原文变化时旧提案不能覆盖，可选择保留原内容-relbench-retry1/error-context.md",
+    "test-results/relbench-关系记忆工作台-数据安全：原文变化时旧提案不能覆盖，可选择保留原内容-relbench/error-context.md",
     "test-results/jd-products-选择失败可重试；发商品编号与展示名称-价格，关联原-AI-卡而不新建-已送-jd-products-retry1/error-context.md",
-    "test-results/jd-products-选择失败可重试；发商品编号与展示名称-价格，关联原-AI-卡而不新建-已送-jd-products-retry1",
-    "test-results/jd-products-选择失败可重试；发商品编号与展示名称-价格，关联原-AI-卡而不新建-已送-jd-products/trace.zip",
     "test-results/jd-products-选择失败可重试；发商品编号与展示名称-价格，关联原-AI-卡而不新建-已送-jd-products/error-context.md",
-    "test-results/jd-products-选择失败可重试；发商品编号与展示名称-价格，关联原-AI-卡而不新建-已送-jd-products",
-    "public/qrcode_UTF8.js",
-    "public/qrcode.js",
-    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.temp-stream-3c2ec2",
-    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de",
-    "rust/relstore/target/release/deps/relstore-7fab521ba8aef7de.relstore.c1de352176e77bd-cgu.00.rcgu.o",
     "test-results/jd-products-选择失败可重试；只发商品编号，关联原-AI-卡而不新建-已送-jd-products-retry1/error-context.md",
     "test-results/jd-products-选择失败可重试；只发商品编号，关联原-AI-卡而不新建-已送-jd-products/error-context.md",
-    "test-results/jd-products-取消后过期-select-响应不串另一计划弹窗-jd-products-retry1/error-context.md",
-    "test-results/jd-products-取消后过期-select-响应不串另一计划弹窗-jd-products/error-context.md",
-    "test-results/jd-products-取消后过期-search-响应不串另一计划弹窗-jd-products-retry1/error-context.md",
-    "test-results/jd-products-取消后过期-search-响应不串另一计划弹窗-jd-products/error-context.md",
-    "test-results/jd-products-取消后过期-status-响应不串另一计划弹窗-jd-products-retry1/error-context.md",
-    "test-results/jd-products-取消后过期-status-响应不串另一计划弹窗-jd-products/error-context.md",
-    "test-results/jd-products-热销榜不发送残留价格；切回关键词恢复价格值、校验与搜索-jd-products-retry1/error-context.md",
-    "test-results/jd-products-热销榜不发送残留价格；切回关键词恢复价格值、校验与搜索-jd-products/error-context.md",
-    "test-results/jd-products-真实计划内嵌入口：关键词搜索范围、空结果和失败重试，安全渲染候选-jd-products-retry1/error-context.md",
-    "test-results/jd-products-真实计划内嵌入口：关键词搜索范围、空结果和失败重试，安全渲染候选-jd-products/error-context.md",
-    "test-results/jd-products-缺配置只引导本机变量名；可重新检查，关键词按原计划预填-jd-products-retry1/error-context.md",
-    "test-results/jd-products-缺配置只引导本机变量名；可重新检查，关键词按原计划预填-jd-products/error-context.md",
-    "test-results/relbench-关系记忆工作台-计划页按归一场合和具体日期分组，旧计划不串卡，泛节日不平铺-relbench-retry1/error-context.md",
-    "test-results/relbench-关系记忆工作台-计划页按归一场合和具体日期分组，旧计划不串卡，泛节日不平铺-relbench/error-context.md",
-    "test-results/relbench-关系记忆工作台-手动记一笔即确认并可在时间线编辑删除-relbench-retry1-repeat1/error-context.md",
-    "test-results/relbench-关系记忆工作台-手动记一笔即确认并可在时间线编辑删除-relbench-repeat1/error-context.md",
-    "test-results/relbench-关系记忆工作台-手机联系人详情直接可达，记一笔预选当前人，返回后可换人-relbench/error-context.md",
-    "test-results/relbench-关系记忆工作台-手动记一笔即确认并可在时间线编辑删除-relbench-retry1/error-context.md",
-    "test-results/relbench-关系记忆工作台-手动记一笔即确认并可在时间线编辑删除-relbench/error-context.md",
-    "test-results/relbench-关系记忆工作台-智能整理多人素材：多选两人保存，素材卡显示双名-relbench/error-context.md",
-    "test-results/relbench-关系记忆工作台-AI记忆整理：重要状态不折叠，零提取报告算完成，普通素材展开状态保留-relbench-retry1/error-context.md",
     "docs/images/figure-2-collab-architecture.png",
     "docs/images/figure-6-electron-sandbox-iframe.png",
     "docs/images/figure-5-prompt-as-config.png",

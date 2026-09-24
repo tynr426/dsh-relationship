@@ -6,12 +6,12 @@ import path from 'node:path';
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-rel-tools-'));
 process.env.REL_DATA_DIR = dataDir;
+process.env.REL_STORE = 'json';
 const tools = await import('../../server/tools.js');
-const store = await import('../../server/store.js');
-// 计划建议关联（basedOnPlanId）是 facade 层侧车，不在 JSON store 上；与 tools 共用同一 DATA_DIR
-const facade = (await import('../../server/store-facade.js')).default;
+const store = (await import('../../server/store-facade.js')).default;
+const facade = store;
 
-test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
+test.after(() => { store.flush(); fs.rmSync(dataDir, { recursive: true, force: true }); });
 
 test('AI 计划仅允许 idea/decided，完成记录不阻挡新主意', async () => {
   const c = store.createContact({ name: 'AI 完成权限测试' });
@@ -149,6 +149,36 @@ test('memory_batch_add validates per entry and reports failures', async () => {
   assert.equal(await tools.executeTool('memory_batch_add', { entries: [] }).then((r) => r.ok), false);
 });
 
+test('memory_update 仅提议：原文检索不变，提醒待确认，无 AI 确认入口', async () => {
+  const c = store.createContact({ name: '修改提案工具' });
+  const m = structuredClone(store.createMemory({ contactId: c.id, type: 'attribute', content: '原有事实', author: 'user' }));
+  const result = await tools.executeTool('memory_update', { id: m.id, content: '建议的新事实' });
+  assert.equal(result.ok, true);
+  assert.equal(result.memory, undefined);
+  assert.equal(result.proposal.before.content, '原有事实');
+  assert.equal(result.proposal.after.content, '建议的新事实');
+  assert.match(result.提示, /原记忆尚未修改/);
+  assert.deepEqual(store.getMemory(m.id), m);
+  assert.equal((await tools.executeTool('memory_search', { contactId: c.id, query: '建议的新事实' })).total, 0);
+  assert.equal((await tools.executeTool('memory_search', { contactId: c.id, query: '原有事实' })).total, 1);
+  const summary = await tools.executeTool('pending_summary');
+  assert.ok(summary.pendingRevisionCount > 0);
+  assert.ok(summary.pendingRevisions.some((p) => p.id === result.proposal.id));
+  assert.match(summary.提示, /待确认修改提案/);
+  assert.equal(store.overview().pending.some((p) => p.id === result.proposal.id), false);
+  assert.equal((await tools.executeTool('memory_confirm', { ids: [result.proposal.id] })).status, 403);
+  for (const name of ['memory_revision_confirm', 'confirmMemoryRevision', 'restoreMemoryHistory']) {
+    assert.equal(tools.TOOL_DEFS.some((d) => d.function.name === name), false);
+    assert.equal((await tools.executeTool(name, { id: result.proposal.id })).ok, false);
+  }
+  assert.deepEqual(store.getMemory(m.id), m);
+  const pending = store.createMemory({ contactId: c.id, type: 'attribute', content: '还没确认' });
+  assert.equal((await tools.executeTool('memory_update', { id: pending.id, content: '不可改' })).ok, false);
+  assert.equal((await tools.executeTool('memory_update', { id: m.id, content: '' })).ok, false);
+  store.rejectMemoryRevision(result.proposal.id);
+  store.deleteContact(c.id);
+});
+
 test('memory_search returns only confirmed memories', async () => {
   const c = store.createContact({ name: '检索' });
   const pending = await tools.executeTool('memory_add', { contactId: c.id, type: 'preference', content: '想学潜水' });
@@ -226,7 +256,12 @@ test('material tools: save → list raw → get → batch extract with sourceId/
 
   // V4：direction/occasion 标注 + memory_search 过滤（确认走 store 层 = UI 路径）
   store.confirmMemories([batch.created[0].id]);
-  await tools.executeTool('memory_update', { id: batch.created[0].id, direction: 'user_to_contact', occasion: 'Wedding' });
+  const update = await tools.executeTool('memory_update', { id: batch.created[0].id, direction: 'user_to_contact', occasion: 'Wedding' });
+  assert.equal(update.ok, true);
+  assert.equal(update.memory, undefined);
+  assert.equal(update.proposal.status, 'pending');
+  assert.equal((await tools.executeTool('memory_search', { contactId: c.id, direction: 'user_to_contact' })).memories.length, 0);
+  store.confirmMemoryRevision(update.proposal.id);
   assert.equal((await tools.executeTool('memory_search', { contactId: c.id, direction: 'user_to_contact' })).memories.length, 1);
   assert.equal((await tools.executeTool('memory_search', { contactId: c.id, occasion: 'wedding' })).memories.length, 1);
   assert.equal((await tools.executeTool('memory_search', { contactId: c.id, direction: 'contact_to_user' })).memories.length, 0);

@@ -53,6 +53,12 @@ export function run(args, { timeout = 10_000 } = {}) {
   if (result.error) throw new Error(`relstore 调用失败: ${result.error.message}`);
   if (result.status !== 0) {
     const msg = String(result.stderr || '').trim() || String(result.stdout || '').trim() || `exit ${result.status}`;
+    if (msg.includes('MEMORY_CONFLICT')) {
+      throw Object.assign(new Error('原记忆已被其他操作修改，旧提案不能覆盖，请刷新后重新核对'), { status: 409, code: 'MEMORY_CONFLICT' });
+    }
+    if (args.includes('--expected') && msg.includes('unexpected argument')) {
+      throw Object.assign(new Error('relstore 版本过旧，请重新构建后再修改记忆'), { status: 503 });
+    }
     throw new Error(msg.replace(/^✗\s*/, ''));
   }
   const out = String(result.stdout || '').trim();

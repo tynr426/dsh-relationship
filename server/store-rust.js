@@ -235,7 +235,7 @@ export function getMemory(id) {
   return listMemories().find((m) => m.id === id) || null;
 }
 
-function validateMemoryFields({ type, content, date, importance, saidAt, direction, lifespan, occasion }) {
+export function validateMemoryFields({ type, content, date, importance, saidAt, direction, lifespan, occasion }) {
   if (!MEMORY_TYPES.includes(type)) throw httpError(400, `type 必须是：${MEMORY_TYPES.join(' / ')}`);
   const text = String(content ?? '').trim();
   if (!text) throw httpError(400, '记忆内容不能为空');
@@ -363,11 +363,16 @@ export function restoreMemory(id) {
   return memory;
 }
 
-export function updateMemory(id, patch = {}) {
+export function updateMemory(id, patch = {}, { expected } = {}) {
   const m = getMemory(String(id));
+  if (expected && (!m || m.status !== 'confirmed' || m.supersededBy)) {
+    throw Object.assign(httpError(409, '原记忆已修改或删除，旧提案不能覆盖'), { code: 'MEMORY_CONFLICT' });
+  }
   if (!m) throw httpError(404, '记忆不存在');
   if (m.status !== 'confirmed') throw httpError(400, `状态为 ${m.status}，只有已确认记忆可以直接编辑`);
-  const { memory } = cli(applyMemoryEditArgs(String(id), patch));
+  const args = applyMemoryEditArgs(String(id), patch);
+  args.push('--expected', JSON.stringify(expected ?? m));
+  const { memory } = cli(args);
   return memory;
 }
 
@@ -513,15 +518,23 @@ export function markPlanSent(id) {
 
 // ---------- 礼赠视图 ----------
 export function giftReciprocity() {
-  const { items } = cli(['reciprocity']);
+  // 排除 SQLite 视图中的被取代礼物；同日按创建顺序与 JSON 模式保持一致。
+  const confirmed = listMemories({ type: 'gift', status: 'confirmed' }).filter((m) => !m.supersededBy)
+    .sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+  const plans = listPlans();
   const stamp = (m) => (m.date || '').replace('每年-', '0000-') || (m.createdAt || '').slice(0, 10);
-  const received = listMemories({ type: 'gift', status: 'confirmed' })
-    .filter((m) => !m.supersededBy && ['contact_to_user', 'both'].includes(m.direction))
-    .sort((a, b) => stamp(b).localeCompare(stamp(a)));
-  return items.map((item) => {
-    const memory = received.find((m) => m.contactId === item.contactId);
-    return { ...item, memoryId: memory.id, content: memory.content };
-  });
+  const items = [];
+  for (const c of listContacts({ includeArchived: false })) {
+    const mine = confirmed.filter((m) => m.contactId === c.id && ['user_to_contact', 'both'].includes(m.direction));
+    const theirs = confirmed.filter((m) => m.contactId === c.id && ['contact_to_user', 'both'].includes(m.direction));
+    if (!theirs.length) continue;
+    const latestTheirs = theirs.sort((a, b) => stamp(b).localeCompare(stamp(a)))[0];
+    const latestMine = mine.sort((a, b) => stamp(b).localeCompare(stamp(a)))[0];
+    if (latestMine && stamp(latestMine) >= stamp(latestTheirs)) continue;
+    const hasActivePlan = plans.some((p) => p.contactId === c.id && !['sent', 'done'].includes(p.status));
+    items.push({ contactId: c.id, name: c.name, memoryId: latestTheirs.id, content: latestTheirs.content, date: stamp(latestTheirs), hasActivePlan });
+  }
+  return items.sort((a, b) => b.date.localeCompare(a.date));
 }
 
 export function giftLedger() {

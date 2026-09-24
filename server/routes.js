@@ -9,6 +9,12 @@ import { FLOWS } from './prompts.js';
 import { runAsync } from './relstore-bridge.js';
 import { searchCachedMemoryVectors } from './memory-vectors.js';
 import { occasionKey, occasionLabel, deriveOccasions } from './occasions.js';
+import { handleSafetyRequest } from './safety-routes.js';
+import { requiresDataRecovery } from './data-safety.js';
+
+let activeMutations = 0;
+let dataGeneration = 0;
+export const hasActiveMutations = () => activeMutations > 0;
 
 const PUBLIC = path.join(ROOT, 'public');
 const MIME = {
@@ -26,12 +32,12 @@ function ok(res, obj) { json(res, 200, { ok: true, ...obj }); }
 function fail(res, code, error) { json(res, code, { ok: false, error }); }
 function failFrom(res, e) { fail(res, e?.status || 500, e?.message || String(e)); }
 
-async function readBody(req) {
+async function readBody(req, limit = 4 * 1024 * 1024) {
   let size = 0;
   const chunks = [];
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > 4 * 1024 * 1024) throw store.httpError(400, '请求体过大');
+    if (size > limit) throw store.httpError(413, '请求体过大');
     chunks.push(chunk);
   }
   if (!chunks.length) return {};
@@ -47,9 +53,9 @@ function publicContact(c) { return { ...c }; }
 function briefingFacts(c) {
   const confirmed = store.listMemories({ contactId: c.id, status: 'confirmed' }).filter((m) => !m.supersededBy);
   const byDateDesc = (a, b) => (b.date || b.createdAt || '').localeCompare(a.date || a.createdAt || '');
-  // 禁忌/不喜好与承诺全量保留（安全与跟进关键），其余类型只取最近 12 条，更深的让 AI 用 timeline_get 补读
-  const promises = confirmed.filter((m) => m.type === 'promise').sort(byDateDesc)
-    .map((m) => ({ id: m.id, content: m.content, date: m.date || '' }));
+  const followups = store.listFollowups().filter((item) => item.contactId === c.id);
+  const promises = followups.filter((item) => item.kind === 'promise').sort(byDateDesc)
+    .map((item) => ({ id: item.memoryId, type: 'promise', content: item.content, date: item.date }));
   const cautions = confirmed.filter((m) => m.type === 'taboo' || m.type === 'dislike').sort(byDateDesc)
     .map((m) => ({ id: m.id, type: m.type, content: m.content }));
   const factLines = confirmed.filter((m) => !['promise', 'taboo', 'dislike'].includes(m.type)).sort(byDateDesc).slice(0, 12);
@@ -57,8 +63,8 @@ function briefingFacts(c) {
     lastSeen: store.fadingContacts(1).find((f) => f.contactId === c.id) || null,
     occasions: store.giftOccasions(90).filter((o) => o.contactId === c.id)
       .map((o) => ({ label: o.label, date: o.date, inDays: o.inDays })),
-    reciprocity: store.giftReciprocity().filter((r) => r.contactId === c.id)
-      .map((r) => ({ content: r.content, date: r.date, hasActivePlan: r.hasActivePlan })),
+    reciprocity: followups.filter((item) => item.kind === 'reciprocity')
+      .map((item) => ({ content: item.content, date: item.date, hasActivePlan: item.hasActivePlan })),
     promises,
     cautions,
     factLines,
@@ -70,6 +76,14 @@ async function api(req, res, url, body) {
   const p = url.pathname;
   const m = (method) => req.method === method;
   const parts = p.split('/').filter(Boolean); // [api, ...]
+  if (!p.startsWith('/api/data/') && requiresDataRecovery()) {
+    fail(res, 503, '数据恢复未完成，已暂停业务读写；请从数据安全页面下载备份并重启恢复，不要删除恢复日志');
+    return true;
+  }
+  if (handleSafetyRequest(req, res, url, body, {
+    busy: hasActiveMutations(), generation: dataGeneration,
+    onRestore: () => { dataGeneration += 1; },
+  })) return true;
 
   if (p === '/api/events') { sseHandler(req, res); return true; }
 
@@ -402,7 +416,25 @@ async function api(req, res, url, body) {
     return true;
   }
   if (p === '/api/gifts/reciprocity' && m('GET')) {
-    ok(res, { items: store.giftReciprocity() });
+    ok(res, { items: store.listFollowups().filter((item) => item.kind === 'reciprocity')
+      .map((item) => ({ ...item, name: item.contactName })) });
+    return true;
+  }
+  if (p === '/api/followups' && m('GET')) {
+    const includeHandled = url.searchParams.get('include_handled');
+    if (includeHandled !== null && !['true', 'false'].includes(includeHandled)) {
+      fail(res, 400, 'include_handled 必须是 true 或 false');
+      return true;
+    }
+    ok(res, { items: store.listFollowups({ includeHandled: includeHandled === 'true' }) });
+    return true;
+  }
+  if (parts[1] === 'followups' && parts[2] && !parts[3] && m('PATCH')) {
+    try {
+      const item = store.updateFollowup(decodeURIComponent(parts[2]), body);
+      broadcast('followup.changed', { id: item.id, contactId: item.contactId, status: item.status });
+      ok(res, { item });
+    } catch (e) { failFrom(res, e); }
     return true;
   }
   // 疏远预警：days 阈值默认 90（钳 1-365），limit 默认 20（钳 1-50）；tier 按天数分档（>=180 stale）
@@ -509,22 +541,17 @@ async function api(req, res, url, body) {
       items.push({ kind: 'fading', action: 'briefing', contactId: c.id, contactName: c.name, relation: c.relation,
         label: '久未联系', date: f.lastDate, days: f.days, text: `${f.days} 天没有有记录的互动` });
     }
-    for (const memory of confirmed.filter((m) => m.type === 'promise')) {
-      const c = contacts.get(memory.contactId);
-      const date = memory.date || (memory.createdAt || '').slice(0, 10);
-      items.push({ kind: 'promise', action: 'briefing', contactId: c.id, contactName: c.name, relation: c.relation,
-        label: '待跟进', date, days: daysSince(date), text: `曾答应：${memory.content}（暂无跟进记录）` });
-    }
-    for (const r of store.giftReciprocity()) {
-      const c = contacts.get(r.contactId);
-      if (!c) continue;
-      items.push({ kind: 'reciprocity', action: 'gift', contactId: c.id, contactName: c.name, relation: c.relation,
-        label: '回礼', occasion: '答谢', date: r.date, days: daysSince(r.date), text: `TA 送过「${r.content}」，暂无回礼记录` });
+    const followups = store.listFollowups({ includeHandled: true });
+    for (const item of followups.filter((item) => item.status === 'active')) {
+      const gift = item.kind === 'reciprocity';
+      items.push({ ...item, action: gift ? 'gift' : 'briefing', label: gift ? '回礼' : '待跟进',
+        days: daysSince(item.date), text: gift ? `TA 送过「${item.content}」，暂无回礼记录` : `曾答应：${item.content}（暂无跟进记录）` });
     }
     items.sort((a, b) => b.days - a.days);
     const holidays = store.upcomingHolidays(Math.min(days, 14));
     const covered = new Set(occasionGroups.map((g) => g.id));
-    ok(res, { items, occasionGroups, days, holidays, opportunities: holidays.filter((h) => !covered.has(`${h.occasion}|${h.date}`)) });
+    ok(res, { items, handledFollowups: followups.filter((item) => item.status !== 'active'),
+      occasionGroups, days, holidays, opportunities: holidays.filter((h) => !covered.has(`${h.occasion}|${h.date}`)) });
     return true;
   }
   // 最近记住了：已确认记忆按确认时间倒序取前 N 条（确认闸门之后才进这里，pending 不出现）。
@@ -640,6 +667,7 @@ async function api(req, res, url, body) {
     const contactName = new Map(store.listContacts({ includeArchived: true, includePending: true }).map((c) => [c.id, c.name]));
     const reports = store.allMaterialReports();
     const questions = store.allOrganizeQuestions();
+    const deliveries = store.allMaterialDeliveries();
     const extraContacts = store.allMaterialContacts();
     const idsOf = (mt) => {
       const v = Array.isArray(extraContacts[mt.id]) ? extraContacts[mt.id] : null;
@@ -659,6 +687,7 @@ async function api(req, res, url, body) {
       report: reports[mt.id]?.report || '',
       reportedAt: reports[mt.id]?.reportedAt || '',
       question: questions[mt.id] || null,
+      delivery: deliveries[mt.id] || null,
       extracted: (memBySource.get(mt.id) || []).map((mem) => ({ id: mem.id, type: mem.type, content: mem.content, status: mem.status, importance: mem.importance })),
     }));
     ok(res, { materials });
@@ -666,10 +695,20 @@ async function api(req, res, url, body) {
   }
   // 复制整理指令：后端从提示词注册表拼装（前端不再手写模板，防漂移）
   if (parts[1] === 'materials' && parts[2] && parts[3] === 'organize-prompt' && m('GET')) {
-    const toolsUrl = url.pathname.includes('/api/dsh-relationship/workbench')
-      ? `${url.origin}/api/dsh-relationship/workbench/api/tools`
-      : `${url.origin}/api/tools`;
+    // 实际监听地址同时适用于独立服务与本机宿主代理，不信任请求 Host。
+    const toolsUrl = `http://127.0.0.1:${req.socket.localPort}/api/tools`;
     ok(res, { prompt: FLOWS.materialOrganize.build(parts[2], toolsUrl) });
+    return true;
+  }
+  if (parts[1] === 'materials' && parts[2] && parts[3] === 'delivery' && !parts[4] && m('POST')) {
+    try {
+      if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some((key) => key !== 'status')) {
+        throw store.httpError(400, '无效的素材发送记录');
+      }
+      const delivery = store.markMaterialDelivery(parts[2], body.status);
+      broadcast('material.changed', { action: 'delivery', materialId: parts[2] });
+      ok(res, { delivery });
+    } catch (e) { failFrom(res, e); }
     return true;
   }
   // 反问送达标记：嵌入模式发送成功（sent）/ 独立模式复制成功（copied）由前端上报。
@@ -706,7 +745,7 @@ async function api(req, res, url, body) {
       if (m('GET')) {
         const mt = store.getMaterial(parts[2]);
         if (!mt) throw store.httpError(404, '素材不存在');
-        ok(res, { material: { ...mt, status: store.materialStatus(mt), ...(store.materialReport(parts[2]) || {}) } });
+        ok(res, { material: { ...mt, status: store.materialStatus(mt), delivery: store.materialDelivery(mt.id), ...(store.materialReport(parts[2]) || {}) } });
         return true;
       }
       if (m('DELETE')) {
@@ -736,10 +775,14 @@ function staticFile(req, res, url) {
 export function handleRequest(req, res) {
   const url = new URL(req.url, 'http://localhost');
   if (url.pathname.startsWith('/api/')) {
-    (req.method === 'POST' || req.method === 'PATCH' ? readBody(req) : Promise.resolve({}))
+    const mutation = !['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !url.pathname.startsWith('/api/data/');
+    if (mutation) { activeMutations += 1; dataGeneration += 1; }
+    const limit = url.pathname === '/api/data/restore/preview' ? 64 * 1024 * 1024 : 4 * 1024 * 1024;
+    (req.method === 'POST' || req.method === 'PATCH' ? readBody(req, limit) : Promise.resolve({}))
       .then((body) => api(req, res, url, body))
       .then((handled) => { if (!handled) fail(res, 404, '接口不存在'); })
-      .catch((e) => failFrom(res, e));
+      .catch((e) => failFrom(res, e))
+      .finally(() => { if (mutation) activeMutations -= 1; });
     return;
   }
   staticFile(req, res, url);

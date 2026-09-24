@@ -29,6 +29,7 @@
 ```sh
 dsh plugin --profile web add tynr426/dsh-relationship   # 从 GitHub 安装插件
 scripts/install-relationship-preset.sh                   # 安装 preset 到 ~/.dsh/.agent-presets/relationship
+scripts/backup-dsh.sh                                    # dsh 升级前备份 ~/.dsh 整树（Session 日志/preset/数据库）
 ```
 
 ### 独立运行
@@ -48,7 +49,7 @@ curl -X POST http://127.0.0.1:8901/api/tools -H 'content-type: application/json'
   -d '{"name":"memory_add","args":{"contactId":"c_xxxx","type":"event","content":"女儿十月办婚礼"}}'
 ```
 
-可用工具：`contact_search` / `contact_add` / `contact_update` / `memory_add` / `memory_batch_add` / `memory_confirm` / `memory_reject` / `memory_update` / `memory_search` / `timeline_get`。
+可用工具：`contact_search` / `contact_add` / `contact_update` / `memory_add` / `memory_batch_add` / `memory_reject` / `memory_update` / `memory_search` / `timeline_get`（确认入库没有 AI 工具，只能在工作台待确认队列点击确认）。
 
 纪律：AI 写入只产生待确认记忆；录入前先 `contact_search` 防止建重；生成祝福/礼物建议前先 `memory_search`。
 

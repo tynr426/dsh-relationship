@@ -15,7 +15,7 @@ export const TOOL_CN = {
   memory_add: '登记待确认记忆',
   memory_batch_add: '批量登记待确认记忆',
   memory_reject: '驳回记忆',
-  memory_update: '编辑已确认记忆',
+  memory_update: '提议修改已确认记忆',
   memory_search: '检索长期记忆',
   timeline_get: '读取联系人时间线',
   gift_plan_add: '创建礼物计划卡',
@@ -63,7 +63,7 @@ export const TOOL_DEFS = [
         required: ['contactId', 'type', 'content'] } } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'memory_reject', description: '用户驳回候选记忆时调用', parameters: { type: 'object', required: ['id'], properties: {
       id: { type: 'string' }, reason: { type: 'string' } }, additionalProperties: false } } },
-  { type: 'function', function: { name: 'memory_update', description: '编辑已确认的长期记忆（内容/类型/日期/重要度/话语时间/方向/寿命/场景）', parameters: { type: 'object', required: ['id'], properties: {
+  { type: 'function', function: { name: 'memory_update', description: '为已确认记忆提交修改提案（内容/类型/日期/重要度/话语时间/方向/寿命/场景），返回原文与建议。原记忆不变，用户在工作台确认后才生效；不能声称已经修改，没有 AI 确认工具', parameters: { type: 'object', required: ['id'], properties: {
       id: { type: 'string' }, type: { type: 'string', enum: MEMORY_TYPES }, content: { type: 'string' }, date: { type: 'string' }, importance: { type: 'integer' }, saidAt: { type: 'string' }, direction: { type: 'string' }, lifespan: { type: 'string' }, occasion: { type: 'string' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'memory_search', description: '检索某人的已确认长期记忆（生成祝福、礼物建议前必须调用）；支持按方向/场景/寿命过滤，检索为空要明说，不编造', parameters: { type: 'object', required: [], properties: {
       contactId: { type: 'string' }, type: { type: 'string', enum: MEMORY_TYPES }, query: { type: 'string' },
@@ -102,7 +102,7 @@ export const TOOL_DEFS = [
         command: { type: 'string', description: '该选项的自足作答指令：含素材 ID 与明确决定，发到任意关系记忆会话都能据此继续，如「素材 mt_xx 照常整理：当前库里没有这些记忆，直接全部登记」' } } }, description: '2-4 个选项' },
       done: { type: 'boolean', description: 'true=用户已作答，清除该素材的反问登记' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'relation_type_list', description: '列出当前可用的关系类型（内置 6 类 + 工作台自定义）。contact_add/contact_update 的 relation 字段必须取这里的 key；自定义类型由用户在工作台维护，AI 只读', parameters: { type: 'object', required: [], properties: {}, additionalProperties: false } } },
-  { type: 'function', function: { name: 'pending_summary', description: '查看待确认队列概览（会话开始时先调用）：有待确认记忆或待确认联系人就主动提醒用户回工作台确认。只读——确认/驳回/收录是用户的拍板动作，没有对应 AI 工具', parameters: { type: 'object', required: [], properties: {}, additionalProperties: false } } },
+  { type: 'function', function: { name: 'pending_summary', description: '查看待确认队列概览（会话开始时先调用）：有待确认记忆、记忆修改提案或待确认联系人就主动提醒用户回工作台确认。只读——确认/驳回/收录是用户的拍板动作，没有对应 AI 工具', parameters: { type: 'object', required: [], properties: {}, additionalProperties: false } } },
 ];
 
 function contactBrief(c) { return { id: c.id, name: c.name, relation: c.relation, tags: c.tags, birthday: c.birthday, archived: c.archived, status: c.status || 'confirmed' }; }
@@ -356,7 +356,7 @@ async function run(name, args) {
     case 'memory_confirm': {
       // P0 安全闭环：确认是人拍板动作，只允许工作台界面（/api/memories/confirm）执行。
       // AI 通道一律拒绝，防止「AI 写入后自我确认」绕过待确认队列。
-      return { ok: false, status: 403, error: '确认属于用户的拍板动作，AI 不能代办。请引导用户回工作台待确认队列点击确认；如需修正内容请用 memory_update（仅限已确认记忆）' };
+      return { ok: false, status: 403, error: '确认属于用户的拍板动作，AI 不能代办。请引导用户回工作台待确认队列点击确认；如需修正已确认记忆，请用 memory_update 提交修改提案（仍需用户确认，原文暂不改变）' };
     }
 
     case 'memory_reject': {
@@ -367,9 +367,10 @@ async function run(name, args) {
     }
 
     case 'memory_update': {
-      const m = store.updateMemory(String(args.id ?? ''), args);
-      changedMemory(m, 'updated');
-      return { ok: true, memory: memoryOut(m) };
+      const proposal = store.proposeMemoryUpdate(String(args.id ?? ''), args);
+      broadcast('memory.revision.changed', { action: 'proposed', proposal });
+      changedStats();
+      return { ok: true, proposal, 提示: '修改建议已登记为待确认提案，原记忆尚未修改，检索仍使用原文；请用户回工作台确认或驳回，没有 AI 确认工具' };
     }
 
     case 'memory_search': {
@@ -517,16 +518,20 @@ async function run(name, args) {
       const names = new Map(all.map((c) => [c.id, c.name]));
       const pendingContacts = all.filter((c) => c.status === 'pending');
       const items = pending.slice(0, 20).map((m) => ({ id: m.id, contactName: names.get(m.contactId) || '', type: m.type, content: m.content, sourceId: m.sourceId || '' }));
+      const pendingRevisions = store.listMemoryRevisions({ status: 'pending' });
       const nMem = pending.length;
       const nContact = pendingContacts.length;
+      const nRevision = pendingRevisions.length;
       return {
         ok: true,
         pendingCount: nMem,
         items,
+        pendingRevisions,
+        pendingRevisionCount: nRevision,
         pendingContacts: pendingContacts.map((c) => ({ id: c.id, name: c.name, relation: c.relation, tags: c.tags })),
-        提示: (nMem || nContact)
-          ? `有 ${nMem} 条待确认记忆${nContact ? `、${nContact} 位待确认联系人（${pendingContacts.map((c) => c.name).join('、')}）` : ''}。请主动提醒用户回工作台确认（确认是用户的拍板动作，没有 AI 工具），可简述最重要的几条`
-          : '没有待确认记忆或联系人',
+        提示: (nMem || nContact || nRevision)
+          ? `有 ${nMem} 条待确认记忆${nRevision ? `、${nRevision} 条待确认修改提案（原文尚未修改）` : ''}${nContact ? `、${nContact} 位待确认联系人（${pendingContacts.map((c) => c.name).join('、')}）` : ''}。请主动提醒用户回工作台确认（确认是用户的拍板动作，没有 AI 工具），可简述最重要的几条`
+          : '没有待确认记忆、修改提案或联系人',
       };
     }
 

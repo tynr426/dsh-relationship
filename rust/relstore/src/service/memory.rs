@@ -206,7 +206,9 @@ impl Memory {
     /// 更新记忆（只覆盖传入字段；编辑 pending/confirmed 用，可携带 status 变更）
     pub fn set(&self) -> tube::Result<Json> {
         let val = self.value();
-        let id = self.resolve_id(&val.get_string("id"))?;
+        let id = self.resolve_id(&val.get_string("id")).map_err(|err| {
+            if Self::provided(&val, "expected").is_some() { error!("MEMORY_CONFLICT") } else { err }
+        })?;
         let row = self.select().r#where(conds![{ "id" = id.as_str() }]).one()?;
         let mut data = Map::new();
         if let Some(v) = Self::provided(&val, "status") {
@@ -249,10 +251,44 @@ impl Memory {
             return Err(error!("未提供要更新的字段"));
         }
         data.insert("updated_at", Value::from(model::now()));
-        self.update()
-            .data(&Value::Object(data))
-            .r#where(conds![{ "id" = id.as_str() }])
-            .execute()?;
+        if let Some(expected) = Self::provided(&val, "expected") {
+            let expected: Json = serde_json::from_str(&expected).map_err(|_| error!("invalid expected memory"))?;
+            if expected != memory_json(&row) {
+                return Err(error!("MEMORY_CONFLICT"));
+            }
+            let mut params = Vec::new();
+            let mut assignments = Vec::new();
+            for (i, (field, value)) in data.iter().enumerate() {
+                let column = if field == "type" { "mem_type" } else { field.as_str() };
+                let param = format!("set{i}");
+                assignments.push(format!("\"{column}\"=:{param}"));
+                params.push((param, value.clone()));
+            }
+            let mut conditions = Vec::new();
+            for (key, column) in [
+                ("id", "id"), ("contactId", "contact_id"), ("type", "mem_type"),
+                ("content", "content"), ("date", "date"), ("saidAt", "said_at"),
+                ("importance", "importance"), ("direction", "direction"), ("lifespan", "lifespan"),
+                ("occasion", "occasion"), ("sourceId", "source_id"), ("sourceQuote", "source_quote"),
+                ("author", "author"), ("status", "status"), ("reason", "reason"),
+                ("supersededBy", "superseded_by"), ("confirmedAt", "confirmed_at"),
+                ("createdAt", "created_at"), ("updatedAt", "updated_at"),
+            ] {
+                let param = format!("old_{column}");
+                conditions.push(format!("COALESCE(\"{column}\",'')=:{param}"));
+                params.push((param, Value::from(expected[key].clone())));
+            }
+            let sql = format!("UPDATE memories SET {} WHERE {}", assignments.join(","), conditions.join(" AND "));
+            let affected = Helper::executes(vec![(sql, params)], &crate::config::relstore_connector())?;
+            if affected.first().copied() != Some(1) {
+                return Err(error!("MEMORY_CONFLICT"));
+            }
+        } else {
+            self.update()
+                .data(&Value::Object(data))
+                .r#where(conds![{ "id" = id.as_str() }])
+                .execute()?;
+        }
         self.one(&id)
     }
 

@@ -6,21 +6,16 @@
 // 送达语义：嵌入模式发送成功标 status='sent'；独立模式复制只记 copiedAt——复制不算送达。
 // 标记本身不清除反问：权威清除只有 AI done=true、整理报告提交、用户手动放弃（DELETE），
 // 发送/复制失败一律保留横幅待重试。
-import fs from 'node:fs';
 import { ORGANIZE_QUESTIONS_PATH, ensureDirs } from './config.js';
+import { readJsonFile, validateDataFile, atomicWriteFile } from './json-file.js';
 
 function readAll() {
-  try {
-    const v = JSON.parse(fs.readFileSync(ORGANIZE_QUESTIONS_PATH, 'utf8'));
-    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
-  } catch { return {}; }
+  return readJsonFile(ORGANIZE_QUESTIONS_PATH, {}, (v) => validateDataFile('organize-questions.json', v));
 }
 
 function writeAll(map) {
   ensureDirs();
-  const tmp = ORGANIZE_QUESTIONS_PATH + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(map, null, 1));
-  fs.renameSync(tmp, ORGANIZE_QUESTIONS_PATH);
+  atomicWriteFile(ORGANIZE_QUESTIONS_PATH, JSON.stringify(map, null, 1));
 }
 
 /** 取单条待答反问；无返回 null。 */

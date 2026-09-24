@@ -2,7 +2,11 @@
 import http from 'node:http';
 import { DATA_DIR } from './config.js';
 import store from './store-facade.js';
-import { handleRequest } from './routes.js';
+import { handleRequest, hasActiveMutations } from './routes.js';
+import { initializeDataSafety, maybeAutomaticBackup } from './data-safety.js';
+import { recordBackupError } from './safety-routes.js';
+
+const backupTimers = new WeakMap();
 
 /**
  * 启动工作台服务。
@@ -15,7 +19,14 @@ import { handleRequest } from './routes.js';
  */
 export function startRelBench(opts = {}) {
   const { port: wantPort = 8901, openBrowser = false, log = console.log } = opts;
+  initializeDataSafety();
   store.loadStore();
+  const automaticBackup = () => {
+    if (hasActiveMutations()) return;
+    try { maybeAutomaticBackup(); recordBackupError(null); }
+    catch (error) { recordBackupError(error); log(`[dsh-relationship] 自动备份失败：${error.message}`); }
+  };
+  automaticBackup();
 
   const server = http.createServer((req, res) => {
     try { handleRequest(req, res); }
@@ -26,6 +37,10 @@ export function startRelBench(opts = {}) {
     const listen = (port) => {
       const onListening = () => {
         server.off('error', onError);
+        const timer = setInterval(automaticBackup, 60_000);
+        timer.unref();
+        backupTimers.set(server, timer);
+        server.once('close', () => clearInterval(timer));
         log(`[dsh-relationship] 关系记忆工作台已启动：http://127.0.0.1:${port}（数据 ${DATA_DIR}）`);
         if (openBrowser && process.platform === 'darwin') {
           try { import('node:child_process').then(({ execFile }) => execFile('open', [`http://127.0.0.1:${port}`])); } catch { /* ignore */ }
@@ -50,9 +65,12 @@ export function startRelBench(opts = {}) {
 }
 
 export function closeRelBench(server) {
-  return new Promise((resolve) => {
-    store.flush();
-    if (!server?.listening) return resolve();
-    server.close(() => resolve());
+  clearInterval(backupTimers.get(server));
+  return new Promise((resolve, reject) => {
+    const finish = () => {
+      try { store.flush(); resolve(); } catch (error) { reject(error); }
+    };
+    if (!server?.listening) return finish();
+    server.close(finish);
   });
 }

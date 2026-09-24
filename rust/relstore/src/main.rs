@@ -27,6 +27,7 @@ mod initialize;
 mod jd;
 mod model;
 mod service;
+mod snapshot;
 
 use config::resolve_db_path;
 use initialize::Initialize;
@@ -40,6 +41,13 @@ fn main() {
         return;
     }
     let db_path = resolve_db_path(cli.db.as_deref());
+    if let Cmd::Snapshot { cmd } = cli.cmd {
+        if snapshot::run(cmd, &db_path).is_err() {
+            eprintln!("snapshot validation or creation failed");
+            std::process::exit(1);
+        }
+        return;
+    }
     let conn = config::register_connector(&db_path);
     if let Err(err) = Initialize::initialize(&conn) {
         eprintln!("✗ {err}");
@@ -60,7 +68,7 @@ fn run(cmd: Cmd) -> tube::Result<()> {
         Cmd::Material { cmd } => run_material(cmd),
         Cmd::Plan { cmd } => run_plan(cmd),
         Cmd::RelationType { cmd } => run_relation_type(cmd),
-        Cmd::Jd { .. } => unreachable!(),
+        Cmd::Jd { .. } | Cmd::Snapshot { .. } => unreachable!(),
         Cmd::Ledger { json } => {
             let data = derive::ledger()?;
             emit_or_print(json, "✅ 台账已生成", data);
@@ -152,7 +160,7 @@ fn run_memory(cmd: MemoryCmd) -> tube::Result<()> {
             emit_or_print(json, "✅ 记忆已登记", json!({ "ok": true, "memory": m }));
             Ok(())
         }
-        MemoryCmd::Set { id, content, type_, date, said_at, direction, lifespan, occasion, importance, status, reason, json } => {
+        MemoryCmd::Set { id, content, type_, date, said_at, direction, lifespan, occasion, importance, status, reason, expected, json } => {
             let mut payload = serde_json::Map::new();
             payload.insert("id".into(), json!(id));
             for (k, v) in [("content", content), ("type", type_), ("date", date), ("saidAt", said_at), ("direction", direction), ("lifespan", lifespan), ("occasion", occasion)] {
@@ -168,6 +176,9 @@ fn run_memory(cmd: MemoryCmd) -> tube::Result<()> {
             }
             if let Some(v) = reason {
                 payload.insert("reason".into(), json!(v));
+            }
+            if let Some(v) = expected {
+                payload.insert("expected".into(), json!(v));
             }
             let m = Memory::new(Value::from(Json::Object(payload))).set()?;
             emit_or_print(json, "✅ 已更新记忆", json!({ "ok": true, "memory": m }));
@@ -303,6 +314,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    Snapshot {
+        #[command(subcommand)]
+        cmd: snapshot::Command,
+    },
     Jd {
         #[command(subcommand)]
         cmd: jd::Command,
@@ -558,6 +573,8 @@ enum MemoryCmd {
         status: Option<String>,
         #[arg(long)]
         reason: Option<String>,
+        #[arg(long)]
+        expected: Option<String>,
         #[arg(long, default_value_t = false)]
         json: bool,
     },
