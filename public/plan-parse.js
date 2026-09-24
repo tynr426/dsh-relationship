@@ -74,6 +74,34 @@
   }
 
   // 联系人：最长名字优先的包含匹配；吃掉名字前紧邻的介词（「给王老师送贺卡」→「送贺卡」）
+  // 精确不中时退到字序信号：库里姓名常带前缀/分隔符（「星屿-iqc-周老师」），句中只说「周老师」——
+  // 按最长公共片段 + 出现过的姓名分段打分；得分并列视为歧义，宁空不猜人。
+  const SEP_RE = /[\s\-_·.、,，/|｜()（）[\]【】]+/g;
+
+  function commonRun(nameC, sC) {
+    let best = { len: 0, text: '' };
+    let prev = new Array(sC.length + 1).fill(0);
+    for (let i = 1; i <= nameC.length; i += 1) {
+      const cur = new Array(sC.length + 1).fill(0);
+      for (let j = 1; j <= sC.length; j += 1) {
+        if (nameC[i - 1] !== sC[j - 1]) continue;
+        cur[j] = prev[j - 1] + 1;
+        if (cur[j] > best.len) best = { len: cur[j], text: nameC.slice(i - cur[j], i) };
+      }
+      prev = cur;
+    }
+    return best;
+  }
+
+  // 片段定位回原句（片段里的分隔符可能在原句中被压缩掉，用宽容正则兜底）
+  function locateRun(s, text) {
+    const at = s.indexOf(text);
+    if (at !== -1) return { at, text };
+    const pattern = text.split('').map((ch) => ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('[\\s\\-_·.、,，/|｜()（）【】\\[\\]]*');
+    const m = new RegExp(pattern).exec(s);
+    return m ? { at: m.index, text: m[0] } : null;
+  }
+
   function matchContact(s, contacts) {
     let best = null;
     for (const c of contacts) {
@@ -83,9 +111,35 @@
       if (at === -1) continue;
       if (!best || name.length > best.name.length) best = { c, name, at };
     }
-    if (!best) return null;
-    const start = /(给|为|跟|和|与|陪)$/.test(s.slice(Math.max(0, best.at - 1), best.at)) ? best.at - 1 : best.at;
-    return { contact: best.c, text: s.slice(start, best.at + best.name.length) };
+    if (best) {
+      const start = /(给|为|跟|和|与|陪)$/.test(s.slice(Math.max(0, best.at - 1), best.at)) ? best.at - 1 : best.at;
+      return { contact: best.c, text: s.slice(start, best.at + best.name.length) };
+    }
+    const sC = String(s || '').toLowerCase().replace(SEP_RE, '');
+    if (sC.length < 2) return null;
+    let fuzzy = null;
+    let tie = false;
+    for (const c of contacts) {
+      const name = String(c.name || '').trim();
+      const nameC = name.toLowerCase().replace(SEP_RE, '');
+      if (!nameC) continue;
+      const run = commonRun(nameC, sC);
+      if (run.len < 2) continue;
+      const segs = name.split(SEP_RE).map((sg) => sg.toLowerCase());
+      // 两字片段太弱（活动词常撞人名局部，如「散步」⊂「散步完成」）：仅当恰为姓名的完整分段才可信
+      if (run.len === 2 && !segs.includes(run.text)) continue;
+      let score = run.len;
+      for (const seg of segs) {
+        if (seg.length >= 2 && sC.includes(seg)) score += seg.length;
+      }
+      if (!fuzzy || score > fuzzy.score) { fuzzy = { c, run, score }; tie = false; }
+      else if (score === fuzzy.score) tie = true;
+    }
+    if (!fuzzy || tie) return null;
+    const loc = locateRun(s, fuzzy.run.text);
+    if (!loc) return null;
+    const start = /(给|为|跟|和|与|陪)$/.test(s.slice(Math.max(0, loc.at - 1), loc.at)) ? loc.at - 1 : loc.at;
+    return { contact: fuzzy.c, text: s.slice(start, loc.at + loc.text.length) };
   }
 
   // 场合：整词命中才消费，后缀「前/之前/当天/前后」一并吃掉（「教师节前看望」→ occasion=teacher_day，残句「看望」）

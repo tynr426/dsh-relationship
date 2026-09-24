@@ -681,8 +681,9 @@ test.describe('关系记忆工作台', () => {
     const card = page.locator(`.pending-card[data-id="${pendingId}"]`);
     await expect(card).toContainText('好像在杭州上班');
     await card.getByRole('button', { name: '被取代' }).click();
-    await page.locator('#rel-dialog-input').fill(keepId);
-    await page.locator('#rel-dialog-ok').click();
+    const supersedeItem = page.locator('.supersede-item', { hasText: '在杭州工作' });
+    await expect(supersedeItem).toBeVisible();
+    await supersedeItem.click();
     await expect(page.locator('#toast')).toContainText('已标记被取代');
     // 点完即从待确认队列消失（toast 与队列行为一致）
     await expect(page.locator(`.pending-card[data-id="${pendingId}"]`)).toHaveCount(0);

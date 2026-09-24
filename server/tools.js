@@ -32,8 +32,8 @@ export const TOOL_CN = {
 };
 
 export const TOOL_DEFS = [
-  { type: 'function', function: { name: 'contact_search', description: '按姓名或标签查找联系人（含待确认联系人，status=pending）。任何录入前必须先调用，避免建重', parameters: { type: 'object', required: ['query'], properties: {
-      query: { type: 'string', description: '姓名关键词或标签' } }, additionalProperties: false } } },
+  { type: 'function', function: { name: 'contact_search', description: '按姓名或标签查找联系人（含待确认联系人，status=pending）。支持「机构+姓+角色」式称呼的模糊匹配（如「星屿周老师」可命中「星屿-iqc-周老师」），结果按匹配度排序。任何录入前必须先调用，避免建重', parameters: { type: 'object', required: ['query'], properties: {
+      query: { type: 'string', description: '称呼或关键词：姓名、姓名片段、机构、角色、标签均可；未命中时可换更短的关键词（如姓氏单字）重试' } }, additionalProperties: false } } },
   { type: 'function', function: { name: 'contact_add', description: '新建联系人。AI 新建一律进入工作台待确认队列，由用户确认收录；不必等待确认，直接用返回的编号继续登记记忆。若同名联系人已存在会拒绝，需先 contact_search；tags 建议填身份标签（如 老师/同学/前同事/客户），教师节等节日与场合匹配依赖这些标签', parameters: { type: 'object', required: ['name', 'relation'], properties: {
       name: { type: 'string' }, relation: { type: 'string', description: '关系类型 key（小写英文标识）。先用 relation_type_list 查当前可用类型；默认内置：family/friend/colleague/client/partner/other' },
       tags: { type: 'array', items: { type: 'string' } }, birthday: { type: 'string', description: 'MM-DD、YYYY-MM-DD 或 每年-MM-DD，未知则留空' },
@@ -281,18 +281,85 @@ export async function executeTool(name, args = {}) {
   }
 }
 
+// contact_search 模糊匹配：真实称呼常是「机构+姓+角色」的组合（如「星屿周老师」），
+// 而库里姓名可能带分隔符（如「星屿-iqc-周老师」），单向包含匹配会整串撞不上。
+// 去分隔符后按多档信号打分：包含 > 字序对应（子序列）> 相同片段 > 字符重合；标签可独立入围。
+const NAME_SEP_RE = /[\s\-_·.、,，/|｜()（）[\]【】]+/g;
+
+function compactStr(s) {
+  return String(s ?? '').toLowerCase().replace(NAME_SEP_RE, '');
+}
+
+function isSubsequence(needle, hay) {
+  let i = 0;
+  for (const ch of hay) {
+    if (i < needle.length && needle[i] === ch) i += 1;
+  }
+  return i === needle.length;
+}
+
+function lcsRunLen(a, b) {
+  let best = 0;
+  let prev = new Array(b.length + 1).fill(0);
+  for (let i = 1; i <= a.length; i += 1) {
+    const cur = new Array(b.length + 1).fill(0);
+    for (let j = 1; j <= b.length; j += 1) {
+      if (a[i - 1] === b[j - 1]) {
+        cur[j] = prev[j - 1] + 1;
+        if (cur[j] > best) best = cur[j];
+      }
+    }
+    prev = cur;
+  }
+  return best;
+}
+
+function charOverlap(a, b) {
+  const rest = [...b];
+  let hit = 0;
+  for (const ch of a) {
+    const at = rest.indexOf(ch);
+    if (at >= 0) { hit += 1; rest.splice(at, 1); }
+  }
+  return a.length ? hit / a.length : 0;
+}
+
+function scoreContactMatch(c, query) {
+  const q = compactStr(query);
+  const name = compactStr(c.name);
+  const reasons = [];
+  let score = 0;
+  if (!q || !name) return { score, reasons };
+  if (name === q) return { score: 100, reasons: ['姓名一致'] };
+  if (name.includes(q)) { score = 90; reasons.push('姓名含查询'); }
+  else if (q.includes(name)) { score = 85; reasons.push('查询含姓名'); }
+  else if (isSubsequence(q, name) || isSubsequence(name, q)) { score = 70; reasons.push('称呼与姓名字序对应'); }
+  else if (lcsRunLen(q, name) >= 3) { score = 65; reasons.push('含相同称呼片段'); }
+  else if (q.length >= 4 && charOverlap(q, name) >= 0.85) { score = 45; reasons.push('字符高度重合'); }
+  for (const t of c.tags || []) {
+    const tag = compactStr(t);
+    if (!tag) continue;
+    if (tag.includes(q) && score < 60) { score = 60; reasons.push('标签含查询'); }
+    else if (score > 0 && tag.length >= 2 && q.includes(tag)) { score += 10; reasons.push(`查询含标签「${t}」`); }
+  }
+  return { score, reasons };
+}
+
 async function run(name, args) {
   switch (name) {
     case 'contact_search': {
       const q = String(args.query ?? '').trim().toLowerCase();
       if (!q) return { ok: false, error: 'query 不能为空' };
       // 含待确认联系人（status=pending）：AI 能看到以免建重，可直接复用其编号
-      const matches = store.listContacts({ includePending: true })
-        .filter((c) => c.name.toLowerCase().includes(q) || c.tags.some((t) => t.toLowerCase().includes(q)))
-        .map(contactBrief);
+      const scored = store.listContacts({ includePending: true })
+        .map((c) => ({ c, ...scoreContactMatch(c, q) }))
+        .filter((m) => m.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 8);
+      const matches = scored.map((m) => ({ ...contactBrief(m.c), matchedBy: m.reasons }));
       return { ok: true, matches, 提示: matches.length
-        ? '命中即复用返回的联系人编号；status=pending 的是待用户确认收录的新联系人，同样可直接用；同名/近似称呼命中多人时先与用户确认是否同一人'
-        : '未找到；直接 contact_add 新建（会进入工作台待确认队列，用户确认后收录），拿到编号继续拆条登记' };
+        ? '按匹配度降序，最高分通常即所指；matchedBy 是命中依据（称呼与姓名常是「机构+姓+角色」的字序对应）；命中即复用返回的联系人编号；status=pending 的是待用户确认收录的新联系人，同样可直接用；命中多人或依据含糊时先与用户确认是否同一人'
+        : '未找到；直接 contact_add 新建（会进入工作台待确认队列，用户确认后收录），拿到编号继续拆条登记；也可换更短的关键词（如姓氏单字）重试' };
     }
 
     case 'contact_add': {

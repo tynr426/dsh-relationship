@@ -1,6 +1,6 @@
 {
   "name": "dsh-relationship",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "dsh-relationship 关系记忆工作台: a local relationship-memory workbench plugin for DeepSeek Harness. Contacts, confirmable AI memory extraction, pending queue, contact timelines, native relationship preset.",
   "type": "module",
   "license": "Apache-2.0",

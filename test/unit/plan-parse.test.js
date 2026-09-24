@@ -118,3 +118,51 @@ test('京东关键词：礼物/商品类想法照常派生', () => {
   assert.equal(giftKeyword('保温杯'), '保温杯'); // 本身就是商品词
   assert.equal(giftKeyword('甲计划：私人喜好仅供本地参考'), '甲计划'); // jd-products e2e 夹具回归锚点
 });
+
+// —— 简称/带前缀姓名的字序匹配：库里是「星屿-iqc-周老师」，句中只说「周老师」——
+const CT2 = [
+  { id: 'x1', name: '星屿-iqc-周老师' },
+  { id: 'x2', name: '星屿-iqc-老大' },
+  { id: 'x3', name: '星屿-采购-林老师' },
+];
+const P2 = (text) => parse(text, { contacts: CT2, today: TODAY });
+
+test('简称选中带前缀姓名：下周三请周老师吃饭 → 星屿-iqc-周老师', () => {
+  const r = P2('下周三请周老师吃饭');
+  assert.equal(r.contactId, 'x1');
+  assert.equal(r.contactName, '星屿-iqc-周老师');
+  assert.equal(r.date, '2026-09-30');
+  assert.equal(r.idea, '请吃饭');
+});
+
+test('句中带机构词照样归对人：下周三去星屿找周老师吃饭', () => {
+  const r = P2('下周三去星屿找周老师吃饭');
+  assert.equal(r.contactId, 'x1');
+});
+
+test('同角色词不误报：下周一请林老师吃饭 → 林老师而非周老师', () => {
+  const r = P2('下周一请林老师吃饭');
+  assert.equal(r.contactId, 'x3');
+});
+
+test('得分并列视为歧义宁空不猜：请老师吃饭 / 去星屿拜访', () => {
+  assert.equal(P2('下周三请老师吃饭').contactId, '');
+  assert.equal(P2('下周三去星屿拜访').contactId, '');
+});
+
+// —— 两字片段门槛：恰为姓名完整分段才可信，活动词撞名不误选 ——
+const CT3 = [
+  { id: 'y1', name: '星屿-采购-小林' },
+  { id: 'y2', name: '星屿-晨跑搭子' },
+];
+const P3 = (text) => parse(text, { contacts: CT3, today: TODAY });
+
+test('两字完整分段可信：下周三请小林吃饭 → 星屿-采购-小林', () => {
+  assert.equal(P3('下周三请小林吃饭').contactId, 'y1');
+});
+
+test('活动词撞人名局部不误选：找一天一起晨跑 → 宁空不猜', () => {
+  const r = P3('找一天一起晨跑');
+  assert.equal(r.contactId, '');
+  assert.equal(r.idea, '找一天一起晨跑');
+});
