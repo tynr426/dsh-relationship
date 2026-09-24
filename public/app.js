@@ -906,13 +906,42 @@
     } catch { return ''; }
   }
 
+  // 纯前端生成二维码（vendor 的 qrcode-generator，MIT）：先 M 级纠错，内容超长自动降 L
+  function qrSvg(text) {
+    if (typeof qrcode !== 'function') return '';
+    for (const level of ['M', 'L']) {
+      try {
+        const qr = qrcode(0, level);
+        qr.addData(text);
+        qr.make();
+        return qr.createSvgTag({ cellSize: 4, margin: 16, scalable: true, title: '商品链接二维码' });
+      } catch { /* 内容过长时降低纠错级别重试 */ }
+    }
+    return '';
+  }
+
   function planProductLine(p) {
     if (!p.productName && !p.productUrl) return '';
     const url = safeProductUrl(p.productUrl);
     const cps = url && ['u.jd.com', 'union-click.jd.com'].includes(new URL(url).hostname);
     const label = esc(p.productName || '查看商品');
-    const inner = url ? `<a href="${esc(url)}" target="_blank" rel="noreferrer noopener">${label} ↗</a>` : label;
+    const inner = url
+      ? `<a href="${esc(url)}" target="_blank" rel="noreferrer noopener">${label} ↗</a><button type="button" class="ghost-btn qr-inline" data-action="qr-show" data-id="${esc(p.id)}">扫码买</button>`
+      : label;
     return `<div class="occ-plan product">${inner}${p.productPrice ? ` <span class="badge price">${cps ? '参考价（非成交价） ' : ''}${esc(p.productPrice)}</span>` : ''}${cps ? ' <span class="badge">CPS 推广链接</span>' : ''}</div>`;
+  }
+
+  // 桌面选品、手机成交：计划卡与首页时机提醒卡共用 planProductLine，扫码入口全链路复用
+  let qrCopyUrl = '';
+  function openQrModal(plan) {
+    const url = safeProductUrl(plan.productUrl);
+    qrCopyUrl = url;
+    $('#qr-product-line').textContent = `${plan.productName || '已选商品'}${plan.productPrice ? ` · 参考价 ${plan.productPrice}` : ''}`;
+    $('#qr-image').innerHTML = url
+      ? (qrSvg(url) || '<p class="muted">链接过长无法生成二维码，请复制链接使用。</p>')
+      : '<p class="muted">商品链接无效，请重新关联商品。</p>';
+    $('[data-qr-copy]').classList.toggle('hidden', !url);
+    openModal('qr');
   }
 
   function jdPlanButton(p) {
@@ -1390,6 +1419,9 @@
         openPlanModal(undefined, undefined, undefined, plan);
       } else if (action === 'jd-open') {
         openJdModal(id);
+      } else if (action === 'qr-show') {
+        const plan = findPlan(id);
+        if (plan) openQrModal(plan);
       } else if (action === 'plan-delete-suggestions') {
         // 一键删除「围绕该计划出主意」产生的这批建议（原计划保留，已送的台账卡不动）
         const n = state.plans.filter((x) => x.basedOnPlanId === id && activePlan(x)).length;
@@ -1598,11 +1630,12 @@
     $('#form-relations').classList.toggle('hidden', which !== 'relations');
     $('#form-first').classList.toggle('hidden', which !== 'first');
     $('#form-airesult').classList.toggle('hidden', which !== 'airesult');
+    $('#form-qr').classList.toggle('hidden', which !== 'qr');
     if (which === 'relations') renderRelationTypes();
     syncModalBackground();
     const root = $('#modal-backdrop');
     $('.modal', root).setAttribute('aria-label', $('.modal-body:not(.hidden) h3', root)?.textContent || '记一笔');
-    ($(`#${which === 'contact' ? 'nc-name' : which === 'plan' ? 'plan-contact' : which === 'suggest' ? 'suggest-list' : which === 'relations' ? 'rt-key' : which === 'first' ? 'fr-name' : which === 'airesult' ? 'airesult-close' : 'qm-content'}`))?.focus?.();
+    ($(`#${which === 'contact' ? 'nc-name' : which === 'plan' ? 'plan-contact' : which === 'suggest' ? 'suggest-list' : which === 'relations' ? 'rt-key' : which === 'first' ? 'fr-name' : which === 'airesult' ? 'airesult-close' : which === 'qr' ? 'form-qr [data-role="plan-cancel"]' : 'qm-content'}`))?.focus?.();
     if (!root.contains(document.activeElement)) focusableIn(root)[0]?.focus();
   }
   function closeModal() {
@@ -1621,6 +1654,7 @@
     state.editingContactId = null;
     state.suggestContactId = null;
     state.suggestPlanId = null;
+    qrCopyUrl = '';
     $('#airesult-body').textContent = '';
     syncModalBackground();
     restoreFocus(modalTrigger);
@@ -1687,6 +1721,28 @@
     if (!tab) return;
     state.smartTab = tab.dataset.mtab;
     applyTab();
+  });
+
+  // 嵌入 DSH（sandbox iframe）时，桌面壳会静默吞掉来自 iframe 的 target=_blank——
+  // 外链统一 postMessage 交给宿主页面代开（与聊天内链接同一条通路）；独立工作台保持原生新标签。
+  document.addEventListener('click', (e) => {
+    if (window.parent === window) return;
+    const link = e.target.closest('a[target="_blank"]');
+    if (!link) return;
+    const url = safeProductUrl(link.getAttribute('href') || '');
+    if (!url) return;
+    e.preventDefault();
+    window.parent.postMessage({ source: 'dsh-relationship', type: 'open-external', url }, window.location.origin);
+  });
+  window.addEventListener('message', (e) => {
+    if (e.origin !== window.location.origin) return;
+    const data = e.data;
+    if (!data || data.source !== 'dsh-relationship-host' || data.type !== 'open-external-blocked') return;
+    const url = typeof data.url === 'string' ? safeProductUrl(data.url) : '';
+    if (!url) return;
+    navigator.clipboard.writeText(url)
+      .then(() => toast('桌面端未能打开新窗口：商品链接已复制，请粘贴到浏览器打开'))
+      .catch(() => toast('桌面端未能打开新窗口：请点「复制链接」后粘贴到浏览器打开', true));
   });
 
   $('#form-contact').addEventListener('submit', async (e) => {
@@ -1778,13 +1834,24 @@
     finally { button.disabled = false; }
   });
 
+  function syncJdMode(session) {
+    const hasKeyword = Boolean($('#jd-keyword').value.trim());
+    $('#jd-min-price').disabled = session.busy || !hasKeyword;
+    $('#jd-max-price').disabled = session.busy || !hasKeyword;
+    $('#jd-search').disabled = session.busy || !session.configured;
+    $('#jd-search').textContent = session.busy ? '处理中…' : (hasKeyword ? '搜索商品' : '查看热销榜');
+    $('#jd-price-hint').textContent = (hasKeyword
+      ? '价格仅适用于关键词搜索，价格范围按京东券后价筛选，参考标价可能高于筛选上限。'
+      : '全部品类24小时热销榜前20不支持价格筛选；已填价格保留但不发送，输入关键词后恢复。')
+      + '列表展示参考标价，并非成交价。优惠资格和实付金额以京东结算页为准。选择商品时仅发送商品编号至京东。';
+  }
+
   function jdBusy(session, busy) {
     session.busy = busy;
     $('#form-jd').setAttribute('aria-busy', String(busy));
     $$('#form-jd input, #jd-results button').forEach((el) => { el.disabled = busy; });
-    $('#jd-search').disabled = busy || !session.configured;
     $('#jd-status-retry').disabled = busy;
-    $('#jd-search').textContent = busy ? '处理中…' : '搜索商品';
+    syncJdMode(session);
   }
 
   async function checkJdStatus(session) {
@@ -1799,7 +1866,7 @@
       const names = ['JD_APP_KEY', 'JD_APP_SECRET', 'JD_SITE_ID', 'JD_POSITION_ID'];
       const missing = (result.missing || []).filter((name) => names.includes(name));
       $('#jd-status').textContent = session.configured
-        ? (session.prefilled ? '配置就绪，关键词已按原计划预填，可直接搜索或修改。' : '配置就绪，请填写商品关键词。')
+        ? (session.prefilled ? '配置就绪，关键词已按原计划预填，可直接搜索或修改；清空可查看全部品类24小时热销榜前20。' : '配置就绪，可填写关键词搜索，或留空查看全部品类24小时热销榜前20。')
         : `京东尚未配置：请在运行 relstore 的本机环境设置 ${missing.join('、') || names.slice(0, 3).join('、')}，JD_POSITION_ID 可选；重启工作台后重新检查。请勿在此输入密钥。`;
       $('#jd-status-retry').classList.toggle('hidden', session.configured);
     } catch (err) {
@@ -1814,9 +1881,9 @@
 
   function jdKeywordFromPlan(plan) {
     if (plan.productName) return plan.productName.slice(0, 80);
-    const head = (plan.idea || '').split(/[，,。；;！!？?\n：:]/)[0].trim();
-    const stripped = head.replace(/^(?:帮我|准备|挑选|看看|送|买|给|找)(?:个|一下|一件|一款)?/, '').trim();
-    return (stripped || head).slice(0, 80);
+    // 商品词从想法首句派生；电话/见面类客套话（「联系一下」「约饭」）宁空不猜——
+    // 弹窗留空时本就有手填与热销榜引导（见 #jd-status 文案）
+    return PlanParse.giftKeyword(plan.idea || '');
   }
 
   function openJdModal(id) {
@@ -1830,25 +1897,29 @@
     $('#jd-keyword').value = keyword;
     const session = { planId: id, controller: new AbortController(), configured: false, busy: false, items: [], prefilled: Boolean(keyword) };
     jdSession = session;
+    syncJdMode(session);
     checkJdStatus(session);
     $('#jd-keyword').focus();
   }
 
+  $('#jd-keyword').addEventListener('input', () => { if (jdSession) syncJdMode(jdSession); });
   $('#jd-status-retry').addEventListener('click', () => { if (jdSession) checkJdStatus(jdSession); });
   $('#form-jd').addEventListener('submit', async (e) => {
     e.preventDefault();
     const session = jdSession;
     if (!session || session.busy || !session.configured) return;
     const body = { keyword: $('#jd-keyword').value.trim() };
-    if (!body.keyword) { $('#jd-status').textContent = '请填写商品关键词'; return; }
-    for (const [field, id] of [['minPrice', 'jd-min-price'], ['maxPrice', 'jd-max-price']]) {
-      const value = $(`#${id}`).value;
-      if (value !== '') body[field] = Number(value);
+    const isRanking = !body.keyword;
+    if (!isRanking) {
+      for (const [field, id] of [['minPrice', 'jd-min-price'], ['maxPrice', 'jd-max-price']]) {
+        const value = $(`#${id}`).value;
+        if (value !== '') body[field] = Number(value);
+      }
+      if (body.minPrice > body.maxPrice) { $('#jd-status').textContent = '最低价不能高于最高价'; return; }
     }
-    if (body.minPrice > body.maxPrice) { $('#jd-status').textContent = '最低价不能高于最高价'; return; }
     session.items = [];
     $('#jd-results').replaceChildren();
-    $('#jd-status').textContent = '正在京东搜索…';
+    $('#jd-status').textContent = isRanking ? '正在获取京东全部品类24小时热销榜前20…' : '正在京东搜索商品…';
     jdBusy(session, true);
     try {
       const result = await api(`/api/plans/${encodeURIComponent(session.planId)}/jd/search`, { method: 'POST', body, signal: session.controller.signal });
@@ -1858,16 +1929,28 @@
         const image = safeProductUrl(item.imageUrl, true);
         return `<article class="occ-card"><div class="occ-main">${image ? `<img src="${esc(image)}" alt="" width="72" height="72" loading="lazy" referrerpolicy="no-referrer"/>` : ''}<p class="occ-title">${esc(item.name)}</p><p class="muted">参考标价 ¥${esc(item.price)}（非成交价）</p></div><button type="button" class="ghost-btn" data-jd-index="${index}">选中并关联</button></article>`;
       }).join('');
-      $('#jd-status').textContent = session.items.length ? `找到 ${session.items.length} 件候选商品，选中后生成 CPS 推广链接。` : '没有找到商品，请调整关键词或价格范围后重试。';
+      $('#jd-status').textContent = isRanking
+        ? (session.items.length ? `全部品类24小时热销榜前20：返回 ${session.items.length} 件候选商品，选中后生成 CPS 推广链接。` : '全部品类24小时热销榜前20暂无商品，可稍后重试或填写关键词搜索。')
+        : (session.items.length ? `搜索找到 ${session.items.length} 件候选商品，选中后生成 CPS 推广链接。` : '搜索没有找到商品，请调整关键词或价格范围后重试。');
       await refresh();
     } catch (err) {
-      if (jdSession === session) $('#jd-status').textContent = `${err.message || '搜索失败'}；可修改条件后重新搜索。`;
+      if (jdSession === session) $('#jd-status').textContent = isRanking
+        ? `全部品类24小时热销榜前20加载失败：${err.message || '请稍后重试'}；可再次查看热销榜重试。`
+        : `商品搜索失败：${err.message || '请稍后重试'}；可修改条件后重新搜索。`;
     } finally {
       if (jdSession === session) jdBusy(session, false);
     }
   });
 
   $('#jd-results').addEventListener('click', async (e) => {
+    if (e.target.closest('[data-jd-done]')) { closeModal(); return; }
+    if (e.target.closest('[data-jd-copy]')) {
+      const url = jdSession?.linkedUrl || '';
+      if (!url) return;
+      try { await navigator.clipboard.writeText(url); toast('商品链接已复制，可粘贴到浏览器打开'); }
+      catch { toast('复制失败，请稍后重试或从计划卡的商品链接右键复制', true); }
+      return;
+    }
     const button = e.target.closest('[data-jd-index]');
     const session = jdSession;
     if (!button || !session || session.busy) return;
@@ -1876,16 +1959,36 @@
     jdBusy(session, true);
     $('#jd-status').textContent = '正在验证商品并生成 CPS 推广链接…关闭弹窗不会撤销已发出的关联请求。';
     try {
-      await api(`/api/plans/${encodeURIComponent(session.planId)}/jd/select`, { method: 'POST', body: { itemId: item.itemId }, signal: session.controller.signal });
+      const result = await api(`/api/plans/${encodeURIComponent(session.planId)}/jd/select`, { method: 'POST', body: { itemId: item.itemId, name: item.name, price: item.price }, signal: session.controller.signal });
       if (jdSession !== session) return;
-      closeModal();
+      // 关联成功不自动跳转（await 之后 window.open 会被弹窗拦截静默吞掉），也不直接关弹窗：
+      // 原地显示「立即查看商品」由用户点击新开标签，点「完成」再关。
+      // 嵌入 DSH 沙箱 iframe 时桌面壳还会吞掉 target=_blank（点击无反应）——外链
+      // 由下方全局监听改走宿主页面代开；「复制链接」是任何环境都有效的逃生口。
+      session.items = [];
+      const url = safeProductUrl(result?.plan?.productUrl);
+      session.linkedUrl = url;
+      $('#jd-results').innerHTML = `<div class="jd-linked"><p><b>已关联原计划 ✓</b>已生成 CPS 推广链接；未购买、未标记已送。</p>${url ? `<div class="jd-linked-actions"><a class="primary-btn" href="${esc(url)}" target="_blank" rel="noreferrer noopener">立即查看商品 ↗</a><button type="button" class="ghost-btn" data-jd-copy>复制链接</button></div>` : ''}${url ? '<div class="jd-qr" role="img" aria-label="商品链接二维码"></div>' : ''}<button type="button" class="ghost-btn" data-jd-done>完成</button><p class="muted">手机扫码直达京东下单（佣金归本链接）；桌面没弹出窗口时点「复制链接」粘贴到浏览器。想换商品，重新搜索选中即可覆盖当前关联。</p></div>`;
+      const qrBox = $('#jd-results .jd-qr');
+      if (qrBox) qrBox.innerHTML = qrSvg(url) || '<p class="muted">链接过长无法生成二维码，可复制链接使用。</p>';
+      $('#jd-status').textContent = '';
       toast('已关联原计划（CPS 推广链接），未购买、未标记已送');
       await refresh();
     } catch (err) {
-      if (jdSession === session) $('#jd-status').textContent = `${err.message || '关联失败'}；可再次选择重试。`;
+      if (jdSession === session) {
+        // 关联是终点动作，失败不能只写状态行小字（用户会以为点了没反应）——toast 必须出来
+        $('#jd-status').textContent = `${err.message || '关联失败'}；可再次选择重试。`;
+        toast(err.message || '关联失败，请查看弹窗内提示后重试', true);
+      }
     } finally {
       if (jdSession === session) jdBusy(session, false);
     }
+  });
+
+  $('[data-qr-copy]').addEventListener('click', async () => {
+    if (!qrCopyUrl) return;
+    try { await navigator.clipboard.writeText(qrCopyUrl); toast('商品链接已复制，可粘贴到浏览器打开'); }
+    catch { toast('复制失败，请稍后重试', true); }
   });
 
   // ---------- 礼赠 ----------

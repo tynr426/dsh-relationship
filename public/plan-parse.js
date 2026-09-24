@@ -102,6 +102,21 @@
   // 残句里只剩纯连接动词时给个可读默认；「聚一下/见面/看望」这类有信息量的原样保留
   const BARE_INTENTS = ['', '联系', '联系一下', '问候', '问候一下', '问好', '打招呼', '过', '过一下', '约'];
 
+  // 「人来往」词：电话、见面、问候这类计划说的是一次接触，不是一件东西——
+  // 客套话不当商品词，宁空不猜，交给弹窗的手填与热销榜引导。
+  // 与「已送出礼物」确认弹窗同一套词汇（「普通见面、散步等安排请使用已完成」）。
+  const NON_PRODUCT_RE = /联系|电话|问候|问好|打招呼|见面|约饭|约个饭|吃饭|散步|跑步|爬山|下棋|喝茶|聊天|聊聊|聚聚|聚一聚|拜访|探望|探病|视频|微信|过生日/;
+  const STRIP_LEAD = /^(?:AI\s*)?(?:建议|帮我|准备|挑选|看看|想|打算|送|买|给|找|带|挑)(?:个|一下|一件|一款|些|点)?/;
+
+  /** 从计划想法首句派生京东商品关键词：人来往类客套话返回 ''（走弹窗的手填/热销榜引导） */
+  function giftKeyword(input) {
+    const head = String(input ?? '').split(/[，,。；;！!？?\n：:]/)[0].trim();
+    if (!head || NON_PRODUCT_RE.test(head)) return '';
+    let s = head;
+    for (let i = 0; i < 2; i++) s = s.replace(STRIP_LEAD, '').trim();
+    return (s || head).slice(0, 80);
+  }
+
   /**
    * @param {string} input 一句话，如「打算下周三约小李吃饭」
    * @param {{contacts?: Array<{id: string, name: string}>, today?: Date}} opts
@@ -130,5 +145,5 @@
     return out;
   }
 
-  return { parse };
+  return { parse, giftKeyword };
 });

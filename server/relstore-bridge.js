@@ -99,10 +99,17 @@ export async function runAsync(args) {
   if (!Array.isArray(args) || args[0] !== 'jd' || !['status', 'search', 'promote'].includes(args[1])
     || args.some((arg) => typeof arg !== 'string' || arg.includes('\0'))) throw jdError(400, '无效的京东请求');
   const command = args[1];
-  const flags = command === 'search' ? ['--keyword', '--min-price', '--max-price'] : command === 'promote' ? ['--item-id'] : [];
+  const flags = command === 'search' ? ['--keyword', '--min-price', '--max-price']
+    : command === 'promote' ? ['--item-id', '--name', '--price'] : [];
   const seen = new Set();
   for (let i = 2; i < args.length; i += 2) {
     if (!flags.includes(args[i]) || seen.has(args[i]) || args[i + 1] === undefined || args[i + 1].startsWith('--')) throw jdError(400, '无效的京东请求');
+    // 降级资料（goods.query 无权限时替代售前复核的名称/价格）单独校验取值
+    if (args[i] === '--name' && !boundedText(args[i + 1], 200)) throw jdError(400, '无效的京东请求');
+    if (args[i] === '--price') {
+      const price = Number(args[i + 1]);
+      if (!boundedText(args[i + 1], 32) || !Number.isFinite(price) || price <= 0 || price > 1000000) throw jdError(400, '无效的京东请求');
+    }
     seen.add(args[i]);
   }
   if ((command === 'search' && !seen.has('--keyword')) || (command === 'promote' && !seen.has('--item-id'))) throw jdError(400, '无效的京东请求');

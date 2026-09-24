@@ -81,6 +81,29 @@ test('search 只发送显式关键词/数字范围，无 shell、计划或关系
   assert.deepEqual((await request(`/api/plans/${plan.id}/jd/search`, { keyword: '杯', minPrice: '', maxPrice: null })).data.items, []);
 });
 
+test('隔离 fake CLI：缺失、空或空白关键词显式传 --keyword 空字符串查询热销榜', async () => {
+  const plan = newPlan();
+  fixture({ reply: { ok: true, items: [item] } });
+  const bodies = [{}, { keyword: '' }, { keyword: ' \t\n\u3000 ' }, { keyword: '', minPrice: null, maxPrice: '' }, { minPrice: '', maxPrice: null }];
+  for (const body of bodies) {
+    assert.deepEqual(await request(`/api/plans/${plan.id}/jd/search`, body), { status: 200, data: { ok: true, items: [item] } });
+  }
+  assert.deepEqual(calls(), bodies.map(() => ['jd', 'search', '--keyword', '', '--json', '--db', process.env.RELSTORE_DB]));
+  assert.equal(store.getPlan(plan.id).productUrl, '');
+});
+
+test('热销榜拒绝非空价格条件，不静默忽略、不调用 CLI', async () => {
+  const plan = newPlan();
+  for (const keyword of [undefined, '', ' \u3000 ']) {
+    for (const prices of [{ minPrice: 0 }, { maxPrice: 100 }, { minPrice: 10, maxPrice: 100 }, { minPrice: ' ' }, { maxPrice: [] }, { minPrice: {} }]) {
+      const result = await request(`/api/plans/${plan.id}/jd/search`, { ...(keyword === undefined ? {} : { keyword }), ...prices });
+      assert.equal(result.status, 400);
+      assert.match(result.data.error, /热销榜不支持价格筛选/);
+    }
+  }
+  assert.deepEqual(calls(), []);
+});
+
 test('80 字关键词、百万价格上限与 256 字联盟 ID 可完整往返', async () => {
   const plan = newPlan();
   const keyword = '茶'.repeat(80);
@@ -97,7 +120,12 @@ test('80 字关键词、百万价格上限与 256 字联盟 ID 可完整往返',
 
 test('计划/输入校验在外网调用前完成，已送计划不可搜或选', async () => {
   const plan = newPlan();
-  for (const body of [{}, null, [], { keyword: ' ' }, { keyword: 'x'.repeat(81) }, { keyword: 'a\u0000b' }, { keyword: 'a\u007fb' }, { keyword: '杯', minPrice: -1 }, { keyword: '杯', maxPrice: 1000001 }, { keyword: '杯', maxPrice: '100' }, { keyword: '杯', minPrice: 200, maxPrice: 100 }, { keyword: '杯', maxPrice: {} }]) {
+  for (const body of [
+    null, [], { keyword: null }, { keyword: 123 }, { keyword: false }, { keyword: [] }, { keyword: {} },
+    { keyword: 'x'.repeat(81) }, { keyword: 'a\u0000b' }, { keyword: 'a\u007fb' },
+    { keyword: '杯', minPrice: -1 }, { keyword: '杯', maxPrice: 1000001 }, { keyword: '杯', maxPrice: '100' },
+    { keyword: '杯', minPrice: 200, maxPrice: 100 }, { keyword: '杯', maxPrice: {} },
+  ]) {
     assert.equal((await request(`/api/plans/${plan.id}/jd/search`, body)).status, 400);
   }
   for (const body of [{}, { itemId: 123 }, { itemId: '' }, { itemId: 'a\n' }, { itemId: '--db' }, { itemId: 'x'.repeat(257) }, { itemId: 'https://u.jd.com/test' }]) {
@@ -106,10 +134,12 @@ test('计划/输入校验在外网调用前完成，已送计划不可搜或选'
   for (const action of ['search', 'select']) {
     assert.equal((await request(`/api/plans/missing/jd/${action}`, { keyword: '杯', itemId: '123' })).status, 404);
   }
+  assert.equal((await request('/api/plans/missing/jd/search', {})).status, 404);
   for (const status of ['sent', 'done']) {
     const terminal = newPlan();
     store.updatePlan(terminal.id, { status });
     for (const action of ['search', 'select']) assert.equal((await request(`/api/plans/${terminal.id}/jd/${action}`, { keyword: '杯', itemId: '123' })).status, 400);
+    assert.equal((await request(`/api/plans/${terminal.id}/jd/search`, { keyword: '' })).status, 400);
   }
   assert.deepEqual(calls(), []);
 });
@@ -144,6 +174,29 @@ test('select 只信任 Rust 商品字段，关联原 AI 计划并广播，保留
   } finally { controller.abort(); await reader.cancel().catch(() => {}); }
 });
 
+test('select 转发页面已展示的名称/价格作降级资料，商品字段仍以 CLI 返回为准', async () => {
+  const plan = newPlan();
+  fixture({ reply: { ok: true, product } });
+  const result = await request(`/api/plans/${plan.id}/jd/select`, { itemId: item.itemId, name: ' 保温杯 ', price: 99.5, productName: '伪造名称', productUrl: 'https://attacker.invalid' });
+  assert.equal(result.status, 200);
+  assert.deepEqual(calls(), [['jd', 'promote', '--item-id', item.itemId, '--name', '保温杯', '--price', '99.5', '--json', '--db', process.env.RELSTORE_DB]]);
+  for (const key of Object.keys(product)) assert.equal(result.data.plan[key], product[key]);
+  for (const body of [
+    { itemId: '123', name: '只有名称' },
+    { itemId: '123', price: 9.9 },
+    { itemId: '123', name: 'x'.repeat(201), price: 9.9 },
+    { itemId: '123', name: 'a\u0000b', price: 9.9 },
+    { itemId: '123', name: ' \t\n ', price: 9.9 },
+    { itemId: '123', name: '名', price: 0 },
+    { itemId: '123', name: '名', price: -1 },
+    { itemId: '123', name: '名', price: '9.9' },
+    { itemId: '123', name: '名', price: 1000001 },
+  ]) {
+    assert.equal((await request(`/api/plans/${plan.id}/jd/select`, body)).status, 400);
+  }
+  assert.equal(store.getPlan(plan.id).productUrl, product.productUrl);
+});
+
 test('JD 异步调用不阻塞 API，等待期间已送/完成/删除的计划不再关联', async () => {
   for (const action of ['sent', 'done', 'delete']) {
     const plan = newPlan();
@@ -158,6 +211,22 @@ test('JD 异步调用不阻塞 API，等待期间已送/完成/删除的计划�
     const result = await pending;
     assert.equal(result.status, action === 'delete' ? 404 : 400);
     assert.equal(store.getPlan(plan.id)?.productUrl || '', '');
+  }
+});
+
+test('搜索与热销榜在外网调用后复查计划，已送/完成/删除不再返回候选', async () => {
+  for (const keyword of ['杯', '']) {
+    for (const action of ['sent', 'done', 'delete']) {
+      const plan = newPlan();
+      fixture({ reply: { ok: true, items: [item] }, delay: 300 });
+      const invoked = nextCall();
+      const pending = request(`/api/plans/${plan.id}/jd/search`, { keyword });
+      await invoked;
+      if (action === 'delete') store.deletePlan(plan.id); else store.updatePlan(plan.id, { status: action });
+      const result = await pending;
+      assert.equal(result.status, action === 'delete' ? 404 : 400);
+      assert.equal(result.data.items, undefined);
+    }
   }
 });
 

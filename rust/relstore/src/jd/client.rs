@@ -7,9 +7,10 @@ use reqwest::blocking::Client;
 use reqwest::redirect::Policy;
 use serde_json::{Value, json};
 
+use super::SearchQuery;
 use super::config::Config;
-use super::items::{Item, parse_items, validate_item_id, valid_jd_url};
-use super::protocol::{Failure, GATEWAY, GOODS, PROMOTION, RESPONSE_LIMIT, decode_result};
+use super::items::{Item, parse_items, parse_rank_items, valid_jd_url, validate_item_id};
+use super::protocol::{Failure, GATEWAY, GOODS, PROMOTION, RANKING, RESPONSE_LIMIT, decode_result};
 
 pub fn sign(params: &BTreeMap<String, String>, secret: &str) -> String {
     let mut text = secret.to_owned();
@@ -44,7 +45,12 @@ impl JdClient {
         })
     }
 
-    pub fn request(&self, method: &str, payload: Value, result_key: &str) -> std::result::Result<Value, Failure> {
+    pub fn request(
+        &self,
+        method: &str,
+        payload: Value,
+        result_key: &str,
+    ) -> std::result::Result<Value, Failure> {
         let timestamp = Utc::now()
             .with_timezone(&FixedOffset::east_opt(8 * 3600).unwrap())
             .format("%Y-%m-%d %H:%M:%S")
@@ -87,27 +93,53 @@ impl JdClient {
         if bytes.len() as u64 > RESPONSE_LIMIT {
             return Err(Failure::new(502, "京东响应过大，请缩小搜索范围"));
         }
-        let body: Value = serde_json::from_slice(&bytes).map_err(|_| Failure::new(502, "京东返回的数据格式异常，请稍后重试"))?;
+        let body: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| Failure::new(502, "京东返回的数据格式异常，请稍后重试"))?;
         decode_result(body, method, result_key)
     }
 
     pub fn goods(&self, query: Value) -> std::result::Result<Vec<Item>, Failure> {
-        let result = self.request(GOODS, json!({"goodsReq": query}), "queryResult")?;
+        let result = self.request(GOODS, json!({"goodsReqDTO": query}), "queryResult")?;
         parse_items(&result)
     }
 
-    pub fn search(&self, query: Value) -> std::result::Result<Value, Failure> {
-        let items: Vec<_> = self.goods(query)?.iter().map(Item::output).collect();
+    pub fn search(&self, query: SearchQuery) -> std::result::Result<Value, Failure> {
+        let items = match query {
+            SearchQuery::Keyword(query) => self.goods(query)?,
+            SearchQuery::Ranking(query) => {
+                let result =
+                    self.request(RANKING, json!({"RankGoodsReq": query}), "queryResult")?;
+                parse_rank_items(&result)?
+            }
+        };
+        let items: Vec<_> = items.iter().map(Item::output).collect();
         Ok(json!({"ok": true, "items": items}))
     }
 
-    pub fn promote(&self, item_id: &str) -> std::result::Result<Value, Failure> {
+    pub fn promote(
+        &self,
+        item_id: &str,
+        fallback: Option<(&str, f64)>,
+    ) -> std::result::Result<Value, Failure> {
         validate_item_id(item_id)?;
-        let item = self
-            .goods(json!({"eliteId": 1, "itemIds": [item_id]}))?
-            .into_iter()
-            .find(|item| item.item_id == item_id)
-            .ok_or_else(|| Failure::new(404, "商品已不可推广或已下架，请重新搜索"))?;
+        let item = match self.goods(json!({"sceneId": 1, "itemIds": [item_id]})) {
+            Ok(items) => items
+                .into_iter()
+                .find(|item| item.item_id == item_id)
+                .ok_or_else(|| Failure::new(404, "商品已不可推广或已下架，请重新搜索"))?,
+            // 账号无 goods.query 权限：跳过售前复核，改用页面已展示的名称与价格；
+            // 商品当前能否推广由下方 promotion 接口兜底校验。
+            Err(error) if error.permission_denied => {
+                let (name, price) = fallback.ok_or(error)?;
+                Item {
+                    item_id: item_id.to_owned(),
+                    name: name.chars().take(100).collect(),
+                    price,
+                    image_url: String::new(),
+                }
+            }
+            Err(error) => return Err(error),
+        };
         let mut request =
             json!({"sceneId": 1, "materialId": item.item_id, "siteId": self.config.site_id});
         if let Some(position_id) = self.config.position_id {

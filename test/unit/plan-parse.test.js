@@ -3,7 +3,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 await import('../../public/plan-parse.js');
-const { parse } = globalThis.PlanParse;
+const { parse, giftKeyword } = globalThis.PlanParse;
 
 const TODAY = new Date(2026, 8, 23); // 2026-09-23 周三
 const CT = [
@@ -98,4 +98,23 @@ test('空输入与边界', () => {
   assert.equal(bad.date, '');
   // 今天有线下方框 date 输入兼容：返回 YYYY-MM-DD
   assert.match(P('明天联系小李').date, /^\d{4}-\d{2}-\d{2}$/);
+});
+
+test('京东关键词：电话/见面类客套话宁空不猜', () => {
+  assert.equal(giftKeyword('联系一下'), '');
+  assert.equal(giftKeyword('一起到公园散步'), '');
+  assert.equal(giftKeyword('约饭聊聊'), '');
+  assert.equal(giftKeyword('打个电话祝生日快乐'), '');
+  assert.equal(giftKeyword('先拜访他再说'), '');
+  assert.equal(giftKeyword(''), '');
+});
+
+test('京东关键词：礼物/商品类想法照常派生', () => {
+  assert.equal(giftKeyword('送低糖蛋糕，他喜欢低糖'), '低糖蛋糕');
+  assert.equal(giftKeyword('打算送花束'), '花束'); // 两遍剥头：打算 → 送
+  assert.equal(giftKeyword('AI 建议低糖蛋糕'), '低糖蛋糕');
+  assert.equal(giftKeyword('帮我挑个保温杯'), '保温杯');
+  assert.equal(giftKeyword('带点茶叶过去'), '茶叶过去'); // 剥「带点」后保留余文，可手改
+  assert.equal(giftKeyword('保温杯'), '保温杯'); // 本身就是商品词
+  assert.equal(giftKeyword('甲计划：私人喜好仅供本地参考'), '甲计划'); // jd-products e2e 夹具回归锚点
 });

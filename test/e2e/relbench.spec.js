@@ -981,4 +981,25 @@ test.describe('关系记忆工作台', () => {
     expect(mine.idea).toBe('约吃饭');
     expect(errors).toEqual([]);
   });
+
+  test('京东找同款关键词：送礼想法才预填，电话/散步类计划留空手填', async ({ page, request }) => {
+    const errors = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    const contact = (await (await request.post('/api/contacts', { data: { name: 'E2E 京东关键词' } })).json()).contact;
+    const call = (await (await request.post('/api/plans', { data: { contactId: contact.id, idea: '联系一下', status: 'decided' } })).json()).plan;
+    const gift = (await (await request.post('/api/plans', { data: { contactId: contact.id, idea: '送低糖蛋糕，他喜欢低糖', status: 'decided' } })).json()).plan;
+    await page.goto('/');
+    await page.locator('.nav-item[data-view="gifts"]').click();
+    const callCard = page.locator(`#plans-list .occ-card[data-plan="${call.id}"]`);
+    const giftCard = page.locator(`#plans-list .occ-card[data-plan="${gift.id}"]`);
+    await callCard.locator('.gift-tools > summary').click();
+    await callCard.getByRole('button', { name: '京东找同款' }).click();
+    await expect(page.locator('#jd-keyword')).toHaveValue('');
+    await page.keyboard.press('Escape');
+    await giftCard.locator('.gift-tools > summary').click();
+    await giftCard.getByRole('button', { name: '京东找同款' }).click();
+    await expect(page.locator('#jd-keyword')).toHaveValue('低糖蛋糕');
+    await page.keyboard.press('Escape');
+    expect(errors).toEqual([]);
+  });
 });

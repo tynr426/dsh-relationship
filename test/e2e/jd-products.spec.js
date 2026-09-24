@@ -1,5 +1,7 @@
 import { test as base, expect } from '@playwright/test';
+import fs from 'node:fs';
 
+// 京东响应由 page.route 隔离模拟，仅验证 UI 行为，不代表真实京东 API 验证。
 const test = base.extend({
   giftPlans: async ({ request }, use) => {
     const created = await request.post('/api/contacts', { data: { name: 'JD 隔离测试联系人' } });
@@ -71,7 +73,7 @@ test('缺配置只引导本机变量名；可重新检查，关键词按原计�
   await expect(page.locator('#modal-backdrop')).toBeHidden();
 });
 
-test('真实计划内嵌入口：必填、范围、空结果和失败重试，安全渲染候选', async ({ page, giftPlans }) => {
+test('真实计划内嵌入口：关键词搜索范围、空结果和失败重试，安全渲染候选', async ({ page, giftPlans }) => {
   const payloads = [];
   await page.route('**/api/jd/status', (route) => reply(route, ready));
   await page.route('https://images.example.test/**', (route) => route.abort());
@@ -89,9 +91,6 @@ test('真实计划内嵌入口：必填、范围、空结果和失败重试，�
   await expect(page.locator(`#occasions-list [data-action="jd-open"][data-id="${giftPlans.planB.id}"]`)).toBeVisible();
   await openReady(page, giftPlans.planB.id);
   await expect(page.locator('#jd-keyword')).toHaveValue('乙计划');
-  await page.locator('#jd-keyword').fill('');
-  await page.locator('#jd-search').click();
-  expect(payloads).toEqual([]);
   await page.locator('#jd-keyword').fill('保温杯');
   await page.locator('#jd-min-price').fill('200');
   await page.locator('#jd-max-price').fill('100');
@@ -113,7 +112,141 @@ test('真实计划内嵌入口：必填、范围、空结果和失败重试，�
   expect(payloads).toEqual(Array(3).fill({ keyword: '保温杯', minPrice: 0, maxPrice: 100 }));
 });
 
-test('选择失败可重试；只发商品编号，关联原 AI 卡而不新建/已送', async ({ page, request, giftPlans }) => {
+for (const [label, keyword] of [['空关键词', ''], ['空白关键词', ' \u3000  ']]) {
+  test(`${label}查看全部品类24小时热销榜前20（模拟京东响应）`, async ({ page, giftPlans }) => {
+    const payloads = [];
+    const started = deferred();
+    const release = deferred();
+    await page.route('**/api/jd/status', (route) => reply(route, ready));
+    await page.route(`**/api/plans/${giftPlans.planA.id}/jd/search`, async (route) => {
+      payloads.push(route.request().postDataJSON());
+      started.resolve();
+      await release.promise;
+      return reply(route, { ok: true, items: Array.from({ length: 20 }, (_, index) => ({ ...item, itemId: String(index), name: `榜单商品 ${index + 1}` })) });
+    });
+    await gifts(page);
+    await openReady(page, giftPlans.planA.id);
+    await page.locator('#jd-keyword').fill(keyword);
+    await expect(page.locator('#jd-keyword')).not.toHaveAttribute('required', '');
+    await expect(page.locator('#jd-search')).toHaveText('查看热销榜');
+    await expect(page.locator('#jd-min-price')).toBeDisabled();
+    await expect(page.locator('#jd-max-price')).toBeDisabled();
+    await expect(page.locator('#jd-price-hint')).toContainText('全部品类24小时热销榜前20不支持价格筛选');
+    await page.locator('#jd-search').click();
+    await started.promise;
+    await expect(page.locator('#jd-status')).toContainText('正在获取京东全部品类24小时热销榜前20');
+    await expect(page.locator('#jd-search')).toBeDisabled();
+    release.resolve();
+    await expect(page.locator('#jd-results .occ-card')).toHaveCount(20);
+    await expect(page.locator('#jd-status')).toContainText('全部品类24小时热销榜前20：返回 20 件');
+    await expect(page.locator('#jd-search')).toBeEnabled();
+    await expect(page.locator('#jd-search')).toHaveText('查看热销榜');
+    await expect(page.locator('#jd-keyword')).toHaveValue(keyword);
+    await expect(page.locator('#jd-min-price')).toBeDisabled();
+    await expect(page.locator('#jd-max-price')).toBeDisabled();
+    expect(payloads).toEqual([{ keyword: '' }]);
+  });
+}
+
+test('热销榜不发送残留价格；切回关键词恢复价格值、校验与搜索', async ({ page, giftPlans }) => {
+  const payloads = [];
+  await page.route('**/api/jd/status', (route) => reply(route, ready));
+  await page.route(`**/api/plans/${giftPlans.planA.id}/jd/search`, (route) => {
+    payloads.push(route.request().postDataJSON());
+    return reply(route, { ok: true, items: [item] });
+  });
+  await gifts(page);
+  await openReady(page, giftPlans.planA.id);
+  await page.locator('#jd-min-price').fill('200');
+  await page.locator('#jd-max-price').fill('100');
+  await page.locator('#jd-keyword').fill('   ');
+  await expect(page.locator('#jd-min-price')).toBeDisabled();
+  await expect(page.locator('#jd-max-price')).toBeDisabled();
+  await page.locator('#jd-search').click();
+  await expect(page.locator('#jd-status')).toContainText('全部品类24小时热销榜前20：返回 1 件');
+  await expect(page.locator('#jd-search')).toBeEnabled();
+  await expect(page.locator('#jd-min-price')).toBeDisabled();
+  await expect(page.locator('#jd-max-price')).toBeDisabled();
+  await expect(page.locator('#jd-min-price')).toHaveValue('200');
+  await expect(page.locator('#jd-max-price')).toHaveValue('100');
+  expect(payloads).toEqual([{ keyword: '' }]);
+  await page.locator('#jd-keyword').fill('保温杯');
+  await expect(page.locator('#jd-search')).toHaveText('搜索商品');
+  await expect(page.locator('#jd-min-price')).toBeEnabled();
+  await expect(page.locator('#jd-max-price')).toBeEnabled();
+  await expect(page.locator('#jd-min-price')).toHaveValue('200');
+  await expect(page.locator('#jd-max-price')).toHaveValue('100');
+  await expect(page.locator('#jd-price-hint')).toContainText('价格仅适用于关键词搜索');
+  await page.locator('#jd-search').click();
+  await expect(page.locator('#jd-status')).toContainText('最低价不能高于最高价');
+  expect(payloads).toEqual([{ keyword: '' }]);
+  await page.locator('#jd-min-price').fill('0');
+  await page.locator('#jd-search').click();
+  await expect(page.locator('#jd-status')).toContainText('搜索找到 1 件候选商品');
+  await expect(page.locator('#jd-search')).toBeEnabled();
+  expect(payloads).toEqual([{ keyword: '' }, { keyword: '保温杯', minPrice: 0, maxPrice: 100 }]);
+});
+
+test('热销榜空结果与失败明确提示，可原条件重试', async ({ page, giftPlans }) => {
+  const payloads = [];
+  await page.route('**/api/jd/status', (route) => reply(route, ready));
+  await page.route(`**/api/plans/${giftPlans.planA.id}/jd/search`, (route) => {
+    payloads.push(route.request().postDataJSON());
+    if (payloads.length === 1) return reply(route, { ok: true, items: [] });
+    if (payloads.length === 2) return reply(route, { ok: false, error: '京东请求暂不可用' }, 502);
+    return reply(route, { ok: true, items: [item] });
+  });
+  await gifts(page);
+  await openReady(page, giftPlans.planA.id);
+  await page.locator('#jd-keyword').fill('   ');
+  await page.locator('#jd-search').click();
+  await expect(page.locator('#jd-status')).toContainText('全部品类24小时热销榜前20暂无商品');
+  await expect(page.locator('#jd-results .occ-card')).toHaveCount(0);
+  await expect(page.locator('#jd-search')).toBeEnabled();
+  await expect(page.locator('#jd-search')).toHaveText('查看热销榜');
+  await page.locator('#jd-search').click();
+  await expect(page.locator('#jd-status')).toContainText('全部品类24小时热销榜前20加载失败');
+  await expect(page.locator('#jd-status')).toContainText('京东请求暂不可用');
+  await expect(page.locator('#jd-status')).toContainText('可再次查看热销榜重试');
+  await expect(page.locator('#jd-search')).toBeEnabled();
+  await expect(page.locator('#jd-search')).toHaveText('查看热销榜');
+  await expect(page.locator('#jd-keyword')).toHaveValue('   ');
+  await expect(page.locator('#jd-min-price')).toBeDisabled();
+  await expect(page.locator('#jd-max-price')).toBeDisabled();
+  expect(payloads).toEqual([{ keyword: '' }, { keyword: '' }]);
+  await page.locator('#jd-search').click();
+  await expect(page.locator('#jd-status')).toContainText('全部品类24小时热销榜前20：返回 1 件');
+  await expect(page.locator('#jd-results .occ-card')).toHaveCount(1);
+  expect(payloads).toEqual(Array(3).fill({ keyword: '' }));
+});
+
+test('关键词搜索 403 不清空关键词、不自动请求热销榜', async ({ page, giftPlans }) => {
+  const payloads = [];
+  await page.route('**/api/jd/status', (route) => reply(route, ready));
+  await page.route(`**/api/plans/${giftPlans.planA.id}/jd/search`, (route) => {
+    payloads.push(route.request().postDataJSON());
+    if (payloads.length === 1) return reply(route, { ok: false, error: '当前应用没有商品查询 API 权限' }, 403);
+    return reply(route, { ok: true, items: [item] });
+  });
+  await gifts(page);
+  await openReady(page, giftPlans.planA.id);
+  await expect(page.locator('#jd-status')).toContainText('配置就绪');
+  await expect(page.locator('#jd-status')).not.toContainText('API 权限已就绪');
+  await page.locator('#jd-keyword').fill('保温杯');
+  await page.locator('#jd-search').click();
+  await expect(page.locator('#jd-status')).toContainText('商品搜索失败');
+  await expect(page.locator('#jd-status')).toContainText('没有商品查询 API 权限');
+  await expect(page.locator('#jd-search')).toBeEnabled();
+  await expect(page.locator('#jd-search')).toHaveText('搜索商品');
+  await expect(page.locator('#jd-keyword')).toHaveValue('保温杯');
+  await expect(page.locator('#jd-results .occ-card')).toHaveCount(0);
+  expect(payloads).toEqual([{ keyword: '保温杯' }]);
+  await page.locator('#jd-search').click();
+  await expect(page.locator('#jd-status')).toContainText('搜索找到 1 件候选商品');
+  expect(payloads).toEqual([{ keyword: '保温杯' }, { keyword: '保温杯' }]);
+});
+
+test('选择失败可重试；发商品编号与展示名称/价格，关联原 AI 卡而不新建/已送', async ({ page, request, giftPlans }) => {
   const selections = [];
   const release = deferred();
   const started = deferred();
@@ -144,14 +277,48 @@ test('选择失败可重试；只发商品编号，关联原 AI 卡而不新建/
   release.resolve();
   await expect(page.locator('#jd-status')).toContainText('推广链接生成失败');
   await choose.click();
-  await expect(page.locator('#modal-backdrop')).toBeHidden();
+  // 折中交互：选中成功后弹窗不自动关，原地显示「立即查看商品」成功态，点完成后才关闭
+  await expect(page.locator('#jd-results')).toContainText('已关联原计划');
+  await expect(page.locator('#jd-results')).toContainText('未购买、未标记已送');
   await expect(page.locator('#toast')).toContainText('CPS 推广链接');
+  const view = page.locator('#jd-results a.primary-btn');
+  await expect(view).toHaveAttribute('href', product.productUrl);
+  await expect(view).toHaveAttribute('rel', 'noreferrer noopener');
+  // 独立模式点链接走原生新标签；外网导航由测试拦截（不真连京东），只断言弹窗地址
+  await page.context().route(/u\.jd\.com/, (route) => route.fulfill({ contentType: 'text/html', body: 'e2e' }));
+  const popupPromise = page.waitForEvent('popup');
+  await view.click();
+  const popup = await popupPromise;
+  await expect(popup).toHaveURL(product.productUrl);
+  await popup.close();
+  // 「复制链接」逃生口：点一下即拿到完整 CPS 链接，任何环境可用
+  await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+  await page.locator('#jd-results').getByRole('button', { name: '复制链接' }).click();
+  await expect(page.locator('#toast')).toContainText('已复制');
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(product.productUrl);
+  // 成功面板内嵌二维码：桌面选品、手机扫码成交的主力通路
+  await expect(page.locator('#jd-results .jd-qr svg')).toBeVisible();
+  await page.locator('#jd-results').getByRole('button', { name: '完成' }).click();
+  await expect(page.locator('#modal-backdrop')).toBeHidden();
   const card = page.locator('.occ-card').filter({ has: jdButton(page, giftPlans.planA.id) });
   await expect(card).toContainText('官方验证保温杯');
   await expect(card).toContainText('CPS 推广链接');
   await expect(card).toContainText('AI 建议');
   await expect(card.locator('a')).toHaveAttribute('href', product.productUrl);
-  expect(selections).toEqual([{ itemId: item.itemId }, { itemId: item.itemId }]);
+  // 计划卡「扫码买」：二维码弹窗 + 复制链接（首页时机提醒卡同一 planProductLine 复用）
+  await card.getByRole('button', { name: '扫码买' }).click();
+  await expect(page.locator('#form-qr')).toBeVisible();
+  await expect(page.locator('#qr-product-line')).toContainText('官方验证保温杯');
+  await expect(page.locator('#qr-image svg')).toBeVisible();
+  await page.locator('#form-qr').getByRole('button', { name: '复制链接' }).click();
+  await expect(page.locator('#toast')).toContainText('已复制');
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(product.productUrl);
+  await page.locator('#form-qr').getByRole('button', { name: '取消', exact: true }).click();
+  await expect(page.locator('#modal-backdrop')).toBeHidden();
+  expect(selections).toEqual([
+    { itemId: item.itemId, name: item.name, price: item.price },
+    { itemId: item.itemId, name: item.name, price: item.price },
+  ]);
   const plans = (await (await request.get(`/api/plans?contact_id=${giftPlans.contactId}`)).json()).plans;
   expect(plans).toHaveLength(2);
   expect(plans.find((p) => p.id === giftPlans.planA.id)).toMatchObject({ ...product, status: 'idea', source: 'ai', idea: giftPlans.planA.idea });
@@ -159,6 +326,44 @@ test('选择失败可重试；只发商品编号，关联原 AI 卡而不新建/
   await card.getByRole('button', { name: '编辑', exact: true }).click();
   await expect(page.locator('#plan-product-url')).toHaveAttribute('maxlength', '4096');
   await expect(page.locator('#plan-product-url')).toHaveValue(product.productUrl);
+});
+
+test('嵌入 DSH：点「立即查看商品」改由宿主页面代开，不依赖沙箱 iframe 弹窗', async ({ page, request, giftPlans, baseURL }) => {
+  // 回归：桌面壳会吞掉沙箱 iframe 里的 target=_blank（用户点了没反应）。
+  // sandbox 属性实时提取自 lib/client.js；宿主半只记录 open-external 消息，不真开窗。
+  const clientSrc = fs.readFileSync('lib/client.js', 'utf8');
+  const sandboxAttr = /setAttribute\('sandbox',\s*'([^']+)'\)/.exec(clientSrc)?.[1];
+  expect(sandboxAttr, 'lib/client.js 中应能提取到 iframe sandbox 属性').toBeTruthy();
+  await page.route('**/api/jd/status', (route) => reply(route, ready));
+  await page.route(`**/api/plans/${giftPlans.planA.id}/jd/search`, (route) => reply(route, { ok: true, items: [item] }));
+  await page.route(`**/api/plans/${giftPlans.planA.id}/jd/select`, async (route) => {
+    const updated = await request.patch(`/api/plans/${giftPlans.planA.id}`, { data: product });
+    return reply(route, await updated.json());
+  });
+  await page.route(`${baseURL}/__jd-embedded-host.html`, (route) => route.fulfill({
+    contentType: 'text/html',
+    body: `<!doctype html><html><body style="margin:0">
+      <script>window.__relMsgs = []; window.addEventListener('message', function (e) { window.__relMsgs.push(e.data); });</script>
+      <iframe src="/" sandbox="${sandboxAttr}" style="width:100vw;height:100vh;border:0"></iframe>
+    </body></html>`,
+  }));
+  await page.goto(`${baseURL}/__jd-embedded-host.html`);
+  const frame = page.frames().find((f) => f.url() === `${baseURL}/`);
+  expect(frame).toBeTruthy();
+  await frame.locator('.nav-item[data-view="gifts"]').click();
+  await expect(frame.locator('#view-gifts .gift-tools > summary').first()).toBeVisible();
+  for (const summary of await frame.locator('#view-gifts .gift-tools > summary').all()) await summary.click();
+  await frame.locator(`[data-action="jd-open"][data-id="${giftPlans.planA.id}"]`).click();
+  await expect(frame.locator('#jd-search')).toBeEnabled();
+  await frame.locator('#jd-search').click();
+  await frame.getByRole('button', { name: '选中并关联' }).click();
+  await expect(frame.locator('#jd-results')).toContainText('已关联原计划');
+  let popups = 0;
+  page.on('popup', () => { popups += 1; });
+  await frame.locator('#jd-results a.primary-btn').click();
+  await page.waitForFunction((url) => window.__relMsgs.some((m) => m && m.source === 'dsh-relationship' && m.type === 'open-external' && m.url === url), product.productUrl);
+  expect(popups).toBe(0);
+  await expect(frame.locator('#form-jd')).toBeVisible();
 });
 
 for (const stage of ['status', 'search', 'select']) {

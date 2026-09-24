@@ -54,6 +54,14 @@ pub fn valid_jd_url(link: &str, image: bool) -> bool {
 }
 
 pub fn parse_items(result: &Value) -> std::result::Result<Vec<Item>, Failure> {
+    parse_rows(result, false)
+}
+
+pub fn parse_rank_items(result: &Value) -> std::result::Result<Vec<Item>, Failure> {
+    parse_rows(result, true)
+}
+
+fn parse_rows(result: &Value, ranking: bool) -> std::result::Result<Vec<Item>, Failure> {
     let Some(data) = result.get("data").filter(|v| !v.is_null()) else {
         return Ok(Vec::new());
     };
@@ -63,7 +71,11 @@ pub fn parse_items(result: &Value) -> std::result::Result<Vec<Item>, Failure> {
         rows.iter().collect()
     } else if let Some(rows) = data.get("result").and_then(|v| v.as_array()) {
         rows.iter().collect()
-    } else if let Some(rows) = data.get("goodsResp") {
+    } else if let Some(rows) = data.get(if ranking {
+        "rankGoodsResp"
+    } else {
+        "goodsResp"
+    }) {
         if let Some(array) = rows.as_array() {
             array.iter().collect()
         } else if rows.is_object() {
@@ -93,17 +105,25 @@ pub fn parse_items(result: &Value) -> std::result::Result<Vec<Item>, Failure> {
             continue;
         };
         let price = row
-            .pointer("/priceInfo/price")
+            .pointer(if ranking {
+                "/wlprice"
+            } else {
+                "/priceInfo/price"
+            })
             .and_then(|v| v.as_f64().or_else(|| v.as_str()?.parse::<f64>().ok()));
         let Some(price) = price.filter(|price| price.is_finite() && *price > 0.0) else {
             continue;
         };
-        let image = row
-            .pointer("/imageInfo/imageList/0/url")
-            .or_else(|| row.pointer("/imageInfo/imageList/image/url"))
-            .and_then(Value::as_str)
-            .filter(|url| valid_jd_url(url, true))
-            .unwrap_or("");
+        let image = if ranking {
+            row.get("imageUrl")
+        } else {
+            row.pointer("/imageInfo/imageList/0/url")
+                .or_else(|| row.pointer("/imageInfo/imageList/urlInfo/url"))
+                .or_else(|| row.pointer("/imageInfo/imageList/image/url"))
+        }
+        .and_then(Value::as_str)
+        .filter(|url| valid_jd_url(url, true))
+        .unwrap_or("");
         if items.iter().any(|item: &Item| item.item_id == id) {
             continue;
         }

@@ -291,6 +291,14 @@ button:disabled { opacity: 0.55; cursor: not-allowed; }
 .occ-plan.muted { color: var(--label-2); }
 .plan-actions { display: inline-flex; gap: 4px; }
 .occ-actions { display: flex; flex-direction: column; gap: 6px; }
+.jd-linked { display: grid; gap: 10px; padding: 12px 14px; border: 1px dashed var(--accent); border-radius: var(--radius); }
+.jd-linked p { margin: 0; }
+.jd-linked .muted { color: var(--label-2); }
+.jd-linked-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.jd-qr, .qr-image { display: flex; justify-content: center; align-items: center; padding: 10px; background: #fff; border: 1px solid var(--border); border-radius: var(--radius); }
+.jd-qr svg { width: 148px; height: 148px; }
+.qr-image svg { width: 176px; height: 176px; }
+.occ-plan .ghost-btn { padding: 2px 8px; font-size: 12px; }
 .badge.dir { background: rgba(59,130,246,.12); }
 .badge.occ { background: rgba(168,85,247,.12); }
 .badge.short { background: rgba(245,158,11,.15); }

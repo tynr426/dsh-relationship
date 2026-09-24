@@ -294,13 +294,15 @@ async function api(req, res, url, body) {
       requireActivePlan();
       if (!body || typeof body !== 'object' || Array.isArray(body)) throw store.httpError(400, '请求内容无效');
       if (parts[4] === 'search') {
-        const keyword = typeof body.keyword === 'string' ? body.keyword.trim() : '';
-        if (!keyword || keyword.length > 80
-          || /[\u0000-\u001f\u007f-\u009f]/.test(keyword)) throw store.httpError(400, '请填写 1–80 字商品关键词');
+        if (Object.hasOwn(body, 'keyword') && typeof body.keyword !== 'string') throw store.httpError(400, '商品关键词须为字符串，可留空查看热销榜');
+        const keyword = (body.keyword ?? '').trim();
+        if (keyword.length > 80
+          || /[\u0000-\u001f\u007f-\u009f]/.test(keyword)) throw store.httpError(400, '商品关键词不能超过 80 字或包含控制字符');
         const args = ['jd', 'search', '--keyword', keyword];
         for (const [field, flag] of [['minPrice', '--min-price'], ['maxPrice', '--max-price']]) {
           const value = body[field];
           if (value == null || value === '') continue;
+          if (!keyword) throw store.httpError(400, '热销榜不支持价格筛选，请填写商品关键词后筛选价格');
           if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1000000) throw store.httpError(400, '价格范围须为 0–1000000 之间的数字');
           args.push(flag, String(value));
         }
@@ -311,7 +313,16 @@ async function api(req, res, url, body) {
       } else {
         if (typeof body.itemId !== 'string' || !body.itemId || body.itemId.length > 256
           || /[^A-Za-z0-9_+=-]/.test(body.itemId) || body.itemId.startsWith('--')) throw store.httpError(400, '请选择有效商品');
-        const { product } = await runAsync(['jd', 'promote', '--item-id', body.itemId]);
+        // 降级资料：账号无 goods.query 权限时，Rust 用页面已展示的名称/价格替代售前复核；
+        // 计划里的商品字段仍以 Rust 生成的为准，这两个值不会直接写进计划。
+        const name = typeof body.name === 'string' ? body.name.trim() : '';
+        const hasPrice = body.price !== undefined && body.price !== null;
+        if (name && (name.length > 200 || /[\u0000-\u001f]/.test(name))) throw store.httpError(400, '商品名称不能超过 200 字或包含控制字符');
+        if (hasPrice && (typeof body.price !== 'number' || !Number.isFinite(body.price) || body.price <= 0 || body.price > 1000000)) throw store.httpError(400, '商品价格须为大于 0 且不超过 1000000 的数字');
+        if (!!name !== hasPrice) throw store.httpError(400, '商品名称与价格须同时提供');
+        const args = ['jd', 'promote', '--item-id', body.itemId];
+        if (name) args.push('--name', name, '--price', String(body.price));
+        const { product } = await runAsync(args);
         requireActivePlan();
         const plan = store.updatePlan(parts[2], product);
         broadcast('plan.changed', { action: 'updated', planId: plan.id });

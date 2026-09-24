@@ -1,7 +1,8 @@
 use serde_json::{Value, json};
 
 pub const GATEWAY: &str = "https://api.jd.com/routerjson";
-pub const GOODS: &str = "jd.union.open.goods.jingfen.query";
+pub const GOODS: &str = "jd.union.open.goods.query";
+pub const RANKING: &str = "jd.union.open.goods.rank.query";
 pub const PROMOTION: &str = "jd.union.open.promotion.common.get";
 pub const REQUIRED: [&str; 3] = ["JD_APP_KEY", "JD_APP_SECRET", "JD_SITE_ID"];
 pub const RESPONSE_LIMIT: u64 = 2 * 1024 * 1024;
@@ -10,6 +11,8 @@ pub const RESPONSE_LIMIT: u64 = 2 * 1024 * 1024;
 pub struct Failure {
     pub status: u16,
     pub message: String,
+    /// 京东侧 API 权限被拒（403 + 权限文案）：调用方可据此决定是否走降级路径
+    pub permission_denied: bool,
 }
 
 impl Failure {
@@ -17,6 +20,7 @@ impl Failure {
         Self {
             status,
             message: message.into(),
+            permission_denied: false,
         }
     }
 
@@ -41,7 +45,7 @@ fn trusted_desc(body: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-pub fn api_error(body: &Value) -> Failure {
+pub fn api_error(body: &Value, method: &str) -> Failure {
     let code = body
         .get("code")
         .map(|v| {
@@ -52,12 +56,17 @@ pub fn api_error(body: &Value) -> Failure {
         .filter(|code| code.len() <= 32 && code.bytes().all(|b| b.is_ascii_digit()))
         .unwrap_or_else(|| "未知".into());
     let hint = trusted_desc(body).unwrap_or_else(|| "请检查应用权限、媒体 ID 和推广位配置".into());
-    let hint = if hint.contains("权限") {
-        format!("{hint}（请在京东联盟开放平台为应用申请该 API 权限）")
+    let permission_denied = code == "403" && hint.contains("权限");
+    let hint = if permission_denied && method == GOODS {
+        "商品查询接口 jd.union.open.goods.query 无访问权限；关键词搜索需申请该 API 权限，热销榜选品不受影响；可清空关键词仅浏览热销榜".into()
+    } else if permission_denied {
+        format!("{hint}（请在京东联盟开放平台为应用申请该 API 权限：{method}）")
     } else {
         hint
     };
-    Failure::new(502, format!("京东接口拒绝请求（代码 {code}）：{hint}"))
+    let mut failure = Failure::new(502, format!("京东接口拒绝请求（代码 {code}）：{hint}"));
+    failure.permission_denied = permission_denied;
+    failure
 }
 
 pub fn code_is(body: &Value, expected: u64) -> bool {
@@ -68,56 +77,35 @@ pub fn code_is(body: &Value, expected: u64) -> bool {
 
 pub fn decode_result(body: Value, method: &str, key: &str) -> std::result::Result<Value, Failure> {
     if let Some(error) = body.get("error_response") {
-        return Err(api_error(error));
+        return Err(api_error(error, method));
     }
     let wrapper_key = format!("{}_responce", method.replace('.', "_"));
-    let wrapper = body
-        .get(&wrapper_key)
-        .or_else(|| body.get("jingfen_query_responce"))
-        .ok_or_else(|| {
-            if body.get("code").is_some() {
-                api_error(&body)
-            } else {
-                Failure::new(
-                    502,
-                    format!(
-                        "京东返回的数据格式异常（缺少 {}），请稍后重试",
-                        wrapper_key
-                    ),
-                )
-            }
-        })?;
-    if wrapper.get("code").is_some_and(|code| !code_is(wrapper, 0)) {
-        return Err(api_error(wrapper));
+    let wrapper = body.get(&wrapper_key).ok_or_else(|| {
+        if body.get("code").is_some() {
+            api_error(&body, method)
+        } else {
+            Failure::new(
+                502,
+                format!("京东返回的数据格式异常（缺少 {wrapper_key}），请稍后重试"),
+            )
+        }
+    })?;
+    if wrapper.get("code").is_some() && !code_is(wrapper, 0) {
+        return Err(api_error(wrapper, method));
     }
-    let result = wrapper
-        .get(key)
-        .or_else(|| wrapper.get("result"))
-        .or_else(|| wrapper.get("data"))
-        .ok_or_else(|| {
-            let keys: Vec<&str> = wrapper
-                .as_object()
-                .map(|obj| obj.keys().map(String::as_str).collect())
-                .unwrap_or_default();
-            Failure::new(
-                502,
-                format!("京东返回的数据格式异常（未找到 {}，实际字段：{:?}）", key, keys),
-            )
-        })?;
+    let result = wrapper.get(key).ok_or_else(|| {
+        Failure::new(
+            502,
+            format!("京东返回的数据格式异常（未找到 {key}），请稍后重试"),
+        )
+    })?;
     let result = match result.as_str() {
-        Some(text) => serde_json::from_str(text).map_err(|_| {
-            Failure::new(
-                502,
-                format!(
-                    "京东返回的数据格式异常（结果解析失败，前 200 字符：{}）",
-                    text.chars().take(200).collect::<String>()
-                ),
-            )
-        })?,
+        Some(text) => serde_json::from_str(text)
+            .map_err(|_| Failure::new(502, "京东返回的数据格式异常（结果解析失败），请稍后重试"))?,
         None => result.clone(),
     };
     if !code_is(&result, 200) {
-        return Err(api_error(&result));
+        return Err(api_error(&result, method));
     }
     Ok(result)
 }
