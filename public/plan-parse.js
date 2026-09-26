@@ -55,19 +55,17 @@
     if ((m = /(\d{1,3})\s*天[后後]/.exec(s))) return { text: m[0], date: plusDays(today, Number(m[1])) };
     if ((m = /今天|今晚/.exec(s))) return { text: m[0], date: plusDays(today, 0) };
     const week = startOfWeek(today);
-    if ((m = /下下?周([一二三四五六日天])/.exec(s))) {
-      const base = m[0].startsWith('下下') ? 14 : 7;
-      return { text: m[0], date: plusDays(week, base + WD[m[1]] - 1) };
-    }
-    if ((m = /[本这]周([一二三四五六日天])/.exec(s))) return { text: m[0], date: plusDays(week, WD[m[1]] - 1) };
     if ((m = /下周末/.exec(s))) return { text: m[0], date: plusDays(week, 12) };
-    if ((m = /[这本]?周末/.exec(s))) {
+    if ((m = /[本这]?周末/.exec(s))) {
       const sat = plusDays(week, 5);
       return { text: m[0], date: sat < today ? plusDays(sat, 7) : sat };
     }
-    if ((m = /周([一二三四五六日天])/.exec(s))) {
-      let d = plusDays(week, WD[m[1]] - 1);
-      if (d < today) d = plusDays(d, 7);
+    // 周X / 星期X / 礼拜X 同一套：「周」后可再叠「星期/礼拜」（下周星期天=下周日）；
+    // 前缀定基准周（本/这=本周、下=下周、下下=下下周），无前缀取本周、已过顺延
+    if ((m = /(下下|下|本|这)?(?:周(?:星期|礼拜)?|星期|礼拜)([一二三四五六日天])/.exec(s))) {
+      const base = m[1] === '下下' ? 14 : m[1] === '下' ? 7 : 0;
+      let d = plusDays(week, base + WD[m[2]] - 1);
+      if (!m[1] && d < today) d = plusDays(d, 7);
       return { text: m[0], date: d };
     }
     return null;

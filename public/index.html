@@ -192,6 +192,53 @@
           <button type="button" class="ghost-btn" id="airesult-close">知道了</button>
         </div>
       </div>
+      <form id="form-expression" class="modal-body hidden">
+        <h3 id="expression-title">怎么说</h3>
+        <p class="smart-hint">先想好怎么说，再到聊天工具发送；本页不会替你发送消息。</p>
+        <label>这次是什么场景
+          <select id="expression-scene">
+            <option value="日常问候">日常问候</option>
+            <option value="节日问候">节日问候</option>
+            <option value="生日">生日祝福</option>
+            <option value="感谢">表达感谢</option>
+            <option value="久未联系">久未联系</option>
+            <option value="回复对方">回复对方</option>
+            <option value="custom">自定义</option>
+          </select>
+        </label>
+        <label id="expression-custom-label" class="hidden">具体场景<input id="expression-custom" maxlength="40" placeholder="例如：中秋、教师节、祝贺升职"/></label>
+        <label>这次想表达什么（可选）<textarea id="expression-note" rows="2" maxlength="300" placeholder="例如：想问问搬家是否顺利，不要太客套"></textarea></label>
+        <div id="expression-cautions" class="expression-cautions" role="note"></div>
+        <button type="button" class="action-btn" id="expression-generate">让 AI 帮我起草</button>
+        <p id="expression-status" class="smart-hint" role="status" aria-live="polite"></p>
+        <details id="expression-ai" class="home-disclosure hidden">
+          <summary>AI 建议 · 尚未发送</summary>
+          <div id="expression-suggestion" class="airesult-body"></div>
+          <p class="smart-hint">当前回复可能仍在生成，可读取后续回复。核对依据，只保留正文，不要把分析说明一起发送。</p>
+          <button type="button" class="ghost-btn" id="expression-use">放入编辑区</button>
+          <button type="button" class="ghost-btn hidden" id="expression-read">读取后续回复</button>
+        </details>
+        <label class="expression-final-label">准备发送／实际发出的正文
+          <textarea id="expression-text" rows="5" maxlength="480" required placeholder="可直接手写，或粘贴并修改 AI 建议；确认时请与实际发出的内容保持一致"></textarea>
+        </label>
+        <p class="smart-hint">最多 480 字；关闭弹窗保留本页草稿，刷新页面会清空，未确认的草稿不会进入记忆。</p>
+        <button type="button" class="ghost-btn" id="expression-copy">复制正文</button>
+        <label>实际发送日期<input id="expression-date" type="date" required/></label>
+        <div class="modal-actions expression-actions">
+          <button type="button" class="ghost-btn" id="expression-close">暂不记录</button>
+          <button type="submit" class="primary-btn" id="expression-confirm">我已实际发送，记录下来</button>
+        </div>
+      </form>
+      <div id="form-source" class="modal-body hidden">
+        <h3>查看来源</h3>
+        <p id="source-status" class="smart-hint" role="status"></p>
+        <blockquote id="source-quote" class="source-quote hidden"></blockquote>
+        <div id="source-text" class="airesult-body hidden"></div>
+        <div class="modal-actions">
+          <button id="source-retry" type="button" class="ghost-btn hidden">重试读取</button>
+          <button id="source-close" type="button" class="ghost-btn">关闭</button>
+        </div>
+      </div>
       <form id="form-quick-memory" class="modal-body hidden">
         <button type="button" class="memory-mode-link" id="qm-back">返回原话输入</button>
         <h3>手动录入</h3>

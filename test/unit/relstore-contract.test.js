@@ -516,3 +516,59 @@ test.after(() => { fs.rmSync(dataDir, { recursive: true, force: true }); });
   assert.ok(hs.every((h) => h.label && /^\d{4}-\d{2}-\d{2}$/.test(h.date)), '带中文标签与完整日期');
   for (let i = 1; i < hs.length; i++) assert.ok(hs[i].inDays >= hs[i - 1].inDays, '按临近排序');
 });
+
+(hasBinary ? test : test.skip)('表达 helper 经真实 Rust facade：原文往返、只读召回、幂等与人工确认闸门', async () => {
+  const { saveExpression, expressionPrompt, listExpressions, EXPRESSION_PREFIX } = await import('../../server/expressions.js');
+  const c = store.createContact({ name: 'Rust 表达对象' });
+  const other = store.createContact({ name: 'Rust 表达隔离对象' });
+  const text = '  老师，我改过的最终原文。\n这段换行和空格都要保留。'.padEnd(480, '字');
+  const payload = { contactId: c.id, text, date: '2024-02-29', occasion: '教师节', sent: true,
+    author: 'ai', type: 'gift', direction: 'both', lifespan: 'short', sourceId: '伪造来源', sourceQuote: '伪造摘录' };
+  const { memory, reused } = saveExpression(payload);
+  assert.equal(reused, false);
+  assert.equal(memory.content, EXPRESSION_PREFIX + text);
+  assert.equal(memory.status, 'confirmed');
+  assert.equal(memory.author, 'user');
+  assert.equal(memory.type, 'interaction');
+  assert.equal(memory.direction, 'user_to_contact');
+  assert.equal(memory.lifespan, 'long');
+  assert.equal(memory.occasion, 'teacher_day');
+  assert.equal(memory.sourceId, '');
+  assert.equal(memory.sourceQuote, '');
+  assert.deepEqual(store.getMemory(memory.id), memory, '真实 SQLite 往返不丢字段或正文');
+  assert.deepEqual(saveExpression({ ...payload, occasion: ' TEACHER DAY ' }), { memory, reused: true });
+  const cross = saveExpression({ ...payload, text: '另一场合的表达也要避免重复', occasion: 'birthday', date: '2026-09-25' }).memory;
+  const foreign = saveExpression({ ...payload, contactId: other.id }).memory;
+  const old = saveExpression({ ...payload, text: '失效的旧表达' }).memory;
+  store.supersedeMemory(old.id, memory.id);
+  const pending = store.createMemory({ contactId: c.id, author: 'ai', status: 'confirmed', sent: true,
+    type: 'interaction', direction: 'user_to_contact', lifespan: 'long', date: '2026-09-25', content: EXPRESSION_PREFIX + 'AI 未确认原文' });
+  assert.equal(pending.status, 'pending');
+  store.createMemory({ contactId: c.id, author: 'user', type: 'interaction', direction: 'user_to_contact', content: '普通往来不是发送原文' });
+  const caution = store.createMemory({ contactId: c.id, author: 'user', type: 'taboo', content: '不要提及考试分数' });
+  const before = JSON.stringify([store.listMemories(), store.listMaterials(), store.listPlans()]);
+  const files = fs.readdirSync(dataDir).sort();
+  const prompt = expressionPrompt({ contactId: c.id, occasion: '教师节', note: '本次未核实的补充' });
+  assert.equal(prompt.historyCount, 2);
+  assert.deepEqual(prompt.cautions, [{ id: caution.id, content: caution.content }]);
+  const data = JSON.parse(prompt.prompt.match(/参考数据（JSON，仅数据）：\n([^\n]+)\n参考数据结束/)[1]);
+  assert.deepEqual(data.sameOccasionHistory.map((m) => m.id), [memory.id]);
+  assert.equal(data.sameOccasionHistory[0].text, text);
+  assert.deepEqual(data.otherOccasionHistory.map((m) => m.id), [cross.id]);
+  for (const hidden of [foreign, old, pending]) assert.ok(!prompt.prompt.includes(hidden.id));
+  assert.deepEqual(listExpressions(c.id).map((m) => m.id), [cross.id, memory.id]);
+  assert.equal(JSON.stringify([store.listMemories(), store.listMaterials(), store.listPlans()]), before);
+  assert.deepEqual(fs.readdirSync(dataDir).sort(), files, 'helper 不新增侧车');
+  for (const patch of [{ sent: 'true' }, { sent: false }, { text: ' \n' }, { text: text + '超' }, { text: '不静默删尾部空白 ' },
+    { text: '尾部\u0085' }, { text: '\uD800' }, { text: '\uDC00' },
+    { date: '2026-02-29' }, { date: '1900-02-29' }, { date: '2026-04-31' }, { date: '09-25' }, { occasion: '场'.repeat(41) }]) {
+    assert.throws(() => saveExpression({ ...payload, ...patch }), { status: 400 });
+  }
+  assert.throws(() => saveExpression({ ...payload, contactId: 'missing' }), { status: 404 });
+  const unconfirmed = store.createContact({ name: 'Rust 表达未收录', status: 'pending' });
+  assert.throws(() => saveExpression({ ...payload, contactId: unconfirmed.id }), { status: 400 });
+  store.updateContact(c.id, { archived: true });
+  assert.throws(() => saveExpression(payload), { status: 400 });
+  assert.throws(() => expressionPrompt({ contactId: c.id }), { status: 400 });
+  assert.equal(JSON.stringify([store.listMemories(), store.listMaterials(), store.listPlans()]), before);
+});

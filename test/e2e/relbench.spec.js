@@ -79,10 +79,12 @@ test.describe('关系记忆工作台', () => {
     await memoryCard.getByRole('button', { name: '确认', exact: true }).click();
     await expect(page.locator('#recent-list')).toContainText('对花生过敏');
     await page.locator('.recent-row', { hasText: '对花生过敏' }).click();
-    const briefing = page.waitForResponse((r) => r.url().endsWith('/api/briefing') && r.request().method() === 'POST');
     await page.locator('#contact-detail [data-action="briefing-open"]').click();
+    await expect(page.locator('#expression-cautions')).toContainText('对花生过敏');
+    const briefing = page.waitForResponse((r) => r.url().endsWith('/api/expressions/prompt') && r.request().method() === 'POST');
+    await page.locator('#expression-generate').click();
     expect((await (await briefing).json()).prompt).toContain('对花生过敏');
-    await expect(page.locator('#toast')).toContainText('指令已复制');
+    await expect(page.locator('#expression-status')).toContainText('起草指令已复制');
     expect(errors).toEqual([]);
   });
 
@@ -766,10 +768,13 @@ test.describe('关系记忆工作台', () => {
     expect((await (await request.get('/api/plans')).json()).plans.length).toBe(plansBefore);
     const greeting = group.locator('[data-action="attention-ai"]').first();
     const greetingId = await greeting.getAttribute('data-id');
-    const greetingRequest = page.waitForRequest((r) => r.url().endsWith('/api/briefing') && r.method() === 'POST');
     await greeting.click();
+    await expect(page.locator('#expression-custom')).toHaveValue('birthday');
+    const greetingRequest = page.waitForRequest((r) => r.url().endsWith('/api/expressions/prompt') && r.method() === 'POST');
+    await page.locator('#expression-generate').click();
     expect((await greetingRequest).postDataJSON()).toMatchObject({ contactId: greetingId, occasion: 'birthday' });
-    await expect(page.locator('#toast')).toContainText('已复制');
+    await expect(page.locator('#expression-status')).toContainText('已复制');
+    await page.locator('#expression-close').click();
     await group.locator(`.attention-card[data-id="${greetingId}"] [data-action="plan-open"]`).click();
     await expect(page.locator('#plan-contact')).toHaveValue(greetingId);
     await expect(page.locator('#plan-occasion')).toHaveValue('birthday');
@@ -1494,5 +1499,476 @@ test.describe('关系记忆工作台', () => {
     await page.locator('#safety-close').click();
     await expect(page.locator('#form-safety')).not.toBeVisible();
     expect(errors).toEqual([]);
+  });
+
+  test.describe('表达与来源回归', () => {
+    test.beforeEach(async ({ baseURL }) => {
+      expect(baseURL, '只允许访问隔离的 Playwright 服务').toMatch(/^http:\/\/127\.0\.0\.1:891[12]$/);
+    });
+
+    const post = async (request, url, data) => {
+      const response = await request.post(url, { data });
+      expect(response.ok(), `${url}: ${await response.text()}`).toBeTruthy();
+      return response.json();
+    };
+    const memoriesOf = async (request, contactId) => {
+      const response = await request.get(`/api/memories?contact_id=${contactId}`);
+      expect(response.ok()).toBeTruthy();
+      return (await response.json()).memories;
+    };
+    const openContact = async (page, contact) => {
+      await page.locator('.nav-item[data-view="contacts"]').click();
+      await page.locator(`.contact-row[data-id="${contact.id}"]`).click();
+      await expect(page.locator('#contact-detail h2')).toHaveText(contact.name);
+    };
+
+    test('表达闭环：独立起草、复制、取消均不写库，最终发送进入历史供下次参考并可删除', async ({ page, request, context }) => {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+      const { contact } = await post(request, '/api/contacts', { name: 'E2E 表达闭环' });
+      const draft = '旧草稿标记：下次一起旅行吧。';
+      const text = '  最近搬家还顺利吗？\n有空一起喝茶，不用急着回复。';
+      const occasion = '搬家问候';
+      const date = '2026-09-10';
+      const writes = [];
+      page.on('request', (req) => {
+        if (req.url().endsWith('/api/expressions') && req.method() === 'POST') writes.push(req.postDataJSON());
+      });
+      await page.goto('/');
+      await openContact(page, contact);
+      const trigger = page.locator('#contact-detail [data-action="briefing-open"]');
+      await trigger.click();
+      await expect(page.locator('#expression-status')).toContainText('独立模式');
+      await page.locator('#expression-scene').selectOption('custom');
+      await page.locator('#expression-custom').fill(occasion);
+      await page.locator('#expression-note').fill('自然一点，不要太客套');
+      await page.locator('#expression-date').fill(date);
+      const firstPrompt = page.waitForResponse((res) => res.url().endsWith('/api/expressions/prompt') && res.request().method() === 'POST');
+      await page.locator('#expression-generate').click();
+      const initial = await (await firstPrompt).json();
+      expect(initial.historyCount).toBe(0);
+      await expect(page.locator('#expression-status')).toContainText('起草指令已复制');
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(initial.prompt);
+      expect(await memoriesOf(request, contact.id)).toEqual([]);
+      // 独立模式需从 DSH 粘贴草稿；生成与复制均不能冒充实际发送。
+      await page.locator('#expression-text').fill(draft);
+      await page.locator('#expression-copy').click();
+      await expect(page.locator('#expression-status')).toContainText('尚未记录发送');
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(draft);
+      expect(await memoriesOf(request, contact.id)).toEqual([]);
+      await page.locator('#expression-text').fill(text);
+      await page.locator('#expression-copy').click();
+      await expect(page.locator('#expression-status')).toContainText('正文已复制');
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(text);
+      await page.locator('#expression-close').click();
+      await trigger.click();
+      await expect(page.locator('#expression-text')).toHaveValue(text);
+      await expect(page.locator('#expression-scene')).toHaveValue('custom');
+      await expect(page.locator('#expression-custom')).toHaveValue(occasion);
+      await expect(page.locator('#expression-note')).toHaveValue('自然一点，不要太客套');
+      await expect(page.locator('#expression-date')).toHaveValue(date);
+      await page.locator('#expression-confirm').click();
+      await expect(page.locator('#rel-dialog')).toContainText('实际发给');
+      await expect(page.locator('#rel-dialog .modal-body > p')).toHaveJSProperty('textContent', `确认你已于 ${date} 将以下内容实际发给「${contact.name}」？\n场景：${occasion}\n\n${text}\n\n这里只记录你确认的事实，不会代发消息。`);
+      expect(writes).toEqual([]);
+      expect(await memoriesOf(request, contact.id)).toEqual([]);
+      await page.locator('#rel-dialog-cancel').click();
+      await expect(page.locator('#expression-text')).toHaveValue(text);
+      expect(await memoriesOf(request, contact.id)).toEqual([]);
+      await page.locator('#expression-confirm').click();
+      await expect(page.locator('#rel-dialog')).toBeVisible();
+      expect(writes).toEqual([]);
+      const savedResponse = page.waitForResponse((res) => res.url().endsWith('/api/expressions') && res.request().method() === 'POST');
+      await page.locator('#rel-dialog-ok').click();
+      const saved = await (await savedResponse).json();
+      expect(saved.ok).toBe(true);
+      expect(saved.reused).toBe(false);
+      await expect(page.locator('#form-expression')).toBeHidden();
+      expect(writes).toEqual([{ contactId: contact.id, occasion, text, date, sent: true }]);
+      const memories = await memoriesOf(request, contact.id);
+      expect(memories).toHaveLength(1);
+      expect(memories[0]).toMatchObject({ id: saved.memory.id, status: 'confirmed', author: 'user', type: 'interaction', direction: 'user_to_contact', lifespan: 'long', date, occasion, content: `已发送表达：\n${text}` });
+      const history = page.locator('#contact-detail .expression-history');
+      await expect(history.locator('summary')).toContainText('1 条');
+      await history.locator('summary').click();
+      const entry = history.locator(`[data-expression="${saved.memory.id}"]`);
+      await expect(entry.locator('blockquote')).toHaveJSProperty('textContent', text);
+      await expect(entry).toContainText('已确认发送');
+      await expect(history).not.toContainText(draft);
+      await trigger.click();
+      await expect(page.locator('#expression-text')).toHaveValue('');
+      await page.locator('#expression-scene').selectOption('custom');
+      await page.locator('#expression-custom').fill(occasion);
+      const nextPrompt = page.waitForResponse((res) => res.url().endsWith('/api/expressions/prompt') && res.request().method() === 'POST');
+      await page.locator('#expression-generate').click();
+      const next = await (await nextPrompt).json();
+      expect(next.historyCount).toBe(1);
+      // prompt 用 JSON 承载原文，换行须按 JSON 转义检查，不能只断言摘要。
+      expect(next.prompt).toContain(JSON.stringify(text));
+      expect(next.prompt).not.toContain(draft);
+      await expect(page.locator('#expression-status')).toContainText('已参考 1 条历史表达');
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(next.prompt);
+      await page.locator('#expression-close').click();
+      await entry.getByRole('button', { name: '删除记录', exact: true }).click();
+      await expect(page.locator('#rel-dialog')).toBeVisible();
+      await page.locator('#rel-dialog-ok').click();
+      await expect(history.locator('.expression-entry')).toHaveCount(0);
+      await expect(history.locator('summary')).toContainText('0 条');
+      expect(await memoriesOf(request, contact.id)).toEqual([]);
+      const timeline = await (await request.get(`/api/contacts/${contact.id}/timeline`)).json();
+      expect(timeline.expressions).toEqual([]);
+    });
+
+    test('表达重试：起草和正文复制失败保留输入，POST 已保存后丢响应重试幂等', async ({ page, request }) => {
+      await page.addInitScript(() => {
+        window.failExpressionCopy = true;
+        window.expressionCopies = [];
+        Object.defineProperty(navigator.clipboard, 'writeText', { configurable: true, value: async (text) => {
+          if (window.failExpressionCopy) { window.failExpressionCopy = false; throw new Error('E2E clipboard denied'); }
+          window.expressionCopies.push(text);
+        } });
+      });
+      const { contact } = await post(request, '/api/contacts', { name: 'E2E 表达重试' });
+      const text = '  谢谢你寄来的书。\n读完再和你聊聊。';
+      await page.goto('/');
+      await openContact(page, contact);
+      await page.locator('#contact-detail [data-action="briefing-open"]').click();
+      await page.locator('#expression-scene').selectOption('感谢');
+      await page.locator('#expression-note').fill('简短自然');
+      await page.locator('#expression-date').fill('2026-09-11');
+      await page.locator('#expression-text').fill(text);
+      await page.locator('#expression-generate').click();
+      await expect(page.locator('#expression-status')).toContainText('起草未完成，输入已保留，可重试');
+      await expect(page.locator('#expression-generate')).toBeEnabled();
+      await expect(page.locator('#expression-text')).toHaveValue(text);
+      await expect(page.locator('#expression-note')).toHaveValue('简短自然');
+      expect(await memoriesOf(request, contact.id)).toEqual([]);
+      await page.locator('#expression-generate').click();
+      await expect(page.locator('#expression-status')).toContainText('起草指令已复制');
+      await page.evaluate(() => { window.failExpressionCopy = true; });
+      await page.locator('#expression-copy').click();
+      await expect(page.locator('#expression-status')).toContainText('复制失败，正文已保留');
+      await expect(page.locator('#expression-text')).toHaveValue(text);
+      await page.locator('#expression-copy').click();
+      await expect(page.locator('#expression-status')).toContainText('正文已复制');
+      expect(await page.evaluate(() => window.expressionCopies)).toEqual([expect.stringContaining(contact.id), text]);
+      expect(await memoriesOf(request, contact.id)).toEqual([]);
+      let persisted;
+      const writes = [];
+      page.on('request', (req) => {
+        if (req.url().endsWith('/api/expressions') && req.method() === 'POST') writes.push(req.postDataJSON());
+      });
+      await page.route('**/api/expressions', async (route) => {
+        const response = await route.fetch();
+        expect(response.ok()).toBeTruthy();
+        persisted = await response.json();
+        // 服务端真实落库后才丢弃响应，不能用请求发出前 abort 冒充此故障。
+        await route.abort('failed');
+      }, { times: 1 });
+      await page.locator('#expression-confirm').click();
+      await page.locator('#rel-dialog-ok').click();
+      await expect(page.locator('#expression-status')).toContainText('记录失败，正文已保留，可重试');
+      await expect(page.locator('#expression-confirm')).toBeEnabled();
+      await expect(page.locator('#expression-text')).toHaveValue(text);
+      await expect(page.locator('#expression-scene')).toHaveValue('感谢');
+      await expect(page.locator('#expression-note')).toHaveValue('简短自然');
+      await expect(page.locator('#expression-date')).toHaveValue('2026-09-11');
+      expect(persisted.ok).toBe(true);
+      expect(persisted.reused).toBe(false);
+      const beforeRetry = await memoriesOf(request, contact.id);
+      expect(beforeRetry).toHaveLength(1);
+      expect(beforeRetry[0]).toMatchObject({ id: persisted.memory.id, status: 'confirmed', content: `已发送表达：\n${text}` });
+      await page.locator('#expression-confirm').click();
+      await expect(page.locator('#rel-dialog')).toBeVisible();
+      const retriedResponse = page.waitForResponse((res) => res.url().endsWith('/api/expressions') && res.request().method() === 'POST');
+      await page.locator('#rel-dialog-ok').click();
+      const retried = await (await retriedResponse).json();
+      expect(retried).toMatchObject({ ok: true, reused: true, memory: { id: persisted.memory.id } });
+      await expect(page.locator('#form-expression')).toBeHidden();
+      expect(writes).toHaveLength(2);
+      expect(writes[1]).toEqual(writes[0]);
+      expect(await memoriesOf(request, contact.id)).toEqual(beforeRetry);
+      const history = page.locator('#contact-detail .expression-history');
+      await expect(history.locator('summary')).toContainText('1 条');
+      await history.locator('summary').click();
+      await expect(history.locator('.expression-entry')).toHaveCount(1);
+      await expect(history.locator('blockquote')).toHaveJSProperty('textContent', text);
+    });
+
+    test('来源查看：pending、confirmed、仅摘录和 shortItem 均可核对，XSS 只作为文字', async ({ page, request }) => {
+      await page.addInitScript(() => { window.sourceXss = 0; });
+      const { contact } = await post(request, '/api/contacts', { name: 'E2E 来源入口' });
+      const quote = '<img src=x onerror="window.sourceXss=1">喜欢清淡饮食';
+      const shortQuote = '明天下午借书';
+      const quoteOnly = '仅有摘录：<svg onload="window.sourceXss=2"></svg>';
+      const text = `2026-09-10 20:30 原始对话：\n${quote}\n${shortQuote}\n<script>window.sourceXss=3</script>`;
+      const { material } = await post(request, '/api/materials', { contactId: contact.id, text });
+      const { memory: pending } = await post(request, '/api/tools', { name: 'memory_add', args: { contactId: contact.id, type: 'preference', content: '喜欢清淡饮食', sourceId: material.id, sourceQuote: quote, saidAt: '2026-09-10 20:30' } });
+      const { memory: short } = await post(request, '/api/memories', { contactId: contact.id, type: 'event', content: shortQuote, lifespan: 'short', sourceId: material.id, sourceQuote: shortQuote });
+      const { memory: only } = await post(request, '/api/memories', { contactId: contact.id, type: 'attribute', content: '只有原话摘录的记录', sourceQuote: quoteOnly });
+      const before = await memoriesOf(request, contact.id);
+      const sourceReads = [];
+      page.on('request', (req) => {
+        if (/\/api\/materials\/[^/?]+$/.test(req.url())) sourceReads.push(req.url());
+      });
+      const expectSource = async (sourceQuote) => {
+        await expect(page.locator('#form-source')).toBeVisible();
+        await expect(page.locator('#source-text')).toHaveJSProperty('textContent', text);
+        await expect(page.locator('#source-quote')).toHaveJSProperty('textContent', sourceQuote);
+        await expect(page.locator('#source-status')).toContainText('素材包含未确认内容，不等于全部是事实');
+        await expect(page.locator('#form-source img, #form-source script, #form-source svg')).toHaveCount(0);
+        expect(await page.evaluate(() => window.sourceXss)).toBe(0);
+        await page.locator('#source-close').click();
+      };
+      await page.goto('/');
+      const card = page.locator(`.pending-card[data-id="${pending.id}"]`);
+      await expect(card.locator('blockquote')).toHaveJSProperty('textContent', `原话：${quote}`);
+      await expect(card.locator('img')).toHaveCount(0);
+      await card.getByRole('button', { name: '查看来源', exact: true }).click();
+      await expectSource(quote);
+      expect(await memoriesOf(request, contact.id)).toEqual(before);
+      await card.getByRole('button', { name: '确认', exact: true }).click();
+      await expect(card).toHaveCount(0);
+      await openContact(page, contact);
+      const confirmed = await memoriesOf(request, contact.id);
+      expect(confirmed.find((memory) => memory.id === pending.id).status).toBe('confirmed');
+      await page.locator(`.memory-row[data-id="${pending.id}"]`).getByRole('button', { name: '查看来源', exact: true }).click();
+      await expect(page.locator('#source-status')).toContainText('原话讲于 2026-09-10 20:30');
+      await expectSource(quote);
+      const readsBeforeQuote = sourceReads.length;
+      await page.locator(`.memory-row[data-id="${only.id}"]`).getByRole('button', { name: '查看来源', exact: true }).click();
+      await expect(page.locator('#source-status')).toContainText('仅保留了原话摘录，未关联原始素材');
+      await expect(page.locator('#source-quote')).toHaveJSProperty('textContent', quoteOnly);
+      await expect(page.locator('#source-text')).toBeHidden();
+      await expect(page.locator('#source-retry')).toBeHidden();
+      await expect(page.locator('#form-source svg')).toHaveCount(0);
+      expect(await page.evaluate(() => window.sourceXss)).toBe(0);
+      expect(sourceReads).toHaveLength(readsBeforeQuote);
+      await page.locator('#source-close').click();
+      const shortRow = page.locator(`.short-section .short-row[data-id="${short.id}"]`);
+      await expect(shortRow).toContainText('临时');
+      await expect(shortRow.getByRole('button', { name: '查看来源', exact: true })).toBeVisible();
+      await shortRow.getByRole('button', { name: '查看来源', exact: true }).click();
+      await expectSource(shortQuote);
+      expect(await memoriesOf(request, contact.id)).toEqual(confirmed);
+    });
+
+    test('来源查看失败：源 404 保留摘录，网络失败可重试且不改变记忆', async ({ page, request }) => {
+      const { contact } = await post(request, '/api/contacts', { name: 'E2E 来源失败' });
+      const { material: deleted } = await post(request, '/api/materials', { text: '来源将删除，摘录仍保留' });
+      const { material: available } = await post(request, '/api/materials', { text: '网络恢复后应显示的完整原始素材' });
+      const { memory: missing } = await post(request, '/api/memories', { contactId: contact.id, type: 'event', content: '已确认但来源被删除', sourceId: deleted.id, sourceQuote: '摘录仍保留' });
+      const { memory: retry } = await post(request, '/api/memories', { contactId: contact.id, type: 'event', content: '可重试的来源', sourceId: available.id, sourceQuote: '完整原始素材' });
+      expect((await request.delete(`/api/materials/${deleted.id}`)).ok()).toBe(true);
+      const before = await memoriesOf(request, contact.id);
+      await page.goto('/');
+      await openContact(page, contact);
+      await page.locator(`.memory-row[data-id="${missing.id}"]`).getByRole('button', { name: '查看来源', exact: true }).click();
+      await expect(page.locator('#source-status')).toContainText('原始素材已删除或不存在');
+      await expect(page.locator('#source-quote')).toHaveText('摘录仍保留');
+      await expect(page.locator('#source-text')).toBeHidden();
+      await expect(page.locator('#source-retry')).toBeHidden();
+      await page.locator('#source-close').click();
+      await page.route(`**/api/materials/${available.id}`, (route) => route.abort('failed'), { times: 1 });
+      await page.locator(`.memory-row[data-id="${retry.id}"]`).getByRole('button', { name: '查看来源', exact: true }).click();
+      await expect(page.locator('#source-status')).toContainText('读取失败，未改变记忆');
+      await expect(page.locator('#source-quote')).toHaveText('完整原始素材');
+      await expect(page.locator('#source-text')).toBeHidden();
+      await page.getByRole('button', { name: '重试读取', exact: true }).click();
+      await expect(page.locator('#source-text')).toHaveText('网络恢复后应显示的完整原始素材');
+      await expect(page.locator('#source-text')).toBeVisible();
+      await expect(page.locator('#source-retry')).toBeHidden();
+      await expect(page.locator('#source-status')).toContainText('原始素材 · 保存于');
+      expect(await memoriesOf(request, contact.id)).toEqual(before);
+    });
+
+    test('来源查看竞态：延迟旧请求的成功或失败不能覆盖新来源弹窗', async ({ page, request }) => {
+      const { contact } = await post(request, '/api/contacts', { name: 'E2E 来源竞态' });
+      const sources = [];
+      for (const label of ['旧', '新']) {
+        const text = `${label}来源的完整原始素材`;
+        const { material } = await post(request, '/api/materials', { text });
+        const { memory } = await post(request, '/api/memories', { contactId: contact.id, type: 'event', content: `${label}来源记忆`, sourceId: material.id, sourceQuote: `${label}来源摘录` });
+        sources.push({ material, memory, text });
+      }
+      await page.goto('/');
+      await openContact(page, contact);
+      const [old, current] = sources;
+      for (const fail of [false, true]) {
+        let releaseSource;
+        let sourceStarted;
+        const release = new Promise((resolve) => { releaseSource = resolve; });
+        const started = new Promise((resolve) => { sourceStarted = resolve; });
+        await page.route(`**/api/materials/${old.material.id}`, async (route) => {
+          const response = await route.fetch();
+          sourceStarted();
+          await release;
+          if (fail) await route.abort('failed');
+          else await route.fulfill({ response });
+        }, { times: 1 });
+        try {
+          await page.locator(`.memory-row[data-id="${old.memory.id}"]`).getByRole('button', { name: '查看来源', exact: true }).click();
+          await started;
+          await expect(page.locator('#source-status')).toContainText('正在读取');
+          await page.locator('#source-close').click();
+          await page.locator(`.memory-row[data-id="${current.memory.id}"]`).getByRole('button', { name: '查看来源', exact: true }).click();
+          await expect(page.locator('#source-text')).toHaveText(current.text);
+          const currentStatus = await page.locator('#source-status').textContent();
+          const settled = page.waitForEvent(fail ? 'requestfailed' : 'requestfinished', (req) => req.url().endsWith(`/api/materials/${old.material.id}`));
+          releaseSource();
+          await settled;
+          // 等到浏览器处理迟到响应后的绘制帧，再检查不变量，避免提前断言假通过。
+          await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+          await expect(page.locator('#form-source')).toBeVisible();
+          await expect(page.locator('#source-text')).toHaveText(current.text);
+          await expect(page.locator('#source-quote')).toHaveText(current.memory.sourceQuote);
+          await expect(page.locator('#source-status')).toHaveText(currentStatus);
+          await expect(page.locator('#source-retry')).toBeHidden();
+          await page.locator('#source-close').click();
+        } finally { releaseSource(); }
+      }
+    });
+
+    test('表达表单：窄屏、键盘、输入边界与编辑时仍读取相处注意', async ({ page, request }) => {
+      const errors = [];
+      page.on('pageerror', (error) => errors.push(error.message));
+      await page.setViewportSize({ width: 375, height: 812 });
+      const { contact } = await post(request, '/api/contacts', { name: 'E2E 表达窄屏' });
+      await post(request, '/api/memories', { contactId: contact.id, type: 'taboo', content: '不要提及体重' });
+      await page.goto('/');
+      await openContact(page, contact);
+      let releaseCautions;
+      const release = new Promise((resolve) => { releaseCautions = resolve; });
+      await page.route(`**/api/contacts/${contact.id}/timeline`, async (route) => {
+        const response = await route.fetch();
+        await release;
+        await route.fulfill({ response });
+      }, { times: 1 });
+      try {
+        await page.locator('#contact-detail [data-action="briefing-open"]').click();
+        await expect(page.locator('#expression-scene')).toBeFocused();
+        await page.locator('#expression-note').fill('简单问候');
+        releaseCautions();
+        await expect(page.locator('#expression-cautions')).toContainText('不要提及体重');
+        await page.locator('#expression-scene').selectOption('custom');
+        let promptCount = 0;
+        page.on('request', (req) => { if (req.url().endsWith('/api/expressions/prompt')) promptCount++; });
+        await page.locator('#expression-generate').click();
+        await expect(page.locator('#expression-custom')).toBeFocused();
+        expect(promptCount).toBe(0);
+        await page.locator('#expression-custom').fill('近况');
+        await page.locator('#expression-text').fill('   ');
+        await page.locator('#expression-confirm').click();
+        await expect(page.locator('#expression-text')).toBeFocused();
+        await expect(page.locator('#rel-dialog')).toBeHidden();
+        await page.locator('#expression-text').fill('不能静默改写尾部空白 ');
+        await page.locator('#expression-confirm').click();
+        await expect(page.locator('#expression-status')).toContainText('正文末尾有空白');
+        await expect(page.locator('#expression-text')).toHaveValue('不能静默改写尾部空白 ');
+        await expect(page.locator('#rel-dialog')).toBeHidden();
+        await page.locator('#expression-text').fill('文'.repeat(480));
+        await page.locator('#expression-text').press('End');
+        await page.locator('#expression-text').pressSequentially('X');
+        expect((await page.locator('#expression-text').inputValue()).length).toBe(480);
+        const geometry = await page.evaluate(() => {
+          const form = document.querySelector('#form-expression');
+          const scene = document.querySelector('#expression-scene');
+          return { width: form.clientWidth, scrollWidth: form.scrollWidth, sceneHeight: scene.getBoundingClientRect().height,
+            dateHeight: document.querySelector('#expression-date').getBoundingClientRect().height, arrow: getComputedStyle(scene).backgroundImage };
+        });
+        expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.width);
+        expect(geometry.sceneHeight).toBeGreaterThanOrEqual(36);
+        expect(Math.abs(geometry.sceneHeight - geometry.dateHeight)).toBeLessThanOrEqual(2);
+        expect(geometry.arrow).not.toBe('none');
+        await page.locator('#expression-text').fill('键盘关闭后仍保留正文');
+        await page.keyboard.press('Escape');
+        await expect(page.locator('#form-expression')).toBeHidden();
+        await page.locator('#contact-detail [data-action="briefing-open"]').click();
+        await expect(page.locator('#expression-text')).toHaveValue('键盘关闭后仍保留正文');
+        expect((await memoriesOf(request, contact.id)).filter((m) => m.type === 'interaction')).toEqual([]);
+        expect(errors).toEqual([]);
+      } finally { releaseCautions(); }
+    });
+
+    test('表达模拟宿主：独立会话读取后续回复，保留手写正文并隔离迟到结果', async ({ page, request }) => {
+      const errors = [];
+      page.on('pageerror', (error) => errors.push(error.message));
+      const { contact: first } = await post(request, '/api/contacts', { name: 'E2E 表达宿主甲' });
+      const { contact: second } = await post(request, '/api/contacts', { name: 'E2E 表达宿主乙' });
+      let count = 0;
+      const replies = new Map();
+      const accepted = [];
+      let releaseLate;
+      let lateStarted;
+      const late = new Promise((resolve) => { lateStarted = resolve; });
+      await page.route('**/api/dsh-relationship/workbench/**', async (route) => {
+        const url = new URL(route.request().url());
+        url.pathname = url.pathname.replace('/api/dsh-relationship/workbench', '');
+        if (url.pathname === '/api/events') { await route.abort(); return; }
+        await route.fulfill({ response: await route.fetch({ url: url.toString() }) });
+      });
+      await page.route('**/api/session/*', async (route) => {
+        const body = route.request().postDataJSON();
+        let value = {};
+        if (body.method === 'session/create') value = { sessionId: `expression-${++count}` };
+        if (body.method === 'session/prompt') {
+          const sent = body.payload.args.request;
+          accepted.push(sent);
+          replies.set(sent.sessionId, [{ seq: 1, text: '模拟建议：谢谢你分享近况。' }]);
+        }
+        await route.fulfill({ json: { rpcId: body.rpcId, result: { ok: true, value } } });
+      });
+      await page.route('**/api/agentPresets/list', (route) => route.fulfill({ json: { result: { ok: true, value: { items: [{ id: 'relationship' }] } } } }));
+      await page.routeWebSocket('**/api/remote.mux', (socket) => socket.onMessage((message) => {
+        const { streamId, payload } = JSON.parse(message);
+        const sessionId = payload.args.request.address.sessionId;
+        const records = (replies.get(sessionId) || []).map(({ seq, text }) => ({ event: { seq, type: 'assistant/message', data: { message: { content: [{ type: 'text', text }] } } } }));
+        const send = () => socket.send(JSON.stringify({ streamId, type: 'item', value: { type: 'snapshot', records } }));
+        if (sessionId === 'expression-2' && records.length) { releaseLate = send; lateStarted(); }
+        else send();
+      }));
+      await page.goto('/api/dsh-relationship/workbench/');
+      await openContact(page, first);
+      await page.locator('#contact-detail [data-action="briefing-open"]').click();
+      await page.locator('#expression-generate').click();
+      await page.locator('#expression-text').fill('正在手写，不可覆盖');
+      await expect(page.locator('#expression-suggestion')).toContainText('模拟建议');
+      await expect(page.locator('#expression-text')).toHaveValue('正在手写，不可覆盖');
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0].sessionId).toBe('expression-1');
+      expect(accepted[0].content[0].text).toContain(first.id);
+      replies.set('expression-1', [{ seq: 2, text: '较长建议'.repeat(130) }]);
+      await page.locator('#expression-read').click();
+      await expect(page.locator('#expression-status')).toContainText('已更新当前回复');
+      await page.locator('#expression-use').click();
+      await expect(page.locator('#expression-status')).toContainText('不会截断内容');
+      await expect(page.locator('#expression-text')).toHaveValue('正在手写，不可覆盖');
+      replies.set('expression-1', [{ seq: 3, text: '更新后的完整模拟正文' }]);
+      await page.locator('#expression-read').click();
+      await expect(page.locator('#expression-suggestion')).toHaveText('更新后的完整模拟正文');
+      await page.locator('#expression-use').click();
+      await page.locator('#rel-dialog-cancel').click();
+      await expect(page.locator('#expression-text')).toHaveValue('正在手写，不可覆盖');
+      await page.locator('#expression-use').click();
+      await page.locator('#rel-dialog-ok').click();
+      await expect(page.locator('#expression-text')).toHaveValue('更新后的完整模拟正文');
+      expect(await memoriesOf(request, first.id)).toEqual([]);
+      await page.locator('#expression-generate').click();
+      await late;
+      await page.locator('#expression-close').click();
+      await openContact(page, second);
+      await page.locator('#contact-detail [data-action="briefing-open"]').click();
+      await page.locator('#expression-text').fill('乙的草稿不能接收甲的回复');
+      releaseLate();
+      await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+      await expect(page.locator('#expression-title')).toContainText(second.name);
+      await expect(page.locator('#expression-text')).toHaveValue('乙的草稿不能接收甲的回复');
+      await expect(page.locator('#expression-ai')).toBeHidden();
+      await expect(page.locator('#expression-generate')).toBeEnabled();
+      expect(count).toBe(2);
+      expect(accepted.map((item) => item.sessionId)).toEqual(['expression-1', 'expression-2']);
+      expect(await memoriesOf(request, first.id)).toEqual([]);
+      expect(await memoriesOf(request, second.id)).toEqual([]);
+      expect(errors).toEqual([]);
+    });
   });
 });

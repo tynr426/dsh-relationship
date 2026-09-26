@@ -11,6 +11,7 @@ import { searchCachedMemoryVectors } from './memory-vectors.js';
 import { occasionKey, occasionLabel, deriveOccasions } from './occasions.js';
 import { handleSafetyRequest } from './safety-routes.js';
 import { requiresDataRecovery } from './data-safety.js';
+import { expressionPrompt, listExpressions, saveExpression } from './expressions.js';
 
 let activeMutations = 0;
 let dataGeneration = 0;
@@ -186,7 +187,7 @@ async function api(req, res, url, body) {
       const t = store.timeline(parts[2]);
       const c = store.getContact(parts[2]);
       // 见面简报事实卡搭 timeline 的车：打开联系人即到，SSE 刷新自动更新
-      ok(res, c ? { ...t, briefing: briefingFacts(c) } : t);
+      ok(res, { ...t, ...(c ? { briefing: briefingFacts(c) } : {}), expressions: listExpressions(parts[2]) });
     } catch (e) { failFrom(res, e); }
     return true;
   }
@@ -198,6 +199,24 @@ async function api(req, res, url, body) {
       const limit = Math.min(Math.max(Number(url.searchParams.get('limit')) || 20, 1), 50);
       const memories = store.listMemories({ contactId: parts[2], status: 'confirmed' }).filter((x) => !x.supersededBy);
       ok(res, { contact: publicContact(contact), query, memories: searchCachedMemoryVectors(memories, query, { limit }) });
+    } catch (e) { failFrom(res, e); }
+    return true;
+  }
+
+  // ---------- 表达：草稿只读，实际已发送由用户明确确认 ----------
+  if (p === '/api/expressions/prompt' && m('POST')) {
+    try { ok(res, expressionPrompt(body)); }
+    catch (e) { failFrom(res, e); }
+    return true;
+  }
+  if (p === '/api/expressions' && m('POST')) {
+    try {
+      const result = saveExpression(body);
+      if (!result.reused) {
+        broadcast('memory.changed', { action: 'created', memory: result.memory });
+        emitStats();
+      }
+      ok(res, result);
     } catch (e) { failFrom(res, e); }
     return true;
   }

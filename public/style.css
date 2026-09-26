@@ -143,7 +143,7 @@ select {
 .source-quote { margin: 2px 0 6px; padding: 5px 10px; border-left: 3px solid var(--accent-weak); border-radius: 4px; background: var(--bg-base); color: var(--label-2); font-size: 12px; overflow-wrap: anywhere; }
 .edit-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; margin-top: 8px; }
 .edit-grid label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--label-2); }
-.edit-grid select, .edit-grid input { background: var(--bg-panel); }
+.edit-grid select, .edit-grid input { background-color: var(--bg-panel); }
 
 /* ---------- 首页 ---------- */
 .opportunity-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
@@ -266,8 +266,20 @@ summary:focus-visible, .recent-row:focus-visible, .att-actions button:focus-visi
 .modal-body { padding: 18px; display: flex; flex-direction: column; gap: 10px; }
 .modal-body h3 { margin: 0 0 4px; font-size: 16px; }
 .modal-body label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--label-2); }
-.modal-body input, .modal-body select { background: var(--bg-base); }
+.modal-body input, .modal-body select { background-color: var(--bg-base); }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+#form-expression textarea { width: 100%; min-width: 0; resize: vertical; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-base); font: inherit; color: var(--label); }
+#form-expression .expression-final-label { color: var(--label); font-size: 15px; font-weight: 600; }
+#form-expression #expression-text { border-color: var(--accent); background-color: var(--accent-weak); }
+#form-expression input, #form-expression select { min-width: 0; width: 100%; }
+.expression-actions { flex-wrap: wrap; }
+.expression-cautions:not(:empty) { border-left: 3px solid var(--warn); padding: 8px 10px; background: var(--warn-weak); color: var(--warn); border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.expression-history { margin-bottom: 12px; border-bottom: 1px solid var(--border); }
+.expression-history blockquote { margin: 8px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.expression-group h4 { margin: 12px 0 0; font-size: 13px; color: var(--label); }
+.expression-entry { padding: 10px 0; border-top: 1px solid var(--border); }
+.expression-entry p { margin: 0; color: var(--label-2); font-size: 12px; }
+#form-source .airesult-body { max-height: 55vh; }
 #form-plan { gap: 16px; }
 #form-plan h3 { font-size: 20px; }
 #form-plan textarea { width: 100%; min-width: 0; resize: vertical; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-panel); font: inherit; color: inherit; }

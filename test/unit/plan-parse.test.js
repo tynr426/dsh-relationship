@@ -166,3 +166,19 @@ test('活动词撞人名局部不误选：找一天一起晨跑 → 宁空不猜
   assert.equal(r.contactId, '');
   assert.equal(r.idea, '找一天一起晨跑');
 });
+
+// —— 星期/礼拜写法与 周X 同义：下周星期天 = 下周日 ——
+test('星期/礼拜写法日期识别：下周星期天聚一下 → 2026-10-04', () => {
+  assert.equal(P('下周星期天聚一下').date, '2026-10-04');
+  assert.equal(P('下礼拜三聚一下').date, '2026-09-30');
+  assert.equal(P('这星期五聚一下').date, '2026-09-25');
+  assert.equal(P('礼拜六聚一下').date, '2026-09-26');
+  assert.equal(P('星期一聚一下').date, '2026-09-28'); // 本周一已过，无前缀顺延下周一
+});
+
+test('下周星期天整段消费：下周星期天约小李吃饭 → 人+日期+约吃饭', () => {
+  const r = P('下周星期天约小李吃饭');
+  assert.equal(r.contactId, 'c1');
+  assert.equal(r.date, '2026-10-04');
+  assert.equal(r.idea, '约吃饭');
+});
